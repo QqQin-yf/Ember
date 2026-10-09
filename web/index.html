@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ember Test Chat</title>
+<style>
+  :root {
+    --bg: #f5f4f0; --panel: #ffffff; --border: #d9d6cc;
+    --text: #2c2c2a; --muted: #888780; --purple: #534AB7;
+    --purple-bg: #EEEDFE; --teal: #0F6E56; --teal-bg: #E1F5EE;
+    --red: #A32D2D; --red-bg: #FCEBEB; --amber-bg: #FAEEDA; --amber: #854F0B;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    background: var(--bg); color: var(--text); height: 100vh; display: flex; flex-direction: column;
+  }
+  header {
+    padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 10px;
+  }
+  header h1 { font-size: 15px; font-weight: 500; }
+  header .provider { font-size: 12px; color: var(--muted); }
+  header .sess { font-size: 12px; color: var(--purple); margin-left: auto; }
+  main { flex: 1; display: flex; min-height: 0; }
+  .chat-col { flex: 1; display: flex; flex-direction: column; border-right: 1px solid var(--border); min-width: 0; }
+  #messages { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+  .msg { max-width: 78%; padding: 8px 12px; border-radius: 12px; font-size: 13px; line-height: 1.6; white-space: pre-wrap; }
+  .msg.user { align-self: flex-end; background: var(--purple-bg); border: 1px solid var(--purple); }
+  .msg.assistant { align-self: flex-start; background: var(--panel); border: 1px solid var(--border); }
+  .msg .badge { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 6px; margin-top: 6px; }
+  .badge.created { background: var(--teal-bg); color: var(--teal); }
+  .badge.skipped { background: var(--bg); color: var(--muted); }
+  .badge.failed  { background: var(--red-bg); color: var(--red); }
+  .badge.tool { background: var(--purple-bg); color: var(--purple); }
+  .input-row { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--border); background: var(--panel); }
+  #input { flex: 1; padding: 9px 12px; border: 1px solid var(--border); border-radius: 8px; font-size: 13px; resize: none; font-family: inherit; }
+  #send { padding: 9px 20px; border: none; border-radius: 8px; background: var(--purple); color: #fff; font-size: 13px; cursor: pointer; }
+  #send:disabled { opacity: .5; cursor: default; }
+  .mem-col { width: 340px; display: flex; flex-direction: column; min-height: 0; }
+  .mem-col h2, .dbg h2 { font-size: 13px; font-weight: 500; padding: 10px 14px; border-bottom: 1px solid var(--border); color: var(--muted); }
+  #memory-panel { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+  .ev-card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; cursor: pointer; }
+  .ev-card:hover { border-color: var(--purple); }
+  .ev-card .eid { font-size: 12px; color: var(--purple); font-weight: 500; }
+  .ev-card .esum { font-size: 12px; margin-top: 4px; line-height: 1.5; }
+  .routes { margin-top: 6px; display: flex; flex-direction: column; gap: 3px; }
+  .route { font-size: 11px; padding: 2px 7px; border-radius: 6px; width: fit-content; }
+  .route.must { background: var(--teal-bg); color: var(--teal); }
+  .route.may  { background: var(--amber-bg); color: var(--amber); }
+  .dbg { height: 38%; border-top: 1px solid var(--border); display: flex; flex-direction: column; background: var(--panel); }
+  #debug { flex: 1; overflow-y: auto; padding: 10px 14px; font-family: Consolas, monospace; font-size: 11px; line-height: 1.7; color: var(--muted); white-space: pre-wrap; }
+  .recall-row { display: flex; gap: 8px; padding: 8px 14px; border-top: 1px solid var(--border); }
+  #recall-input { flex: 1; padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px; font-size: 12px; }
+  #recall-btn { padding: 6px 12px; border: 1px solid var(--purple); background: var(--purple-bg); color: var(--purple); border-radius: 6px; font-size: 12px; cursor: pointer; }
+  dialog { border: 1px solid var(--border); border-radius: 12px; padding: 0; max-width: 640px; width: 90%; }
+  dialog::backdrop { background: rgba(0,0,0,.25); }
+  .dlg-head { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--border); }
+  .dlg-head b { font-size: 14px; color: var(--purple); }
+  .dlg-head button { border: none; background: none; font-size: 16px; cursor: pointer; color: var(--muted); }
+  #dlg-body { padding: 14px 16px; overflow-y: auto; max-height: 60vh; font-size: 12px; line-height: 1.7; }
+  #dlg-body pre { background: var(--bg); padding: 10px; border-radius: 8px; overflow-x: auto; font-size: 11px; }
+  .kv { color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Ember Test Chat</h1>
+  <select id="model-select" style="font-size:12px;padding:3px 8px;border:1px solid var(--border);border-radius:6px;background:var(--panel);color:var(--text)">
+    <option value="glm-5.3-flash">glm-5.3-flash</option>
+    <option value="glm-4.7">glm-4.7</option>
+  </select>
+  <span class="provider" id="provider-note"></span>
+  <span class="sess" id="sess-note"></span>
+</header>
+<main>
+  <section class="chat-col">
+    <div id="messages"></div>
+    <div class="input-row">
+      <textarea id="input" rows="2" placeholder="说点什么……（若形成明确经历，Memory Writer 会自动写入 Event）"></textarea>
+      <button id="send">Send</button>
+    </div>
+  </section>
+  <aside class="mem-col">
+    <h2>Memory — Recent Events</h2>
+    <div id="memory-panel"></div>
+    <div class="dbg">
+      <h2>Debug</h2>
+      <div id="debug"></div>
+      <div class="recall-row">
+        <input id="recall-input" placeholder="手动测试 recall：输入一个 cue…">
+        <button id="recall-btn">Recall</button>
+      </div>
+    </div>
+  </aside>
+</main>
+
+<dialog id="dlg">
+  <div class="dlg-head"><b id="dlg-title"></b><button onclick="dlg.close()">✕</button></div>
+  <div id="dlg-body"></div>
+</dialog>
+
+<script src="/app.js"></script>
+</body>
+</html>

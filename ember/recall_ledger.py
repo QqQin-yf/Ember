@@ -1,0 +1,156 @@
+# -*- coding: utf-8 -*-
+"""Ember v3 — 召回记账（recall ledger，旁路层）。
+
+对齐（架构文档 §3.2，2026-10-08 定稿）：
+每次召回触发记一行，纯代码落盘。一份记录两处消费：
+1. Sleep 调用②候选组装：今晚 Event 的 turn_span 区间 ∩ 记账 turn
+   → 找到"白天被召回带出过的事件对"
+2. 旧 Cue 收紧判据：Cue 被用到的次数——次数多就留，没用上过就 retire
+同时是冷却机制的共用状态来源（冷却待做）。
+
+铁律：
+- 记账属于召回层运行时状态，append-only 落盘、可重建，绝不写回 Event 本体。
+- 记账不改变召回行为——它只观察，不做 gate。
+- relation 展开（修正者顶上）带出的 event 也记 route=relation，
+  来源列被顶上的被修正者 id。
+
+文件：recall_ledger.jsonl（append-only）。每行：
+{
+  "session_id": "...",     # ember 会话
+  "turn": N,               # ember 侧轮次序数（触发召回的那轮用户输入）
+  "route": "cue|entity|relation",
+  "cue": "命中的 cue 文本（route=cue 时）",
+  "entity_id": "命中的实体（route=entity 时）",
+  "direction": "聚焦的方向 id（聚焦时）",
+  "event_ids": [...],      # 本轮该通路带出的 event（去重后）
+  "via": "route=relation 时的被修正者 event_id",
+  "recorded_at": "ISO 时间"
+}
+"""
+from __future__ import annotations
+
+import json
+import os
+from datetime import datetime, timezone
+from typing import Any
+
+LEDGER_FILE = "recall_ledger.jsonl"
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+class RecallLedger:
+    """召回记账本：append-only jsonl，内存索引可重建。"""
+
+    def __init__(self, root: str):
+        self.root = root
+        # turn 索引：(session_id, turn) -> [entry]（候选组装按 turn 区间查）
+        self.by_turn: dict[tuple[str, int], list[dict[str, Any]]] = {}
+        # cue 使用计数：cue 文本 -> 命中次数（收紧判据）
+        self.cue_use_count: dict[str, int] = {}
+        # event 被召回计数：event_id -> 次数（观察用）
+        self.event_recall_count: dict[str, int] = {}
+        self._load()
+
+    def _path(self) -> str:
+        return os.path.join(self.root, LEDGER_FILE)
+
+    def _load(self) -> None:
+        p = self._path()
+        if not os.path.exists(p):
+            return
+        with open(p, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                self._index(d)
+
+    def _index(self, d: dict[str, Any]) -> None:
+        key = (d.get("session_id") or "", d.get("turn"))
+        if not isinstance(key[1], int):
+            return
+        self.by_turn.setdefault(key, []).append(d)
+        for eid in d.get("event_ids", []):
+            self.event_recall_count[eid] = self.event_recall_count.get(eid, 0) + 1
+        cue = d.get("cue")
+        if d.get("route") == "cue" and cue:
+            # 同一轮同一 cue 只算一次使用（多 event 共命中时该 cue 可能出现多行）
+            self.cue_use_count[cue] = self.cue_use_count.get(cue, 0) + 1
+
+    def record(self, session_id: str, turn: int, route: str,
+               event_ids: list[str],
+               cue: str | None = None,
+               entity_id: str | None = None,
+               direction: str | None = None,
+               via: str | None = None) -> dict[str, Any]:
+        """记一次召回。route ∈ cue / entity / relation。
+
+        event_ids 为空时仍记账——"跑了但没带出"对收紧判据同样有意义
+        （cue 被触碰却没命中任何 event，与从未被触碰是两回事）。
+        """
+        entry = {
+            "session_id": session_id,
+            "turn": turn,
+            "route": route,
+            "event_ids": list(dict.fromkeys(event_ids)),  # 去重保序
+            "recorded_at": _now_iso(),
+        }
+        if cue:
+            entry["cue"] = cue
+        if entity_id:
+            entry["entity_id"] = entity_id
+        if direction:
+            entry["direction"] = direction
+        if via:
+            entry["via"] = via
+        with open(self._path(), "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        self._index(entry)
+        return entry
+
+    def turns_of_event(self, event_id: str) -> list[tuple[str, int]]:
+        """某 event 曾在哪些 (session, turn) 被召回带出（候选组装用）。"""
+        out = []
+        for (sid, turn), entries in self.by_turn.items():
+            if any(eid == event_id
+                   for e in entries for eid in e.get("event_ids", [])):
+                out.append((sid, turn))
+        return out
+
+    def events_recalled_in_turns(self, turns: list[tuple[str, int]]
+                                 ) -> list[str]:
+        """给定 (session, turn) 集合，返回这些轮次里被带出的全部 event（候选组装用）。
+
+        session 为 None 时匹配任意 session（sleep 维护攒着的事件时，
+        事件写入分布在多个 session，按轮次号跨 session 找）。
+        """
+        seen: dict[str, None] = {}
+        want = {t for _, t in turns} if turns and turns[0][0] is None \
+            else set(turns)
+        for key, entries in self.by_turn.items():
+            if turns and turns[0][0] is None:
+                if key[1] not in want:
+                    continue
+            elif key not in turns:
+                continue
+            for e in entries:
+                for eid in e.get("event_ids", []):
+                    seen.setdefault(eid, None)
+        return list(seen)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "entries": sum(len(v) for v in self.by_turn.values()),
+            "distinct_turns": len(self.by_turn),
+            "top_cues": sorted(self.cue_use_count.items(),
+                               key=lambda kv: -kv[1])[:10],
+            "top_events": sorted(self.event_recall_count.items(),
+                                 key=lambda kv: -kv[1])[:10],
+        }

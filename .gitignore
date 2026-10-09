@@ -1,0 +1,14 @@
+# 密钥——绝不入库
+.env
+
+# Python 运行产物
+__pycache__/
+*.pyc
+
+# 日志与临时产物
+*.log
+*.err
+probe.txt
+test_out*.txt
+summary.txt
+_mount_llm_check.json

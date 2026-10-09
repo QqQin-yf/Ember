@@ -1,0 +1,139 @@
+# -*- coding: utf-8 -*-
+"""Ember v3 MVP — 核心数据模型。
+
+铁律（来自架构文档第 2 节）：
+Event 本身不保存 activation / brightness / current relevance /
+propagation weight / current rank / current importance。
+任何运行时状态不得写回 Event。
+
+第一阶段只实现 lexical matcher（semantic matcher 留待下一阶段）。
+
+momo 2026-10-01 00:02 裁决：取消 must/may 区分。
+RecallRoute 不再有 mode 字段；指向强度不提前硬编码，
+由运行时多 Cue 共命中聚合产生。
+"""
+from __future__ import annotations
+
+import itertools
+import uuid
+from dataclasses import dataclass, field, asdict
+from typing import Any
+
+# 禁止写进 Event 的运行时字段（架构文档 §2 + §11）
+FORBIDDEN_EVENT_FIELDS = {
+    "activation", "brightness", "current_relevance",
+    "propagation_weight", "current_rank", "current_importance",
+    "weight", "score",
+}
+
+ALLOWED_MATCHERS = {"lexical", "semantic"}
+ALLOWED_CUE_TYPES = {"lexical", "conceptual", "relational", "situational"}
+ALLOWED_ROUTE_STATUS = {"active", "retired"}
+
+_id_counter = itertools.count(1)
+
+
+def new_id(prefix: str) -> str:
+    return f"{prefix}_{uuid.uuid4().hex[:12]}"
+
+
+@dataclass
+class Event:
+    """一段实际发生过的经历。内容整体可见，不做事件内部维度裁剪。"""
+    event_id: str
+    version_id: str
+    # evidence —— 只保存事实来源
+    source_ref: str
+    raw_ref: str
+    event_time: str
+    ingest_time: str
+    turn_refs: list[str] = field(default_factory=list)
+    # content —— 完整内容
+    summary: str = ""
+    participants: list[str] = field(default_factory=list)
+    objects: list[str] = field(default_factory=list)
+    context: list[str] = field(default_factory=list)
+    # core —— LLM 对这段经历的第一人称连贯叙述（取代原 actions 列表）
+    core: str = ""
+    outcome: list[str] = field(default_factory=list)
+    state: list[str] = field(default_factory=list)
+    affect: list[str] = field(default_factory=list)
+    significance: str = ""
+    # change —— Event 本体字段，但写入时不必填；由 Sleep 在有足够历史上下文后补写
+    change: str = ""
+    details: list[str] = field(default_factory=list)
+    # provenance
+    provenance_refs: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "Event":
+        known = {f for f in cls.__dataclass_fields__}
+        unknown = set(d) - known
+        if unknown & FORBIDDEN_EVENT_FIELDS:
+            raise ValueError(
+                f"禁止把运行时字段写进 Event: {sorted(unknown & FORBIDDEN_EVENT_FIELDS)}")
+        return cls(**{k: v for k, v in d.items() if k in known})
+
+
+@dataclass
+class RecallRoute:
+    """Event 自己的记忆触点：什么东西出现时，这个 Event 应该被想起。
+
+    momo 2026-10-01 裁决：不再区分 must/may。
+    每个 cue 是"最小不可拆分的独立语义单元"，
+    指向强度由运行时多触点共命中聚合产生，不提前硬编码。
+    """
+    route_id: str
+    event_id: str
+    matcher: str                   # lexical / semantic —— 匹配方式（第一阶段仅 lexical）
+    cue_type: str                  # lexical / conceptual / relational / situational
+    cue: str                       # 线索本体
+    status: str = "active"         # active / retired
+    evidence_refs: list[str] = field(default_factory=list)
+    provenance_refs: list[str] = field(default_factory=list)
+
+    def __post_init__(self):
+        if self.matcher not in ALLOWED_MATCHERS:
+            raise ValueError(f"matcher 必须是 {ALLOWED_MATCHERS}，得到 {self.matcher!r}")
+        if self.cue_type not in ALLOWED_CUE_TYPES:
+            raise ValueError(f"cue_type 必须是 {ALLOWED_CUE_TYPES}，得到 {self.cue_type!r}")
+        if self.status not in ALLOWED_ROUTE_STATUS:
+            raise ValueError(f"status 必须是 {ALLOWED_ROUTE_STATUS}，得到 {self.status!r}")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "RecallRoute":
+        # 旧数据兼容：忽略已废弃的 mode 字段（momo 2026-10-01 取消 must/may）
+        d = {k: v for k, v in d.items() if k != "mode"}
+        return cls(**d)
+
+
+@dataclass
+class RouteHit:
+    """一次 lexical 命中的记录。"""
+    route_id: str
+    event_id: str
+    cue: str
+    matcher: str
+    cue_type: str
+
+
+@dataclass
+class RecallTrace:
+    """为什么想起 —— recall 过程的完整痕迹（一次性运行时对象，不写回 Event）。"""
+    input_text: str
+    anchors: list[RouteHit] = field(default_factory=list)
+
+
+@dataclass
+class PresentationContext:
+    """一次召回的呈现上下文。一次性对象，不写回 Event（架构文档 §10）。"""
+    recalled_events: list[str] = field(default_factory=list)
+    recall_trace: RecallTrace | None = None
+    current_cues: list[str] = field(default_factory=list)
+    source_refs: list[str] = field(default_factory=list)
