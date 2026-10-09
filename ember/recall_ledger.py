@@ -48,8 +48,11 @@ class RecallLedger:
         self.root = root
         # turn 索引：(session_id, turn) -> [entry]（候选组装按 turn 区间查）
         self.by_turn: dict[tuple[str, int], list[dict[str, Any]]] = {}
-        # cue 使用计数：cue 文本 -> 命中次数（收紧判据）
+        # cue 使用计数：cue 文本 -> 命中次数（观察/展示用）
         self.cue_use_count: dict[str, int] = {}
+        # 按 (event_id, cue) 的使用计数——收紧判据的精确口径：
+        # 只有 event_ids 里确实含该事件的行，才算这个事件被这个 cue 带出过
+        self.cue_use_by_event: dict[tuple[str, str], int] = {}
         # event 被召回计数：event_id -> 次数（观察用）
         self.event_recall_count: dict[str, int] = {}
         self._load()
@@ -83,6 +86,9 @@ class RecallLedger:
         if d.get("route") == "cue" and cue:
             # 同一轮同一 cue 只算一次使用（多 event 共命中时该 cue 可能出现多行）
             self.cue_use_count[cue] = self.cue_use_count.get(cue, 0) + 1
+            for eid in d.get("event_ids", []):
+                key = (eid, cue)
+                self.cue_use_by_event[key] = self.cue_use_by_event.get(key, 0) + 1
 
     def record(self, session_id: str, turn: int, route: str,
                event_ids: list[str],
@@ -114,6 +120,15 @@ class RecallLedger:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
         self._index(entry)
         return entry
+
+    def cue_use_count_for_event(self, event_id: str, cue: str) -> int:
+        """某事件名下某条 cue 被真正带出过该事件的次数（收紧判据口径）。
+
+        与 cue_use_count（按 cue 文本全局聚合）的区别：同文本 cue 挂在
+        多个事件上时，一次使用只计入 event_ids 里实际出现的事件——
+        避免时间差导致的"借别人的使用记录保住自己的 cue"。
+        """
+        return self.cue_use_by_event.get((event_id, cue), 0)
 
     def turns_of_event(self, event_id: str) -> list[tuple[str, int]]:
         """某 event 曾在哪些 (session, turn) 被召回带出（候选组装用）。"""

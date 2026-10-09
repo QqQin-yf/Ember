@@ -12,7 +12,7 @@
 | 判据（唯一）| Cue 被用到的次数——次数多就留，没用上过就 retire      |
 | 整组保护   | 事件名下 Cue 全部零次使用 → 整组不动（事件至少保留     |
 |            | 一个入口，不因全零而失去所有记忆触点）                 |
-| 依据数据   | 召回记账（recall_ledger，与冷却机制共用）              |
+| 依据数据   | 召回记账（recall_ledger，与冷却机制共用）；计数口径 = event_ids 含本事件且 cue 文本匹配的行（精确到事件，不按文本全局聚合） |
 
 收紧不是机械 decay，而是认知意义变了：项目完成后，当初一大把宽泛的
 Cue 收敛到少数几个可靠入口。动作只有 retire（status=retired），
@@ -155,7 +155,10 @@ class CueTightener:
                 continue
 
             # ---- 判据：按事件分组 ----
-            uses = [(r, self.ledger.cue_use_count.get(r.cue, 0)) for r in routes]
+            # 使用次数按精确口径：只数 event_ids 里确实含本事件的 cue 行
+            # （同文本 cue 挂多个事件时，不借别人的使用记录保自己）
+            uses = [(r, self.ledger.cue_use_count_for_event(eid, r.cue))
+                    for r in routes]
             if all(u <= self.min_uses for _, u in uses):
                 # 整组零次使用 → 整组不动（事件至少保留一个入口）
                 report["kept_zero_use_event"].append(

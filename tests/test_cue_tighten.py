@@ -160,6 +160,45 @@ def main():
         assert store2.get_route("RT-200b").status == "retired"
         print("落盘验证 ok（retired 持久化）")
 
+        # ---- 精确口径回归：时间差误保场景 ----
+        # EVT-300（散，满一周）两条 cue："共享词"（记账里那次只带出了
+        # EVT-100，从未带出 300）、"常用词"（带出过 300 两次）
+        # → 精确口径：共享词 retire、常用词保留
+        week2 = _iso(now - timedelta(days=8))
+        d300 = {"event_id": "EVT-300", "version_id": "v1",
+                "source_ref": "t", "raw_ref": "t",
+                "event_time": week2, "ingest_time": week2,
+                "turn_refs": [], "summary": "EVT-300", "core": "EVT-300"}
+        with open(os.path.join(root, "events.jsonl"), "a", encoding="utf-8") as f:
+            f.write(json.dumps(d300, ensure_ascii=False) + "\n")
+        store.write_event(Event(
+            event_id="EVT-300", version_id="v1", source_ref="t", raw_ref="t",
+            event_time=week2, ingest_time=week2, turn_refs=[],
+            summary="EVT-300", core="EVT-300"))
+        store.write_route(RecallRoute(route_id="RT-300a", event_id="EVT-300",
+                                      matcher="lexical", cue_type="lexical",
+                                      cue="共享词"))
+        store.write_route(RecallRoute(route_id="RT-300b", event_id="EVT-300",
+                                      matcher="lexical", cue_type="lexical",
+                                      cue="常用词"))
+        ledger.record("s1", 20, route="cue", event_ids=["EVT-300"],
+                      cue="常用词")
+        ledger.record("s1", 21, route="cue", event_ids=["EVT-300"],
+                      cue="常用词")
+        ledger.record("s1", 22, route="cue", event_ids=["EVT-100"],
+                      cue="共享词")
+
+        r3 = t.tighten(now=now)
+        retired300 = {(x["cue"], x["uses"]) for x in r3["retired"]
+                      if x["event_id"] == "EVT-300"}
+        # kept 行只有 route_id/cue/uses；本轮唯一进 kept 的就是"常用词"
+        kept300 = {(x["cue"], x["uses"]) for x in r3["kept"]}
+        assert ("常用词", 2) in kept300, (r3, kept300)
+        assert ("共享词", 0) in retired300, \
+            f"精确口径下共享词应 retire（300 从未被它带出）: {retired300}"
+        assert "共享词" not in kept300, kept300
+        print("精确口径回归 ok（同文本 cue 不借别人的使用记录）")
+
         print("\nA5+r3 全部通过")
 
 
