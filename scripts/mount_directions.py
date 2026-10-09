@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """Ember v3 — Direction 挂载作业（B2，架构文档 §5.2，2026-10-09 实现）。
 
-被谁调用：手工离线运行（python scripts/mount_directions.py --engine glm）。
+被谁调用：手工离线运行（python scripts/mount_directions.py --entity <id>）；
+engine 缺省从 executors.json 的 mount 项读（--engine 可单次覆盖）。
 独立离线作业，不属于 Sleep 流水线（§4.4/§5.2）。
 
 触发（§5.2）：Entity 下 Event 条数达阈值（DIRECTION_THRESHOLD=8，baseline）。
@@ -23,7 +24,6 @@ import argparse
 import json
 import os
 import sys
-import urllib.request
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE)
@@ -31,6 +31,7 @@ sys.path.insert(0, BASE)
 from ember.prompts import (  # noqa: E402
     MOUNT_SYSTEM_PROMPT, build_mount_user_prompt,
 )
+from ember import executors  # noqa: E402
 from ember.entity import EntityStore  # noqa: E402
 
 DATA = os.path.join(BASE, "data_real")
@@ -84,35 +85,9 @@ def rewrite_events(events: dict[str, dict], updates: dict[str, dict]) -> None:
 # ---------------------------------------------------------------------------
 
 def call_llm(system: str, user: str, engine: str) -> str:
-    if engine == "qwen3":
-        import subprocess
-        full = system + "\n\n" + user
-        r = subprocess.run(
-            ["docker", "exec", "-i", "ombre-ollama", "ollama", "run",
-             "qwen3:1.7b", "/no_think"],
-            input=full.encode("utf-8"),
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=600)
-        return r.stdout.decode("utf-8", errors="replace")
-    if engine == "glm":
-        api_key = os.environ.get("ZHIPU_API_KEY", "")
-        base = os.environ.get("EMBER_BASE_URL",
-                              "https://open.bigmodel.cn/api/paas/v4")
-        model = os.environ.get("EMBER_MOUNT_MODEL",
-                               os.environ.get("EMBER_SLEEP_MODEL", "glm-4.7"))
-        body = json.dumps({
-            "model": model,
-            "messages": [{"role": "system", "content": system},
-                         {"role": "user", "content": user}],
-            "temperature": 0.2,
-        }).encode("utf-8")
-        req = urllib.request.Request(
-            base.rstrip("/") + "/chat/completions", data=body,
-            headers={"Content-Type": "application/json",
-                     "Authorization": f"Bearer {api_key}"})
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        return data["choices"][0]["message"]["content"]
-    raise ValueError(f"未知 engine: {engine}")
+    """公共实现在 ember/executors.py（task=mount：EMBER_MOUNT_MODEL/
+    temperature 0.2/timeout 120）。保留本包装以兼容既有测试 monkeypatch。"""
+    return executors.call_llm(system, user, engine, task="mount")
 
 
 def extract_json(text: str) -> dict | None:
@@ -184,7 +159,8 @@ def validate(verdict: dict, valid_direction_ids: set[str]) -> list[str]:
 
 def main():
     ap = argparse.ArgumentParser(description="Direction 挂载作业（§5.2，B2）")
-    ap.add_argument("--engine", choices=["glm", "qwen3"], default="glm")
+    ap.add_argument("--engine", choices=["glm", "qwen3"], default=None,
+                    help="单次覆盖；缺省读 executors.json 的 mount 项")
     ap.add_argument("--entity", required=True,
                     help="目标 Entity 的 entity_id（如 ent_ember）")
     ap.add_argument("--event", default="",
@@ -192,6 +168,7 @@ def main():
     ap.add_argument("--dry-run", action="store_true",
                     help="只打印将挂载的事件清单，不调用 LLM 不落盘")
     args = ap.parse_args()
+    engine = executors.load_engine(BASE, "mount", args.engine)
 
     from ember.env import load_env
     load_env(os.path.dirname(DATA))
@@ -246,7 +223,7 @@ def main():
         raw = None
         for attempt in range(3):
             try:
-                raw = call_llm(MOUNT_SYSTEM_PROMPT, user, args.engine)
+                raw = call_llm(MOUNT_SYSTEM_PROMPT, user, engine)
                 break
             except Exception as ex:
                 print(f"  !! 第{attempt+1}次调用失败: {ex}", file=sys.stderr)

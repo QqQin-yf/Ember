@@ -15,6 +15,8 @@
      失败的不记 → 下次 sleep 自动续跑
   （Direction 划分/挂载不在此列：达阈值时打印提示，手动跑对应脚本）
 
+engine：缺省从 executors.json 的 judge 项读（--engine 单次覆盖）。
+
 失败语义（2026-10-09 定稿）：
   - 单 Event 裁决失败 → 该次结果丢弃、不记进度 → 下次 sleep 自动续跑；
   - 其他 Event 不受影响；
@@ -95,7 +97,8 @@ def pending_events(events: dict[str, dict], done: set[str],
 def main():
     ap = argparse.ArgumentParser(
         description="Sleep 入口：裁决攒着的 Event → 收紧（§4.2）")
-    ap.add_argument("--engine", choices=["glm", "qwen3"], default="glm")
+    ap.add_argument("--engine", choices=["glm", "qwen3"], default=None,
+                    help="单次覆盖；缺省读 executors.json 的 judge 项")
     ap.add_argument("--new", default="",
                     help="显式追加要裁决的 event_id（逗号分隔，即使已维护过）")
     ap.add_argument("--skip-tighten", action="store_true",
@@ -103,6 +106,8 @@ def main():
     ap.add_argument("--dry-run", action="store_true",
                     help="只列出待维护 Event，不调用 LLM 不落盘")
     args = ap.parse_args()
+    from ember import executors  # noqa: E402
+    engine = executors.load_engine(BASE, "judge", args.engine)
 
     from ember.env import load_env
     load_env(os.path.dirname(DATA))
@@ -142,7 +147,7 @@ def main():
         no_material = [e for e in pending
                        if e not in {m["new_id"] for m in materials}]
         for eid in no_material:
-            mark_progress(eid, args.engine, {"note": "无召回带出的旧事件，无可裁对象"})
+            mark_progress(eid, engine, {"note": "无召回带出的旧事件，无可裁对象"})
             judged.append({"new_event": eid, "skipped": "无可裁对象（散事件）"})
         materials = [m for m in materials if m["old_events"]]
 
@@ -154,7 +159,7 @@ def main():
             for attempt in range(3):
                 try:
                     raw = sleep_v2.call_llm(sleep_v2.JUDGE_SYSTEM_PROMPT,
-                                            user, args.engine)
+                                            user, engine)
                     break
                 except Exception as ex:
                     print(f"  !! 第{attempt+1}次调用失败: {ex}", file=sys.stderr)
@@ -176,7 +181,7 @@ def main():
                 continue
             state_up, event_up = {}, {}
             s = sleep_v2.apply_verdict(verdict, m, events, statuses, estore,
-                                       pairs, args.engine, state_up,
+                                       pairs, engine, state_up,
                                        event_up)
             for mid, up in event_up.items():
                 events[mid].update(up)
@@ -190,7 +195,7 @@ def main():
                 sleep_v2.rewrite_events(events, event_up)
                 events.update({eid: {**events.get(eid, {}), **up}
                                for eid, up in event_up.items()})
-            mark_progress(m["new_id"], args.engine, s)
+            mark_progress(m["new_id"], engine, s)
             judged.append(s)
 
     # ---------- 收紧（无数据依赖，照常执行） ----------
@@ -201,7 +206,7 @@ def main():
                          entity_store=estore)
         tighten = t.tighten()
 
-    report = {"engine": args.engine, "finished_at": _now_iso(),
+    report = {"engine": engine, "finished_at": _now_iso(),
               "judged": judged, "failed": failed, "tighten": tighten,
               "progress_done": len(load_progress())}
     print(json.dumps(report, ensure_ascii=False, indent=2))
@@ -214,7 +219,7 @@ def main():
             print(f"  {f['event_id']}  [{f['stage']}]  "
                   f"{json.dumps(f['error'], ensure_ascii=False)}", file=sys.stderr)
         ids = ",".join(f["event_id"] for f in failed)
-        print(f"  续跑命令：python scripts/sleep_run.py --engine {args.engine} "
+        print(f"  续跑命令：python scripts/sleep_run.py --engine {engine} "
               f"--new {ids}", file=sys.stderr)
 
 

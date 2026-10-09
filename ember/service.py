@@ -74,6 +74,8 @@ class MemoryWriteStatus:
     direction_focused: str | None = None   # Direction 聚焦命中的方向 id
     direction_reason: str | None = None    # clear / ambiguous / low_score / no_vectors / embed_failed
     summary_fallback: bool = False         # 是否走了 Entity 层 summary 回退
+    semantic_matched: int = 0              # 本轮 Cue 语义段命中的 route 数（§2.4 语义扩展）
+    semantic_reason: str | None = None     # ok / no_vectors / embed_failed / not_requested
 
     def merge(self, other: "MemoryWriteStatus") -> None:
         """合并一次工具调用的结果进本轮总状态。"""
@@ -112,6 +114,8 @@ class MemoryWriteStatus:
             "direction_focused": self.direction_focused,
             "direction_reason": self.direction_reason,
             "summary_fallback": self.summary_fallback,
+            "semantic_matched": self.semantic_matched,
+            "semantic_reason": self.semantic_reason,
         }
 
 
@@ -234,7 +238,12 @@ class EmberService:
         # 本地 recall：只看本轮用户输入，命中才注入
         memory = MemoryWriteStatus()
         memory.model = model
-        recalled_ctx = DirectRecall(self.store).recall(user_text)
+        direct_recaller = DirectRecall(self.store)
+        recalled_ctx = direct_recaller.recall(user_text)
+        memory.semantic_matched = sum(
+            1 for h in recalled_ctx.recall_trace.anchors
+            if h.matcher == "semantic")
+        memory.semantic_reason = direct_recaller.last_semantic_reason
 
         # Entity 通路（最小闭环 + Direction 聚焦，10-05 通电）：
         # 输入明确指向 Entity → 判断方向 → 聚焦该方向 / 或全区域+summary 回退
@@ -660,7 +669,7 @@ class EmberService:
             pass  # 记账是旁路观察层，绝不阻断主对话
 
     def recall(self, query: str) -> dict[str, Any]:
-        """lexical direct recall + Entity/Direction + presentation（观察用）。"""
+        """lexical + semantic direct recall + Entity/Direction + presentation（观察用）。"""
         direct = DirectRecall(self.store)
         ctx = direct.recall(query)
         entity_recaller = EntityRecall(

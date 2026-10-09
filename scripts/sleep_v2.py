@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """Ember v3 — Sleep 调用②（v2，架构文档 §4.2 新形态，2026-10-09 实现）。
 
-被谁调用：手工离线运行（python scripts/sleep_v2.py --engine glm）；
+被谁调用：手工离线运行（python scripts/sleep_v2.py）；
+engine 缺省从 executors.json 的 judge 项读（--engine 可单次覆盖）；
 将来由会话收尾触发端点串联（§8.1 待做第 5 条）。
 
 职责（§4.2）：
@@ -42,6 +43,7 @@ BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE)
 
 from ember.prompts import JUDGE_SYSTEM_PROMPT, build_judge_user_prompt  # noqa: E402
+from ember import executors  # noqa: E402
 from ember.pair_seen import PairSeenStore  # noqa: E402
 from ember.relation import EventRelation, RELATION_TYPES  # noqa: E402
 from ember.entity import Entity, EntityStore  # noqa: E402
@@ -192,37 +194,9 @@ def assemble_materials(new_event_ids: list[str], events: dict[str, dict],
 # ---------------------------------------------------------------------------
 
 def call_llm(system: str, user: str, engine: str) -> str:
-    """engine=glm：智谱 OpenAI-compatible API（环境变量配 key/base/model）。
-    engine=qwen3：docker exec 进 ombre-ollama（本地兜底）。"""
-    if engine == "qwen3":
-        import subprocess
-        full = system + "\n\n" + user
-        r = subprocess.run(
-            ["docker", "exec", "-i", "ombre-ollama", "ollama", "run",
-             "qwen3:1.7b", "/no_think"],
-            input=full.encode("utf-8"),
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=600)
-        return r.stdout.decode("utf-8", errors="replace")
-    if engine == "glm":
-        import urllib.request
-        api_key = os.environ.get("ZHIPU_API_KEY", "")
-        base = os.environ.get("EMBER_BASE_URL",
-                              "https://open.bigmodel.cn/api/paas/v4")
-        model = os.environ.get("EMBER_SLEEP_MODEL", "glm-4.7")
-        body = json.dumps({
-            "model": model,
-            "messages": [{"role": "system", "content": system},
-                         {"role": "user", "content": user}],
-            "temperature": 0.2,
-        }).encode("utf-8")
-        req = urllib.request.Request(
-            base.rstrip("/") + "/chat/completions", data=body,
-            headers={"Content-Type": "application/json",
-                     "Authorization": f"Bearer {api_key}"})
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        return data["choices"][0]["message"]["content"]
-    raise ValueError(f"未知 engine: {engine}")
+    """公共实现在 ember/executors.py（task=judge：EMBER_SLEEP_MODEL/
+    temperature 0.2/timeout 120）。保留本包装以兼容既有测试 monkeypatch。"""
+    return executors.call_llm(system, user, engine, task="judge")
 
 
 def extract_json(text: str) -> dict | None:
@@ -476,7 +450,8 @@ def apply_verdict(verdict: dict, material: dict, events: dict[str, dict],
 
 def main():
     ap = argparse.ArgumentParser(description="Sleep 调用②（v2，§4.2）")
-    ap.add_argument("--engine", choices=["glm", "qwen3"], default="glm")
+    ap.add_argument("--engine", choices=["glm", "qwen3"], default=None,
+                    help="单次覆盖；缺省读 executors.json 的 judge 项")
     ap.add_argument("--new", default="",
                     help="今晚新 Event 的 event_id（逗号分隔）；缺省=取 events.jsonl 末尾 N 条")
     ap.add_argument("--recent", type=int, default=1,
@@ -484,6 +459,7 @@ def main():
     ap.add_argument("--dry-run", action="store_true",
                     help="只组装材料打印，不调用 LLM 不落盘")
     args = ap.parse_args()
+    engine = executors.load_engine(BASE, "judge", args.engine)
 
     from ember.env import load_env
     load_env(os.path.dirname(DATA))
@@ -522,7 +498,7 @@ def main():
         raw = None
         for attempt in range(3):
             try:
-                raw = call_llm(JUDGE_SYSTEM_PROMPT, user, args.engine)
+                raw = call_llm(JUDGE_SYSTEM_PROMPT, user, engine)
                 break
             except Exception as ex:
                 print(f"  !! 第{attempt+1}次调用失败: {ex}", file=sys.stderr)
@@ -539,7 +515,7 @@ def main():
             continue
         # events 内存态同步（member 回填后同批后续校验能看到）
         summary = apply_verdict(verdict, m, events, statuses, estore,
-                                pairs, args.engine, state_updates, event_updates)
+                                pairs, engine, state_updates, event_updates)
         for mid, up in event_updates.items():
             events[mid].update(up)
             all_event_updates.setdefault(mid, {}).update(up)

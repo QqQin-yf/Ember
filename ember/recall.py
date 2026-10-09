@@ -21,6 +21,7 @@ from .models import Event, PresentationContext, RecallTrace, RouteHit
 from .store import EmberStore
 from .entity import EntityStore
 from .direction import DirectionMatcher
+from .cue_semantic import CueVectorStore, semantic_hits
 
 
 @dataclass
@@ -186,10 +187,28 @@ def event_direction_refs(event_id: str) -> list[str]:
 
 
 class DirectRecall:
-    """第一层召回：查 lexical Recall Route 索引，不需要 LLM。"""
+    """第一层召回：查 lexical Recall Route 索引 + Cue 语义扩展。
 
-    def __init__(self, store: EmberStore):
+    管线（§2.4 匹配方式统一为 semantic，momo 2026-10-09 A 方案）：
+    a) 词面 pass：分词 token exact lookup + 整句子串匹配（原行为）；
+    b) 语义 pass：对词面未命中的 active lexical routes 做向量检查
+       （cosine ≥ CUE_SEMANTIC_FLOOR 即命中，matcher 记 semantic）；
+       embedding 失败/无向量 → 本轮降级纯词面（不引入新行为）。
+    词面命中与语义命中可共存，聚合/multi_cue 一视同仁。
+    """
+
+    def __init__(self, store: EmberStore,
+                 cue_vectors: CueVectorStore | None = None,
+                 embed_fn=None):
         self.store = store
+        # 语义段可选注入：缺省在 store.root 下找 cue_vectors.jsonl；
+        # 未传且文件不存在 → 永远 no_vectors，行为退化为纯词面（原行为）
+        self.cue_vectors = cue_vectors or CueVectorStore(
+            getattr(store, "root", ""))
+        self.embed_fn = embed_fn
+        # 最近一次语义段结果（观察/记账用）：semantic_reason
+        #   ok / no_vectors / embed_failed / not_requested（词面全库命中为空时无候选）
+        self.last_semantic_reason = "not_requested"
 
     def _extract_cues(self, input_text: str) -> list[str]:
         """第一阶段 cue 提取：按空白/标点切词 + 整句短语匹配。
@@ -228,6 +247,29 @@ class DirectRecall:
                 matcher=route.matcher,
                 cue_type=route.cue_type,
             ))
+
+        # 语义 pass（§2.4）：对词面未命中的 active lexical routes 做向量检查。
+        # embedding 失败 → 本轮降级纯词面（reason=embed_failed）；
+        # 向量库为空（未重建过）→ no_vectors，行为=纯词面。
+        self.last_semantic_reason = "not_requested"
+        lexical_hit_ids = {h.route_id for h in hits}
+        sem_candidates = [
+            r for r in self.store.all_routes()
+            if r.status == "active" and r.matcher == "lexical"
+            and r.route_id not in lexical_hit_ids]
+        if sem_candidates:
+            sem_routes, reason = semantic_hits(
+                input_text, sem_candidates, self.cue_vectors,
+                embed_fn=self.embed_fn)
+            self.last_semantic_reason = reason
+            for route in sem_routes:
+                hits.append(RouteHit(
+                    route_id=route.route_id,
+                    event_id=route.event_id,
+                    cue=route.cue,
+                    matcher="semantic",
+                    cue_type=route.cue_type,
+                ))
 
         # 运行时聚合（momo 裁决）：触发点相同的命中相邻，
         # 便于后续按 Event 聚合统计 multi_cue
