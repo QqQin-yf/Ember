@@ -544,11 +544,12 @@ tight = t.tighten()
 #  - 其余实体 open → 豁免
 #  → 本轮 retired 应为空，salience/FragmentSource 都不收
 assert tight["retired"] == [], tight["retired"]
-fs_skip = [s for s in tight["skipped"] if s["entity_id"] == "ent_fs"]
+# 新报告结构按事件粒度：N1（属 ent_fs，attach 重置起算点）静置不足豁免
+fs_skip = [s for s in tight["skipped"] if s["event_id"] == n1]
 assert fs_skip and "静置" in fs_skip[0]["reason"], tight["skipped"]
-print("[3] 断言过：attach 重置起算点 → ent_fs 静置不足豁免（本轮零 retire）")
+print("[3] 断言过：attach 重置起算点 → N1（ent_fs 名下）静置不足豁免（本轮零 retire）")
 print(f"[3] tighten 报告：retired={tight['retired']} "
-      f"skipped={[(s['entity_id'], s['reason']) for s in tight['skipped']]}")
+      f"skipped={[(s['event_id'], s['reason']) for s in tight['skipped']]}")
 
 # ===========================================================================
 # 幂等：重跑组装为空（N5 无出处天然排除；N1-N4 留痕排除）

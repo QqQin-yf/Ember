@@ -1,15 +1,18 @@
 # -*- coding: utf-8 -*-
 """Ember v3 — 旧 Cue 收紧（Sleep 调用②第三步，纯代码无 LLM）。
 
-对齐（架构文档 §4.2 第三步，2026-10-08 定稿）：
+对齐（架构文档 §4.2 第三步，2026-10-09 定稿）：
 
-| 项         | 定稿                                              |
-|------------|---------------------------------------------------|
-| 时间条件   | 事件静置最多一周                                  |
-| 活跃豁免   | Entity open 期间，其下任何 Event 的 Cue 都不收    |
-| 起算点     | Entity 被 close 的时刻（closed_at）               |
-| 判据（唯一）| Cue 被用到的次数——次数多就留，没用上过就 retire |
-| 依据数据   | 召回记账（recall_ledger，与冷却机制共用）         |
+| 项         | 定稿                                                   |
+|------------|--------------------------------------------------------|
+| 时间条件   | 事件静置满一周                                         |
+| 活跃豁免   | Entity open 期间，其下任何 Event 的 Cue 都不收         |
+| 起算点     | 有 Entity 的事件：Entity 被 close 的时刻（closed_at）；|
+|            | 散事件（无 entity_refs）：事件写入时刻（ingest_time）  |
+| 判据（唯一）| Cue 被用到的次数——次数多就留，没用上过就 retire      |
+| 整组保护   | 事件名下 Cue 全部零次使用 → 整组不动（事件至少保留     |
+|            | 一个入口，不因全零而失去所有记忆触点）                 |
+| 依据数据   | 召回记账（recall_ledger，与冷却机制共用）              |
 
 收紧不是机械 decay，而是认知意义变了：项目完成后，当初一大把宽泛的
 Cue 收敛到少数几个可靠入口。动作只有 retire（status=retired），
@@ -46,10 +49,11 @@ def _now() -> datetime:
 
 
 class CueTightener:
-    """旧 Cue 收紧：读 Entity 生命周期 + 召回记账，retire 不再需要的 Cue。
+    """旧 Cue 收紧：读 Event 归属/生命周期 + 召回记账，按事件分组判定。
 
     Event↔Entity 归属读 events.jsonl 侧表字段 entity_refs（与
     recall.register_event_entity_refs 同源，独立读避免依赖其全局态）。
+    判定粒度 = 事件：每个事件独立确定起算点与整组保护。
     """
 
     def __init__(self, store, ledger, events_path: str,
@@ -68,9 +72,9 @@ class CueTightener:
 
     # ---------- 数据装载 ----------
 
-    def _event_entity_map(self) -> dict[str, list[str]]:
-        """event_id -> [entity_id, ...]（events.jsonl 侧表）。"""
-        out: dict[str, list[str]] = {}
+    def _load_events_info(self) -> dict[str, dict]:
+        """event_id -> {refs: [entity_id], ingest_time: str}（events.jsonl）。"""
+        out: dict[str, dict] = {}
         if not os.path.exists(self.events_path):
             return out
         with open(self.events_path, encoding="utf-8") as f:
@@ -82,73 +86,89 @@ class CueTightener:
                     d = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                refs = d.get("entity_refs")
-                if refs:
-                    out[d["event_id"]] = list(refs)
+                out[d["event_id"]] = {
+                    "refs": list(d.get("entity_refs") or []),
+                    "ingest_time": d.get("ingest_time") or "",
+                }
         return out
 
     # ---------- 主流程 ----------
 
     def tighten(self, now: datetime | None = None) -> dict[str, Any]:
-        """跑一遍收紧，返回报告（不落盘报告本身，retire 动作由 store 落盘）。"""
+        """跑一遍收紧，返回报告（retire 动作由 store 落盘）。
+
+        报告结构（全部按事件粒度）：
+          checked_events        检查的事件数
+          skipped               [{event_id, reason}]——open 豁免 / 静置不足 /
+                                ingest_time 或 closed_at 不可解析
+          retired               [{route_id, cue, event_id, uses}]
+          kept                  [{route_id, cue, uses}]
+          kept_zero_use_event   [{event_id, cue_count}]——整组零次使用，
+                                本轮不动（保底：事件至少留一个入口）
+        """
         now = now or _now()
-        ent_map = self._event_entity_map()
-        report: dict[str, Any] = {"checked_entities": 0, "skipped": [],
-                                  "tightened": [], "retired": [],
-                                  "kept": []}
+        events_info = self._load_events_info()
+        report: dict[str, Any] = {"checked_events": 0, "skipped": [],
+                                  "retired": [], "kept": [],
+                                  "kept_zero_use_event": []}
 
-        for entity in self.entity_store.all():
-            report["checked_entities"] += 1
+        for eid, info in events_info.items():
+            report["checked_events"] += 1
+            refs = info["refs"]
+            routes = [r for r in self.store.routes_for_event(eid)
+                      if r.status == "active"]
+            if not routes:
+                continue   # 无 active cue，无事可做
 
-            # 活跃豁免：Entity open 期间其下任何 Cue 都不收
-            if entity.status == "open":
-                report["skipped"].append(
-                    {"entity_id": entity.entity_id, "reason": "open"})
-                continue
+            # ---- 起算点：两套 ----
+            if refs:
+                # 有 Entity 归属：open 豁免；closed 以 closed_at 起算
+                try:
+                    ent = self.entity_store.get(refs[0])
+                except KeyError:
+                    report["skipped"].append(
+                        {"event_id": eid,
+                         "reason": f"归属的 Entity 不存在: {refs[0]}"})
+                    continue
+                if ent.status == "open":
+                    report["skipped"].append(
+                        {"event_id": eid, "reason": "open（Entity 活跃豁免）"})
+                    continue
+                anchor = _parse_iso(ent.closed_at)
+                if anchor is None:
+                    report["skipped"].append(
+                        {"event_id": eid, "reason": "closed_at 缺失或不可解析"})
+                    continue
+            else:
+                # 散事件：以写入时刻起算
+                anchor = _parse_iso(info["ingest_time"])
+                if anchor is None:
+                    report["skipped"].append(
+                        {"event_id": eid, "reason": "ingest_time 缺失或不可解析"})
+                    continue
 
-            # 时间条件：起算点 = closed_at，静置不足一周不收
-            closed_at = _parse_iso(entity.closed_at)
-            if closed_at is None:
-                report["skipped"].append(
-                    {"entity_id": entity.entity_id,
-                     "reason": "closed_at 缺失或不可解析"})
-                continue
-            idle = (now - closed_at).total_seconds() / 86400.0
+            idle = (now - anchor).total_seconds() / 86400.0
             if idle < self.idle_days:
                 report["skipped"].append(
-                    {"entity_id": entity.entity_id,
+                    {"event_id": eid,
                      "reason": f"静置 {idle:.1f} 天 < {self.idle_days}"})
                 continue
 
-            # 该 Entity 名下全部 active route
-            entity_routes = []
-            for ev_id, refs in ent_map.items():
-                if entity.entity_id not in refs:
-                    continue
-                entity_routes.extend(self.store.routes_for_event(ev_id))
-
-            retired_here: list[dict[str, str]] = []
-            for route in entity_routes:
-                if route.status != "active":
-                    continue
-                # 判据（唯一）：Cue 被用到的次数（读召回记账）
-                uses = self.ledger.cue_use_count.get(route.cue, 0)
-                if uses <= self.min_uses:
-                    self.store.retire_route(route.route_id)
-                    retired_here.append(
-                        {"route_id": route.route_id, "cue": route.cue,
-                         "event_id": route.event_id, "uses": uses})
-                    report["retired"].append(retired_here[-1])
+            # ---- 判据：按事件分组 ----
+            uses = [(r, self.ledger.cue_use_count.get(r.cue, 0)) for r in routes]
+            if all(u <= self.min_uses for _, u in uses):
+                # 整组零次使用 → 整组不动（事件至少保留一个入口）
+                report["kept_zero_use_event"].append(
+                    {"event_id": eid, "cue_count": len(routes)})
+                continue
+            for r, u in uses:
+                if u <= self.min_uses:
+                    self.store.retire_route(r.route_id)
+                    report["retired"].append(
+                        {"route_id": r.route_id, "cue": r.cue,
+                         "event_id": eid, "uses": u})
                 else:
                     report["kept"].append(
-                        {"route_id": route.route_id, "cue": route.cue,
-                         "uses": uses})
-
-            if retired_here:
-                report["tightened"].append(
-                    {"entity_id": entity.entity_id,
-                     "closed_at": entity.closed_at,
-                     "idle_days": round(idle, 1),
-                     "retired_count": len(retired_here)})
+                        {"route_id": r.route_id, "cue": r.cue, "uses": u})
 
         return report
