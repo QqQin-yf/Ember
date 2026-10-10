@@ -93,7 +93,7 @@ try:
     spans2 = TurnSpanStore(root)
     check("重载后 span 仍在", spans2.span_of("EVT-001-aaaaaa") == [(3, 8)])
 
-    # ---------- 3. fragment_source ----------
+    # ---------- 3. dream 选材（v3：fragment_source/Fragment 协议已废除） ----------
     from ember.store import EmberStore  # noqa: E402
     from ember.service import EmberService  # noqa: E402
 
@@ -105,28 +105,27 @@ try:
             raise RuntimeError("test does not call LLM")
 
     svc = EmberService(store, _FakeClient(), model="test")
-    frags = svc.fragment_source(limit=3)
-    check("fragment_source 产出片段", len(frags) == 3)
-    f0 = frags[0]
-    check("片段带 text（core/summary）", bool(f0["text"]))
-    check("片段带 turn_span", "turn_span" in f0
-          and "ember_spans" in f0["turn_span"]
-          and isinstance(f0["turn_span"]["ember_spans"], list))
-    check("片段不带感受字段（铁律）",
-          not any(k in f0 for k in ("salience", "affect_snapshot", "origin_snapshot")))
-    check("粗锚点降级在真实数据上生效",
-          bool(f0["turn_span"]["ember_spans"])
-          and f0["turn_span"]["ember_spans"][0][0] >= 1)
-
-    # 指定 event_ids 查询
-    eid = store.all_events()[0].event_id
-    frags2 = svc.fragment_source(event_ids=[eid])
-    check("指定 id 查询", len(frags2) == 1 and frags2[0]["event_id"] == eid)
+    sel = svc.dream_material_preview()
+    check("dream 选材产出结构完整",
+          all(k in sel for k in ("events", "pushed_ids", "skipped",
+                                 "associated_ids", "random_id")))
+    for e in sel["events"]:
+        check("材料事件仅 text+turn_span 两字段（v3 契约）",
+              set(e) == {"text", "turn_span"}
+              and isinstance(e["turn_span"], list)
+              and len(e["turn_span"]) == 2
+              and e["turn_span"][0].startswith("t-")
+              and e["turn_span"][1].startswith("t-"), str(e))
+    check("材料不带感受字段（铁律）",
+          not any(k in json.dumps(sel) for k in
+                  ("salience", "affect_snapshot", "origin_snapshot")))
 
     # ---------- 4. 铁律：Event 本体零改动 ----------
+    eid = store.all_events()[0].event_id
     ev_dict = store.get_event(eid).to_dict()
     check("Event 本体无 heart 派生字段",
-          not any(k in ev_dict for k in ("heart_turn_id", "turn_span", "turn_start")))
+          not any(k in ev_dict for k in ("heart_turn_id", "turn_span",
+                                         "turn_start", "dreamed")))
 finally:
     shutil.rmtree(root, ignore_errors=True)
 

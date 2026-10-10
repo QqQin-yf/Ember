@@ -6,6 +6,8 @@
 - GET  /v1/ember/events       已保存 Events 列表
 - GET  /v1/ember/events/<id>  完整 Event + Routes（只读）
 - POST /v1/ember/recall       手动触发 lexical recall（观察用）
+- POST /v1/ember/dream/push   heart 梦通道 v3：选材+批量推送一夜（2026-10-10 契约）
+- GET  /v1/ember/dream_preview / dream_ledger   梦选材预览 / 夜账本观察
 
 API Key 只存在于 Proxy（服务端），浏览器永不接触。
 """
@@ -110,8 +112,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, SERVICE.turn_span_status())
         if path == "/v1/ember/recall_ledger":
             return self._json(200, SERVICE.recall_ledger_status())
-        if path == "/v1/ember/fragments":
-            return self._json(200, {"fragments": SERVICE.fragment_source()})
+        if path == "/v1/ember/dream_ledger":
+            return self._json(200, SERVICE.dream_ledger_status())
+        if path == "/v1/ember/dream_preview":
+            return self._json(200, SERVICE.dream_material_preview())
         return self._json(404, {"error": "not found"})
 
     def _serve_file(self, name: str, ctype: str) -> None:
@@ -150,6 +154,14 @@ class Handler(BaseHTTPRequestHandler):
             if msgs is None:
                 return self._json(404, {"error": f"session not found: {sid}"})
             return self._json(200, {"session_id": sid, "messages": msgs})
+        if path == "/v1/ember/dream/push":
+            # heart 梦通道 v3（2026-10-10 契约）：前端点完入睡按钮后调用。
+            # Ember 选材 → 一次性批量推送 → 收 dream_id 即收工；
+            # 失败（重试耗尽/heart 拒收）返回 502，统一诊断出口在调用方。
+            try:
+                return self._json(200, SERVICE.push_dream_night())
+            except Exception as ex:
+                return self._json(502, {"error": str(ex)[:400]})
         return self._json(404, {"error": "not found"})
 
 

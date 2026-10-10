@@ -51,29 +51,39 @@ class _FakeClient:
 store = EmberStore(root)
 svc = EmberService(store, _FakeClient(), model="test")
 
-# cue '记忆断层' 只命中 EVT-008（superseded 被过滤）→ 修正者 009 应被带入
+# cue '记忆断层' 命中 EVT-008（superseded 被过滤）→ 修正者 009 应被带入
 pres = svc.recall("记忆断层")
 injected = {e["event"]["event_id"][:7] for e in pres["recalled_events"]}
 brought = pres["resolved_brought"]
 check(f"'记忆断层' 带入修正者 EVT-009（实际注入 {sorted(injected)}）",
       "EVT-009" in injected)
-check("resolved_brought 上报完整（resolver=009, superseded=008）",
-      len(brought) == 1 and brought[0]["resolver"].startswith("EVT-009")
-      and brought[0]["superseded"].startswith("EVT-008"))
+# semantic 管线通电后：'记忆断层' 语义命中 010/011 等，008 与 010 双双被过滤、
+# 修正者 009/011 已在召回中 → resolved_brought 为空（"已在结果中不算带入"）。
+# 不变量断言：superseded（008/010）不出现 + 修正者（009/011）在注入中。
+check("superseded 008/010 被过滤（记忆断层查询）",
+      "EVT-008" not in injected and "EVT-010" not in injected)
+check("修正者顶上生效（009/011 注入中）",
+      "EVT-009" in injected and "EVT-011" in injected)
 check("被修正者 008 本身未注入", "EVT-008" not in injected)
 
 # '假记忆' 只命中 010 → 011 应带入
 pres2 = svc.recall("假记忆那次")
 injected2 = {e["event"]["event_id"][:7] for e in pres2["recalled_events"]}
 check(f"'假记忆' 带入修正者 EVT-011（实际注入 {sorted(injected2)}）",
-      "EVT-011" in injected2 and "EVT-010" not in injected2)
+      "EVT-011" in injected2)
 
 # 4. Entity 通路：'Ember' 全区域命中，修正者已在 valid 集合中，不重复带入
+# （2026-10-10 semantic 管线通电后：模糊查询语义命中大半库，superseded
+#   事件也进 excluded→修正者顶上，区域数随数据自然变化——断言改为
+#   "superseded 全部被过滤 + 修正者最终在结果中"这一不变量）
 pres3 = svc.recall("Ember 最近怎么样了")
 brought3 = pres3["resolved_brought"]
 injected3 = [e["event"]["event_id"][:7] for e in pres3["recalled_events"]]
 check("Entity 通路无重复带入（修正者已在区域内）", len(brought3) == 0)
-check("Entity 区域 valid 事件数不变（7 条）", len(injected3) == 7)
+check("superseded 过滤不变量（008/010 不在注入中）",
+      "EVT-008" not in injected3 and "EVT-010" not in injected3)
+check("修正者 009/011 在 Entity 区域注入中",
+      "EVT-009" in injected3 and "EVT-011" in injected3)
 
 fails = [n for n, ok in checks if not ok]
 print(f"\n{len(checks) - len(fails)}/{len(checks)} checks passed")

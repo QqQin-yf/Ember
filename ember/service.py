@@ -34,6 +34,8 @@ from .turn_ledger import TurnLedger
 from .recall_ledger import RecallLedger
 from .turn_span import TurnSpanStore, spans_from_quotes
 from .transcript import TranscriptStore
+from .dream_ledger import DreamLedger
+from .dream_source import DreamSource
 from .writer import (
     TOOL_NAME,
     READ_SOURCE_TOOL_NAME,
@@ -208,6 +210,12 @@ class EmberService:
         # 会话原文存档（r4 第 1 项）：每轮成功后落盘 user/assistant 原文；
         # 重启恢复计数与 read_memory_source 的数据来源
         self.transcripts = TranscriptStore(getattr(store, "root", ""))
+        # heart 梦通道 v3（2026-10-10 契约定稿）：选材器 + 夜账本，均旁路。
+        # DreamSource 需要 source_session 属性——Event 上动态补（见下）
+        self.dream_ledger = DreamLedger(getattr(store, "root", ""))
+        self.dream_source = DreamSource(
+            self.store, self.turn_spans, self.turn_ledger,
+            self.dream_ledger, self.relation_store)
 
     # ---------- session ----------
 
@@ -940,34 +948,50 @@ class EmberService:
             for e in self.store.all_events()
         ]
 
-    # ---------- heart 联动（10-06） ----------
+    # ---------- heart 联动 ----------
 
-    def fragment_source(self, limit: int = 20,
-                        event_ids: list[str] | None = None) -> list[dict[str, Any]]:
-        """FragmentSource 协议的最小实现：只产出出处，感受指纹 heart 现算。
+    def dream_material_preview(self) -> dict[str, Any]:
+        """选一夜梦材料但不推送（观察/联调用）：选材结果 + 跳过明细。"""
+        return self.dream_source.select()
 
-        片段格式（heart 2026-10-06 改版）：
-        - text: core + summary 拼接（heart 不需要懂 Event schema）
-        - turn_span: ember 侧覆盖区间（已回填用精确值，未回填降级粗锚点）
-        - salience 等：不带——heart 按 turn_span 查自己的 echo_digest
+    def push_dream_night(self, pusher=None) -> dict[str, Any]:
+        """一夜的完整编排（heart v3，2026-10-10 契约）：
+
+        选材（DreamSource）→ 一次性批量推送（DreamPusher，重试≤3）
+        → 收 dream_id 即收工 → 夜账本留痕。
+
+        无梦之夜照推空数组（heart 返回 dream_id=null，健康状态）。
+        heart 拒收/不可达 → DreamPushError 上抛（统一诊断出口在调用方），
+        账本记 status=failed（材料没进殿堂，旧事仍可再挑）。
+        pusher 参数供测试注入 fake；生产从 .env 配置构造。
         """
-        events = ([self.store.get_event(eid) for eid in event_ids
-                   if eid in self.store._events]
-                  if event_ids else self.store.all_events())
-        out = []
-        for ev in events:
-            spans = self.turn_spans.span_of_event(ev)
-            # Fragment 协议（heart 2026-10-06）：区间列表，允许断开；
-            # 未知出处为空列表
-            out.append({
-                "event_id": ev.event_id,
-                "text": (ev.core or ev.summary),
-                "summary": ev.summary,
-                "turn_span": {"ember_spans": [list(p) for p in spans]},
-                "source_ref": ev.source_ref,
-                "raw_ref": ev.raw_ref,
-            })
-        return out[:limit]
+        if pusher is None:
+            from .dream_push import DreamPusher
+            pusher = DreamPusher()
+        sel = self.dream_source.select()
+        try:
+            result = pusher.push_night(sel["events"])
+        except Exception as ex:
+            self.dream_ledger.record_night(
+                event_ids=sel["pushed_ids"], dream_id=None,
+                skipped=sel["skipped"], status="failed")
+            raise
+        self.dream_ledger.record_night(
+            event_ids=sel["pushed_ids"], dream_id=result.get("dream_id"),
+            skipped=sel["skipped"], status="ok")
+        return {
+            "ok": True,
+            "dream_id": result.get("dream_id"),
+            "pushed_count": len(sel["events"]),
+            "pushed_ids": sel["pushed_ids"],
+            "associated_ids": sel["associated_ids"],
+            "random_id": sel["random_id"],
+            "skipped": sel["skipped"],
+        }
+
+    def dream_ledger_status(self) -> dict[str, Any]:
+        """夜账本观察（夜数/入梦事件数），排障与回溯用。"""
+        return self.dream_ledger.to_dict()
 
     def turn_ledger_status(self) -> dict[str, Any]:
         """映射账本观察（含发号连续性缺口——重新生成/重发的排查料）。"""
