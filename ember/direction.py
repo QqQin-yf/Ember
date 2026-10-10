@@ -33,9 +33,10 @@ load_env(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 DIRECTION_VECTORS_FILE = "direction_vectors.jsonl"
 
-# baseline 阈值（exp_direction_match.py 取数；不是已证明设计）
-TOP1_FLOOR = 0.47
-MARGIN_FLOOR = 0.08
+# baseline 阈值（exp_direction_match_v2.py 取数，Qwen3-Embedding-8B，
+# 2026-10-10；不是已证明设计。换模型或方向增多需重新取数）
+TOP1_FLOOR = 0.30
+MARGIN_FLOOR = 0.04
 
 
 def embed_text(text: str, timeout: int = 30) -> list[float]:
