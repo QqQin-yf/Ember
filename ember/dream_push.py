@@ -79,6 +79,14 @@ class DreamPusher:
                     if isinstance(raw, bytes):
                         raw = raw.decode("utf-8", errors="replace")
                     detail = str(raw or "")[:300]
+                    # heart 错误响应统一为 {"error": "<原因>"}（回执 r1 §3.2：
+                    # 400/401/404 全部单层 error 字段）——提取出原因文本展示
+                    try:
+                        parsed = json.loads(detail)
+                        if isinstance(parsed, dict) and parsed.get("error"):
+                            detail = str(parsed["error"])[:300]
+                    except (json.JSONDecodeError, ValueError):
+                        pass  # 非 JSON body，原文照示
                 except Exception:
                     pass
                 if ex.code == 429:

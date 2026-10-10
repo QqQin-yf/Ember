@@ -334,17 +334,18 @@ def test_pusher_http():
     with mock.patch("urllib.request.urlopen", fake):
         out = p.push_night([{"text": "x", "turn_span": ["t-000001", "t-000001"]}])
     check("超时重试 2 次后成功", out["dream_id"] == "night-9" and calls["n"] == 3)
-    # 4xx 不重试
+    # 4xx 不重试；heart 错误 body 统一 {"error": "<原因>"}（回执 r1 §3.2）
     err400 = urllib.error.HTTPError("u", 400, "bad", {}, StringIO(
-        json.dumps({"detail": "turn_span 不存在"})))
+        json.dumps({"error": "heart 未入睡（先调 /api/sleep/start）"})))
     fake2, calls2 = _fake_urlopen([err400])
     with mock.patch("urllib.request.urlopen", fake2):
         raised = False
         try:
             p.push_night([])
         except DreamPushError as ex:
-            raised = "400" in str(ex) and "turn_span" in str(ex)
-    check("400 不重试直接抛（带原因）", raised and calls2["n"] == 1)
+            raised = ("400" in str(ex)
+                      and "heart 未入睡" in str(ex))  # error 字段已提取
+    check("400 不重试直接抛（error 原因已解析）", raised and calls2["n"] == 1)
     # 重试耗尽
     fake3, calls3 = _fake_urlopen([TimeoutError("t")] * 5)
     with mock.patch("urllib.request.urlopen", fake3):
