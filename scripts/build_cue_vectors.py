@@ -23,10 +23,13 @@ BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE)
 
 from ember.direction import embed_text  # noqa: E402
+from ember.env import load_env  # noqa: E402
 
 DATA = os.path.join(BASE, "data_real")
 ROUTES_FILE = os.path.join(DATA, "recall_routes.jsonl")
 OUT_FILE = os.path.join(DATA, "cue_vectors.jsonl")
+
+load_env(BASE)
 
 
 def main() -> None:
