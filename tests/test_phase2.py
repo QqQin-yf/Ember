@@ -213,6 +213,7 @@ def main():
                         "affect": "期待",
                         "significance": "家庭重要事件",
                         "details": [],
+                        "key_quotes": [],
                     },
                     "recall_routes": [
                         {"cue_type": "lexical", "cue": "堂姐结婚"},

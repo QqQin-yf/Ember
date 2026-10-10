@@ -62,6 +62,11 @@ class Event:
     # change —— Event 本体字段，但写入时不必填；由 Sleep 在有足够历史上下文后补写
     change: str = ""
     details: list[str] = field(default_factory=list)
+    # key_quotes —— 模型从对话原文逐字摘出的原话（r4 第 3 项）：
+    #   [{"speaker": "user"|"ai", "text": "逐字原话"}]，至多 3 条（写入侧校验）。
+    #   写入时逐字核对，对不上的条目丢弃（dropped_quotes 回执）；价值在"是真话"。
+    #   呈现时与 core 一起展示；summary_fallback 概览不带。
+    key_quotes: list[dict[str, str]] = field(default_factory=list)
     # provenance
     provenance_refs: list[str] = field(default_factory=list)
 

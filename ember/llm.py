@@ -131,6 +131,7 @@ class MockLLMClient:
                 "affect": "平静",
                 "significance": "mock 测试用 Event",
                 "details": ["本 Event 由 Mock Memory Writer 生成"],
+                "key_quotes": [],
             },
             "recall_routes": [{"cue_type": "lexical", "cue": anchor}] + extra_routes,
         }

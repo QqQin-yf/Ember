@@ -33,8 +33,10 @@ from .direction import DirectionMatcher, DirectionVectorStore
 from .turn_ledger import TurnLedger
 from .recall_ledger import RecallLedger
 from .turn_span import TurnSpanStore, spans_from_quotes
+from .transcript import TranscriptStore
 from .writer import (
     TOOL_NAME,
+    READ_SOURCE_TOOL_NAME,
     EMBEDDED_WRITER_PROMPT,
     build_tools_spec,
     validate_writer_arguments,
@@ -76,6 +78,7 @@ class MemoryWriteStatus:
     summary_fallback: bool = False         # 是否走了 Entity 层 summary 回退
     semantic_matched: int = 0              # 本轮 Cue 语义段命中的 route 数（§2.4 语义扩展）
     semantic_reason: str | None = None     # ok / no_vectors / embed_failed / not_requested
+    dropped_quotes: list[dict[str, str]] = field(default_factory=list)  # r4：逐字核对被丢弃的原话
 
     def merge(self, other: "MemoryWriteStatus") -> None:
         """合并一次工具调用的结果进本轮总状态。"""
@@ -87,6 +90,7 @@ class MemoryWriteStatus:
         self.route_count += other.route_count
         self.recall_cues += other.recall_cues
         self.raw_ref = other.raw_ref or self.raw_ref
+        self.dropped_quotes = other.dropped_quotes or self.dropped_quotes
         self.error = other.error or self.error
         self.tool_result_in_context = self.tool_result_in_context or other.tool_result_in_context
         if other.status != "skipped":
@@ -116,6 +120,7 @@ class MemoryWriteStatus:
             "summary_fallback": self.summary_fallback,
             "semantic_matched": self.semantic_matched,
             "semantic_reason": self.semantic_reason,
+            "dropped_quotes": self.dropped_quotes,
         }
 
 
@@ -200,13 +205,24 @@ class EmberService:
         self.turn_spans = TurnSpanStore(getattr(store, "root", ""))
         # 召回记账（10-08 定稿 §3.2）：候选组装与旧 Cue 收紧的共同前置，旁路只观察
         self.recall_ledger = RecallLedger(getattr(store, "root", ""))
+        # 会话原文存档（r4 第 1 项）：每轮成功后落盘 user/assistant 原文；
+        # 重启恢复计数与 read_memory_source 的数据来源
+        self.transcripts = TranscriptStore(getattr(store, "root", ""))
 
     # ---------- session ----------
 
     def get_or_create_session(self, session_id: str | None) -> Session:
         sid = session_id or uuid.uuid4().hex[:12]
         if sid not in self.sessions:
-            self.sessions[sid] = Session(sid)
+            sess = Session(sid)
+            # 重启恢复计数（r4 第 2 项）：该 session 有存档 → 计数接续最大
+            # turn，避免与重启前轮次撞号（记账/turn_span 串号）。
+            # 只恢复计数，不恢复 messages 历史——上下文恢复由 momo 定为
+            # 独立项（涉及 wire 层一致性/缓存/前端，另行设计）。
+            saved_max = self.transcripts.max_turn(sid)
+            if saved_max > 0:
+                sess.turn_counter = saved_max
+            self.sessions[sid] = sess
         return self.sessions[sid]
 
     # ---------- chat ----------
@@ -336,13 +352,17 @@ class EmberService:
             session.messages.pop()  # chat 失败则本轮不计入历史
             raise
 
-        # 模型决定写记忆：处理 tool call（可能多轮，上限 2 防失控）
+        # 模型决定写记忆 / 翻原文：处理 tool call（可能多轮，上限 2 防失控）
         followup_msg = assistant_msg
         for _ in range(2):
             tool_calls = followup_msg.get("tool_calls") or []
             if not tool_calls:
                 break
-            write_result = self._handle_memory_tool_call(session, turn, tool_calls)
+            if any((c.get("function") or {}).get("name") == READ_SOURCE_TOOL_NAME
+                   for c in tool_calls):
+                write_result = self._handle_read_source_call(session, tool_calls)
+            else:
+                write_result = self._handle_memory_tool_call(session, turn, tool_calls)
             memory.merge(write_result["status"])
             if not write_result.get("handled"):
                 break
@@ -360,6 +380,14 @@ class EmberService:
         if not isinstance(content, str) or not content.strip():
             content = "（空回复）"
         session.messages.append({"role": "assistant", "content": content, "turn": turn})
+
+        # 原文存档（r4 第 1 项）：本轮成功结束，用户原话（不带召回前缀）
+        # + 最终回复各存一行；chat 失败走上面 except 分支不会到这里
+        try:
+            self.transcripts.append_turn(session.session_id, turn,
+                                         user_text, content)
+        except OSError:
+            pass  # 存档是旁路，落盘失败不阻断对话返回
 
         return {
             "id": f"chatcmpl-{uuid.uuid4().hex[:24]}",
@@ -435,6 +463,15 @@ class EmberService:
                                       validated["event"])
             self.store.write_event(event)
 
+            # key_quotes 逐字核对（r4 第 3.2 项，确定性代码侧）：
+            # 每条 text 在本会话原文（session.messages 中对应 role 的
+            # content；用户侧用原话，不含召回前缀——历史里存的就是原话）
+            # 里逐字查找；对不上的条目丢弃（不拒绝整个 Event），
+            # 丢弃清单写进 tool result 让模型知道哪句没对上
+            dropped = self._verify_key_quotes(event, session)
+            if dropped:
+                status.dropped_quotes = dropped
+
             # 出处句对 → 精确 turn_span（§4.1：起尾句由 AI 随写入给出，
             # 代码侧确定性定位；定位失败/未给 → 粗锚点 turn_refs 兜底）
             quote_spans = validated.get("quote_spans") or []
@@ -468,6 +505,8 @@ class EmberService:
                 "route_count": len(routes),
                 "recall_cues": [r["cue"] for r in routes],
             }
+            if dropped:
+                result["dropped_quotes"] = dropped
             self._append_tool_record(session, tool_calls, result)
             status.tool_result_in_context = True
             status.status = "created"
@@ -485,6 +524,76 @@ class EmberService:
             status.status = "failed"
             status.error = str(ex)[:300]
             return {"handled": True, "status": status}
+
+    # ---------- 翻原文工具（r4 第 4 项，只读） ----------
+
+    READ_SOURCE_MAX_CHARS = 4000   # 单次返回总长上限（baseline）
+
+    def _handle_read_source_call(self, session: Session,
+                                 tool_calls: list[dict[str, Any]]) -> dict[str, Any]:
+        """执行模型发出的 read_memory_source 调用：取一条 Event 的对话原文。
+
+        取原文 = Event 的 source_ref 解析 session + turn_spans 精确区间
+        （无则降级 turn_refs 锚点），从 TranscriptStore 取这些轮的
+        user/assistant 原文。无存档（旧数据）→ not_archived，不报错不编造。
+        superseded 事件也可读——这是显式翻看，不是自动召回。
+        只读：不写任何认知结构，不产生 MemoryWriteStatus 记忆事件。
+        """
+        import re
+        from .writer import _loads_lenient
+        results: list[dict[str, Any]] = []
+        for call in tool_calls:
+            fn = (call or {}).get("function") or {}
+            if fn.get("name") != READ_SOURCE_TOOL_NAME:
+                results.append({"status": "ignored", "reason": "unknown tool"})
+                continue
+            try:
+                args = _loads_lenient(fn.get("arguments") or "{}") \
+                    if isinstance(fn.get("arguments"), str) else (fn.get("arguments") or {})
+            except ValueError as ex:
+                results.append({"status": "failed", "error": f"arguments 解析失败: {ex}"})
+                continue
+            eid = (args or {}).get("event_id", "")
+            resolved = self._resolve_event_id(eid) if eid else None
+            if resolved is None:
+                results.append({"status": "not_found", "event_id": eid,
+                                "error": "找不到该 event_id"})
+                continue
+            event = self.store.get_event(resolved)
+            sess = re.match(r"conversation/session-([^/]+)",
+                            event.source_ref or "")
+            spans = self.turn_spans.span_of_event(event)
+            if sess is None or not spans:
+                results.append({"status": "not_archived", "event_id": resolved,
+                                "reason": "该事件没有可定位的原文存档"
+                                          "（写入早于存档功能或出处未回填）"})
+                continue
+            sid = sess.group(1)
+            turns = [t for s, e in spans for t in range(s, e + 1)]
+            rows = self.transcripts.get(sid, turns)
+            if not rows:
+                results.append({"status": "not_archived", "event_id": resolved,
+                                "reason": "该事件的原文轮次没有存档"})
+                continue
+            transcript = "\n".join(
+                f"[turn {r['turn']}] {r['role']}: {r['content']}" for r in rows)
+            truncated = False
+            if len(transcript) > self.READ_SOURCE_MAX_CHARS:
+                transcript = transcript[:self.READ_SOURCE_MAX_CHARS]
+                truncated = True
+            results.append({
+                "status": "ok",
+                "event_id": resolved,
+                "turns": turns,
+                "transcript": transcript,
+                "truncated": truncated,
+            })
+        self._append_tool_record(session, tool_calls, results[0] if results
+                                 else {"status": "ignored"})
+        status = MemoryWriteStatus()
+        status.tool_called = READ_SOURCE_TOOL_NAME
+        status.tool_result_in_context = True
+        return {"handled": True, "status": status}
 
     def _with_embedded_prompt(self, wire: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """把写作指令注入 system 末尾（不改用户消息；无 system 则插入一条）。
@@ -534,7 +643,8 @@ class EmberService:
             for eid in ctx.recalled_events:
                 event = self.store.get_event(eid)
                 lines.append(f"- {event.summary}（{eid}）")
-            lines.append("如果对方想深入某一条，可以再具体问问——那时再展开原文。")
+            lines.append("如果对方想深入某一条，可以再具体问问——那时再展开原文，"
+                         "或调用 read_memory_source(\"<event_id>\") 翻看。")
             lines.append("[记忆概览结束——自然地运用，不要机械复述本结构]")
             return "\n".join(lines) + "\n\n"
 
@@ -556,6 +666,9 @@ class EmberService:
                 lines.append(f"- （修正承接）{core}")
                 lines.append(f"  你曾有过「{superseded.summary}」的认知，"
                              "但它已被本次经历修正/取代——以上述新认知为准。")
+                quotes_line = self._format_key_quotes(event)
+                if quotes_line:
+                    lines.append(f"  {quotes_line}")
                 continue
             if entity_names and not hits:
                 strength = "实体区域"
@@ -565,12 +678,27 @@ class EmberService:
                 strength = "隐约联想"
             why = "、".join(f"「{c}」" for c in distinct_cues)
             lines.append(f"- （{strength}）{core}")
+            quotes_line = self._format_key_quotes(event)
+            if quotes_line:
+                lines.append(f"  {quotes_line}")
             if why:
-                lines.append(f"  触点：{why}；原文在 {event.raw_ref}")
+                lines.append(f"  触点：{why}；需要原话时可调用 "
+                             f"read_memory_source(\"{eid}\")")
             else:
-                lines.append(f"  原文在 {event.raw_ref}")
+                lines.append(f"  需要原话时可调用 read_memory_source(\"{eid}\")")
         lines.append("[记忆结束——自然地运用它们，不要机械复述本结构]")
         return "\n".join(lines) + "\n\n"
+
+    @staticmethod
+    def _format_key_quotes(event: Event) -> str:
+        """原话行（r4 第 3.4 项）：speaker=user 标"她"，ai 标"我"；无原话返回空串。"""
+        if not (getattr(event, "key_quotes", None) or []):
+            return ""
+        parts = []
+        for q in event.key_quotes:
+            who = "她" if q.get("speaker") == "user" else "我"
+            parts.append(f"「{q.get('text', '')}」（{who}）")
+        return "原话：" + "".join(parts)
 
     def _append_tool_record(self, session: Session,
                             tool_calls: list[dict[str, Any]],
@@ -625,8 +753,54 @@ class EmberService:
             significance=w_event["significance"],
             # change 不由 Writer 提供，留给 Sleep 补写
             details=w_event["details"],
+            key_quotes=w_event.get("key_quotes") or [],
             provenance_refs=["memory-writer", f"chat:{session.session_id}"],
         )
+
+    @staticmethod
+    def _verify_key_quotes(event: Event, session: Session) -> list[dict[str, str]]:
+        """key_quotes 逐字核对（r4 第 3.2 项，确定性，代码侧）。
+
+        每条 text 逐字查找本会话原文（session.messages 中对应 role 的
+        content；用户侧消息历史里存的就是原话，不含召回前缀）。做空白
+        归一容错（与 locate_turn 同款策略）。对不上的条目从 event 上
+        丢弃并返回（调用方写进 tool result）；原话的价值在于是真话，
+        不能让改写或编造的句子混进去。
+        """
+        import re
+
+        def _norm(s: str) -> str:
+            return re.sub(r"\s+", "", s or "")
+
+        corpus_by_role: dict[str, list[str]] = {"user": [], "assistant": []}
+        for m in session.messages:
+            role = m.get("role")
+            if role in corpus_by_role and isinstance(m.get("content"), str):
+                corpus_by_role[role].append(m["content"])
+
+        def _find_anywhere(text: str, speaker: str) -> bool:
+            t, tn = text, _norm(text)
+            # 精确：任一对应 role 的消息原文包含
+            for c in corpus_by_role.get(speaker, []):
+                if t and t in c:
+                    return True
+            # 空白归一容错
+            if len(tn) >= 4:
+                for c in corpus_by_role.get(speaker, []):
+                    if tn in _norm(c):
+                        return True
+            return False
+
+        kept: list[dict[str, str]] = []
+        dropped: list[dict[str, str]] = []
+        for q in (event.key_quotes or []):
+            speaker = "assistant" if q.get("speaker") == "ai" else "user"
+            if _find_anywhere(q.get("text", ""), speaker):
+                kept.append(q)
+            else:
+                dropped.append(q)
+        event.key_quotes = kept
+        return dropped
 
     # ---------- recall（复用第一阶段） ----------
 

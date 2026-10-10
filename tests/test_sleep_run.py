@@ -51,7 +51,7 @@ def test_writer_schema():
     ok = {"event": {"summary": "s", "participants": ["ai"], "objects": [],
                     "context": "c", "core": "core", "outcome": "o",
                     "state": "s", "affect": "a", "significance": "sig",
-                    "details": []},
+                    "details": [], "key_quotes": []},
           "recall_routes": [{"cue_type": "lexical", "cue": "协议"}],
           "quote_spans": [{"start_quote": "我们定一下协议 v1 的字段。",
                            "end_quote": "协议 v1 就用 turn_span 对齐。"}]}
