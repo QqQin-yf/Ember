@@ -522,6 +522,15 @@ class EmberService:
             # Entity 层 summary 回退：只给概览，不做全文注入
             lines.append(f"你提到了{'、'.join('〈' + n + '〉' for n in entity_names)}，"
                          "这里有一段与此相关的过往经历，但暂时说不准你想从哪个角度了解：")
+            # 实体名片（基本属性描述，§2.1 Entity.summary）：
+            # 有就插一行帮对话模型定位"这是关于什么的"；没生成过（空）就跳过
+            for h in (entity_hits or []):
+                try:
+                    ent = self.entity_store.get(h.entity_id)
+                except KeyError:
+                    continue
+                if (ent.summary or "").strip():
+                    lines.append(f"关于〈{h.name}〉：{ent.summary.strip()}")
             for eid in ctx.recalled_events:
                 event = self.store.get_event(eid)
                 lines.append(f"- {event.summary}（{eid}）")

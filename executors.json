@@ -1,5 +1,6 @@
 {
   "judge": "glm",
   "split": "glm",
-  "mount": "glm"
+  "mount": "glm",
+  "summary": "glm"
 }

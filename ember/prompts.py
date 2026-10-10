@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """Ember v3 — 全部 LLM 任务点的 prompt 定稿与用户消息组装。
 
-三个 prompt（均为 momo 逐字审过的定稿，改动需重新过目）：
+四个 prompt（均为 momo 逐字审过的定稿，改动需重新过目）：
 - JUDGE_SYSTEM_PROMPT    调用②裁决与归属（§4.2）→ scripts/sleep_v2.py
 - SPLIT_SYSTEM_PROMPT    Direction 划分（§5.1）  → scripts/split_directions.py
 - MOUNT_SYSTEM_PROMPT    Direction 挂载（§5.2）  → scripts/mount_directions.py
+- SUMMARY_SYSTEM_PROMPT  Entity summary 重算（§2.1）→ scripts/sleep_run.py
 
 写入不设独立 prompt：实时写入由 EMBEDDED_WRITER_PROMPT（writer.py）
 承担（AI 调工具，主动记重要的事；sleep 只管维护，不重写内容）。
@@ -323,4 +324,52 @@ def build_mount_user_prompt(dir_lines: str, event_id: str, core: str) -> str:
         "\n\n## 待挂载经历\n" +
         f"event_id: {event_id}\n" + core
     )
+
+
+# ---------------------------------------------------------------------------
+# Entity summary 重算（§2.1，momo 2026-10-10 逐字审过）
+# ---------------------------------------------------------------------------
+
+SUMMARY_SYSTEM_PROMPT = """\
+任务：为「Ember记忆系统」中的一个实体撰写或更新它的基本属性描述\
+（Entity summary）。
+
+这个描述回答一个问题：这个实体是什么？它像一张名片，不写履历。
+
+输入：实体名 + 它名下全部事件的摘要列表（每行一条）。
+
+写作要求：
+- 二到四句话。说清：这是什么（谁/什么项目/什么事物）、它主要包括\
+  哪些方面、它的现状（进行中/已收尾）。
+- 描述的是实体此刻的真实情况，不写变化过程：不叙述"先后做了什么"、\
+  "最初如何后来如何"，把发展阶段沉淀为现状的一部分\
+  （例：三个功能陆续上线后，就写"目前包括这三个功能"）。
+- 概括依据只来自输入摘要中出现过的内容，不推测、不补充输入之外\
+  的信息；事件之间没有提到的方面不写。
+- 通顺的自然语言，不要罗列 event_id，不要使用"摘要""事件"这类\
+  材料组织的词。
+- 实体名用输入给出的写法；输入中出现的常用别名可自然融入。
+
+输出格式（只输出 JSON，无任何其他文字）：
+{
+  "summary": "二到四句话的基本属性描述"
+}
+"""
+
+
+def build_summary_user_prompt(entity_name: str, old_summary: str,
+                              summaries: list[str]) -> str:
+    """组装 summary 重算的用户消息：实体名 + 旧描述（如有）+ 全部事件摘要行。
+
+    summaries: ["摘要文本", ...]（调用方从 member events 提取，不含 id）
+    old_summary: 该实体现有 summary；为空串时省略该区块（首次生成）。
+    """
+    parts = [f"## 实体\n{entity_name}"]
+    if old_summary.strip():
+        parts.append("## 现有描述（可参考，按当前全部事件重新概括）\n"
+                     + old_summary.strip())
+    lines = "\n".join(f"- {s}" for s in summaries)
+    parts.append("## 该实体下全部事件摘要\n" + lines)
+    parts.append("请按 system 指令输出 JSON。")
+    return "\n\n".join(parts)
 

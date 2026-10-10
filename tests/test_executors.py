@@ -21,6 +21,9 @@ sys.path.insert(0, BASE)
 from ember import executors  # noqa: E402
 
 
+GLM_ALL = {"judge": "glm", "split": "glm", "mount": "glm", "summary": "glm"}
+
+
 class TestLoadExecutors(unittest.TestCase):
 
     def _read(self, content: str | None) -> dict:
@@ -33,17 +36,17 @@ class TestLoadExecutors(unittest.TestCase):
 
     def test_normal_read(self):
         out = self._read(json.dumps({"judge": "qwen3", "split": "glm",
-                                     "mount": "qwen3"}))
+                                     "mount": "qwen3", "summary": "glm"}))
         self.assertEqual(out, {"judge": "qwen3", "split": "glm",
-                               "mount": "qwen3"})
+                               "mount": "qwen3", "summary": "glm"})
 
     def test_missing_file_falls_back_to_glm(self):
         out = self._read(None)
-        self.assertEqual(out, {"judge": "glm", "split": "glm", "mount": "glm"})
+        self.assertEqual(out, GLM_ALL)
 
     def test_bad_json_falls_back_to_glm(self):
         out = self._read("{not json")
-        self.assertEqual(out, {"judge": "glm", "split": "glm", "mount": "glm"})
+        self.assertEqual(out, GLM_ALL)
 
     def test_illegal_value_falls_back_per_task(self):
         out = self._read(json.dumps({"judge": "gpt4", "split": "GLM",
@@ -51,6 +54,7 @@ class TestLoadExecutors(unittest.TestCase):
         self.assertEqual(out["judge"], "glm")   # 未知 engine → glm
         self.assertEqual(out["split"], "glm")   # 大小写敏感 → glm
         self.assertEqual(out["mount"], "qwen3") # 合法值保留
+        self.assertEqual(out["summary"], "glm") # 缺项 → glm
 
     def test_extra_tasks_ignored(self):
         out = self._read(json.dumps({"judge": "glm", "chat": "qwen3"}))

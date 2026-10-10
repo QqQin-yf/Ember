@@ -35,7 +35,10 @@ sys.path.insert(0, BASE)
 sys.path.insert(0, os.path.join(BASE, "scripts"))
 
 import sleep_v2  # noqa: E402
-from ember.prompts import build_judge_user_prompt  # noqa: E402
+from ember import executors  # noqa: E402
+from ember.prompts import (  # noqa: E402
+    build_judge_user_prompt, SUMMARY_SYSTEM_PROMPT, build_summary_user_prompt,
+)
 from ember.entity import EntityStore  # noqa: E402
 from ember.turn_span import TurnSpanStore  # noqa: E402
 from ember.recall_ledger import RecallLedger  # noqa: E402
@@ -131,6 +134,7 @@ def main():
     ledger = RecallLedger(DATA)
     pairs = PairSeenStore(DATA)
     entity_names = sleep_v2.existing_entity_names(estore)
+    touched_entities: set[str] = set()   # 本轮被 extract/attach 的实体（summary 步用）
 
     # ---------- 调用②：裁决与归属（每 Event 一次调用） ----------
     # 进度语义（momo 2026-10-09）：每个 Event 独立记账、独立续跑——
@@ -197,6 +201,62 @@ def main():
                                for eid, up in event_up.items()})
             mark_progress(m["new_id"], engine, s)
             judged.append(s)
+            # 归属动作收集（summary 步触发用）：该实体本轮被 extract/attach 过
+            action = (verdict.get("entity") or {}).get("action", "none")
+            if action == "extract":
+                touched_entities.add(
+                    (verdict.get("entity") or {}).get("entity_id_ref", ""))
+            elif action == "attach":
+                touched_entities.add((verdict.get("entity") or {}).get("entity_id", ""))
+            # extract 的实体 id 是 apply_verdict 里新生成的（ent_xxx），
+            # 从 apply 结果 summary 里取更可靠
+            ea = s.get("entity_action", "")
+            if ea.startswith("extract:"):
+                touched_entities.discard("")
+                touched_entities.add(ea.split(":")[1].split("(")[0])
+
+    # ---------- Entity summary 重算（外包任务点，momo 2026-10-10 定稿） ----------
+    # 触发：本轮裁决中发生过 extract/attach 的实体，逐个重算基本属性描述；
+    # 旧 summary 作为参考一并给入；失败不影响其他实体（报告单独列出）。
+    summary_results: list[dict] = []
+    touched_entities = {e for e in touched_entities if e}
+    if touched_entities:
+        s_engine = executors.load_engine(BASE, "summary")
+        s_user = build_summary_user_prompt
+        for ent_id in sorted(touched_entities):
+            try:
+                ent = estore.get(ent_id)
+            except KeyError:
+                continue
+            member_sums = [
+                ev.get("summary", "") for eid, ev in events.items()
+                if ent_id in (ev.get("entity_refs") or [])
+                and ev.get("summary", "")]
+            if not member_sums:
+                continue   # 名下无事件，无素材可概括
+            user = s_user(ent.name, ent.summary or "", member_sums)
+            raw = None
+            for attempt in range(3):
+                try:
+                    raw = executors.call_llm(SUMMARY_SYSTEM_PROMPT, user,
+                                             s_engine, task="summary")
+                    break
+                except Exception as ex:
+                    print(f"  !! summary 第{attempt+1}次调用失败"
+                          f"（{ent_id}）: {ex}", file=sys.stderr)
+            parsed = sleep_v2.extract_json(raw) if raw else None
+            new_summary = (parsed or {}).get("summary", "")
+            if not isinstance(new_summary, str) or not new_summary.strip():
+                summary_results.append({"entity_id": ent_id,
+                                        "status": "failed",
+                                        "error": "调用/解析失败或空 summary"})
+                continue
+            ent.summary = new_summary.strip()
+            ent.summary_at = _now_iso()
+            estore.save()
+            summary_results.append({"entity_id": ent_id,
+                                    "status": "updated",
+                                    "summary": ent.summary})
 
     # ---------- 收紧（无数据依赖，照常执行） ----------
     tighten = None
@@ -207,7 +267,8 @@ def main():
         tighten = t.tighten()
 
     report = {"engine": engine, "finished_at": _now_iso(),
-              "judged": judged, "failed": failed, "tighten": tighten,
+              "judged": judged, "failed": failed,
+              "summary": summary_results, "tighten": tighten,
               "progress_done": len(load_progress())}
     print(json.dumps(report, ensure_ascii=False, indent=2))
 

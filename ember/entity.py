@@ -60,6 +60,12 @@ class Entity:
     directions: list[Direction] = field(default_factory=list)  # 附属结构（非全局 graph）
     status: str = "open"      # open / closed
     closed_at: str = ""       # close 时刻（ISO）；open 时为空
+    # summary = 该实体的基本属性描述（是什么/包括哪些方面/现状），不写变化过程
+    # 谁写：sleep 的 summary 任务点（本轮该实体发生过 attach/extract 时重算）
+    # 谁读：service 呈现层（Entity 通路命中时可用；v1 先接 Direction 模糊回退）
+    # 空串 = 尚未生成（手动老户），呈现时跳过不报错
+    summary: str = ""
+    summary_at: str = ""      # 最近一次 summary 生成时刻（ISO），观察字段（判断名片多旧）
     provenance_refs: list[str] = field(default_factory=list)
 
     ALLOWED_STATUS = ("open", "closed")
