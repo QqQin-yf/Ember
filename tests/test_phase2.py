@@ -110,13 +110,26 @@ def main():
         check("模型没有发出工具调用", mem2["writer_called"] is False)
         check("没有工具调用记录", mem2["tool_called"] is None)
 
-        print("== T3 写作指令注入 wire 层（system 尾部） ==")
+        print("== T3 写作指令注入 wire 层（2026-10-11 无感化：空说明=不注入） ==")
         last_call = client.calls[-1]
         sys_msgs = [m for m in last_call["messages"] if m.get("role") == "system"]
-        check("请求含 system 消息", len(sys_msgs) >= 1)
-        if sys_msgs:
-            check("写作指令注入 system 末尾",
-                  "Ember 记忆" in sys_msgs[0]["content"] and "create_memory_event" in sys_msgs[0]["content"])
+        check("空写作说明时 system 零污染", len(sys_msgs) == 0,
+              str([m["content"][:40] for m in last_call["messages"][:2]]))
+        # 机制保留验证：填回常量即恢复注入（service 命名空间持有该常量）
+        import ember.service as _ember_service
+        _old_prompt = _ember_service.EMBEDDED_WRITER_PROMPT
+        _ember_service.EMBEDDED_WRITER_PROMPT = "（测试）写作指令标记"
+        try:
+            chat(service, "再聊一句。", "s_t3b")
+            call3 = next(c for c in reversed(client.calls)
+                         if c["messages"][-1].get("role") == "user"
+                         and c["messages"][-1].get("content") == "再聊一句。")
+            sys3 = [m for m in call3["messages"] if m.get("role") == "system"]
+            check("填回常量即恢复 system 注入",
+                  len(sys3) >= 1 and "（测试）写作指令标记" in sys3[0]["content"],
+                  sys3[0]["content"][:60] if sys3 else "无 system")
+        finally:
+            _ember_service.EMBEDDED_WRITER_PROMPT = _old_prompt
 
         print("== T4 recall 命中 → 前缀注入用户消息 ==")
         sid = "s_t4"
@@ -130,7 +143,7 @@ def main():
                          and "我们继续聊 Ember 吧" in (c["messages"][-1].get("content") or ""))
         injected = main_call["messages"][-1]["content"]
         check("命中轮 LLM 收到带前缀的用户消息",
-              "[Ember 记忆浮现]" in injected and "触点：" in injected, injected[:120])
+              "[记忆浮现]" in injected and "触点：" in injected, injected[:120])
         last_user_in_hist = [m for m in service.sessions[sid].messages
                              if m["role"] == "user"][-1]
         check("session 历史存用户原话（不存前缀）",

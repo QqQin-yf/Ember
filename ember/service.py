@@ -219,9 +219,10 @@ class EmberService:
 
     # ---------- session ----------
 
-    #: heart-chat 前端不传 session_id（OpenAI 兼容请求没有这个字段），
-    #: 全部聊天共用一个固定会话——跨请求保持上下文与 turn_ledger 记账。
-    #: 独立会话隔离等前端支持 session 字段后再启用（独立项）。
+    #: heart-chat 前端不传 session_id（OpenAI 兼容请求没有这个字段）。
+    #: 2026-10-11 透明工具拍板后，session 仅作旁路账本（turn 计数/原文
+    #: 存档/召回引用），不再是喂给模型的上下文来源——上下文一律以前端
+    #: 发来的 messages 为准。独立会话隔离等前端支持 session 字段后再启用。
     DEFAULT_SESSION_ID = "heart-chat-main"
 
     def get_or_create_session(self, session_id: str | None) -> Session:
@@ -346,17 +347,33 @@ class EmberService:
 
         session.messages.append({"role": "user", "content": user_text, "turn": turn})
 
-        # wire 层：历史 + 本轮（用户消息带 recall 前缀）+ 注入的写作指令
-        wire = [_strip_internal(m) for m in session.messages]
+        # wire 层（2026-10-11 透明工具拍板）：以前端发来的消息为准。
+        # 人设/历史/heart 注入属于已发生的上下文——Ember 原样透传，
+        # 不增不删不改；只做三件事：recall 前缀挂本轮用户消息、递记忆
+        # 工具、旁路记账。session.messages 降级为账本（供原文存档与
+        # 召回引用），不再作为喂给模型的上下文来源。
+        # 前端不发 messages 的独立 UI 形态：回落为单条本轮用户消息。
+        wire = [_strip_internal(dict(m)) for m in incoming] or \
+            [{"role": "user", "content": user_text}]
         if recall_prefix:
-            wire[-1] = dict(wire[-1])
-            wire[-1]["content"] = recall_prefix + (wire[-1].get("content") or "")
+            for _m in reversed(wire):
+                if _m.get("role") != "user":
+                    continue
+                _c = _m.get("content")
+                if isinstance(_c, str):
+                    _m["content"] = recall_prefix + _c
+                elif isinstance(_c, list):
+                    for _p in _c:
+                        if isinstance(_p, dict) and _p.get("type") == "text":
+                            _p["text"] = recall_prefix + (_p.get("text") or "")
+                            break
+                break
         wire = self._with_embedded_prompt(wire)
 
         try:
             assistant_msg = self.client.chat_completion(
                 model=model,
-                messages=wire,
+                messages=list(wire),  # 传副本：工具循环会继续追加 wire，别污染调用记录
                 tools=build_tools_spec(),
                 tool_choice="auto",
                 temperature=payload.get("temperature"),
@@ -371,6 +388,7 @@ class EmberService:
             tool_calls = followup_msg.get("tool_calls") or []
             if not tool_calls:
                 break
+            history_mark = len(session.messages)
             if any((c.get("function") or {}).get("name") == READ_SOURCE_TOOL_NAME
                    for c in tool_calls):
                 write_result = self._handle_read_source_call(session, tool_calls)
@@ -379,11 +397,13 @@ class EmberService:
             memory.merge(write_result["status"])
             if not write_result.get("handled"):
                 break
-            # tool result 已入历史，让模型接着说完
+            # 工具往返消息（assistant tool_calls + tool result）同步追加到
+            # wire 尾部，让模型接着说完（账本与 wire 各自追加，互不复读）
+            for m in session.messages[history_mark:]:
+                wire.append(_strip_internal(dict(m)))
             followup_msg = self.client.chat_completion(
                 model=model,
-                messages=self._with_embedded_prompt(
-                    [_strip_internal(m) for m in session.messages]),
+                messages=self._with_embedded_prompt(list(wire)),
                 tools=build_tools_spec(),
                 tool_choice="auto",
                 temperature=payload.get("temperature"),
@@ -611,9 +631,14 @@ class EmberService:
     def _with_embedded_prompt(self, wire: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """把写作指令注入 system 末尾（不改用户消息；无 system 则插入一条）。
 
+        2026-10-11 无感化拍板：EMBEDDED_WRITER_PROMPT 已退役为空串，
+        写作规则全部内嵌工具描述（writer.build_tools_spec）。常量为空时
+        跳过注入——TA 的 system 恢复零污染；恢复旧形态填回常量即可。
         只注入 wire 层，session.messages 不存——避免历史膨胀与重复。
         """
         out = [dict(m) for m in wire]
+        if not EMBEDDED_WRITER_PROMPT.strip():
+            return out
         for i, m in enumerate(out):
             if m.get("role") == "system":
                 m["content"] = (m.get("content") or "") + "\n\n" + EMBEDDED_WRITER_PROMPT
@@ -638,7 +663,7 @@ class EmberService:
         """
         entity_names = [h.name for h in (entity_hits or [])]
         resolved_map = dict(resolved_brought or [])
-        lines = ["[Ember 记忆浮现]"]
+        lines = ["[记忆浮现]"]
 
         if summary_fallback:
             # Entity 层 summary 回退：只给概览，不做全文注入
