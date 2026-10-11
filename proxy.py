@@ -166,10 +166,14 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    httpd = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
-    print(f"[ember] Ember Proxy listening on http://127.0.0.1:{PORT}")
-    print(f"[ember] UI:     http://127.0.0.1:{PORT}/")
-    print(f"[ember] API:    http://127.0.0.1:{PORT}/v1/chat/completions")
+    # 绑定地址可配（EMBER_HOST）：默认 127.0.0.1（本机自用）；
+    # 同机容器化部署时 app 容器经 docker0 网桥（172.17.0.1）访问，
+    # 需设 EMBER_HOST=0.0.0.0（VPS 上配合防火墙/安全组只放行本机访问）
+    host = os.environ.get("EMBER_HOST", "127.0.0.1")
+    httpd = ThreadingHTTPServer((host, PORT), Handler)
+    print(f"[ember] Ember Proxy listening on http://{host}:{PORT}")
+    print(f"[ember] UI:     http://{host}:{PORT}/")
+    print(f"[ember] API:    http://{host}:{PORT}/v1/chat/completions")
     print(f"[ember] store:  {DATA_DIR}")
     httpd.serve_forever()
 
