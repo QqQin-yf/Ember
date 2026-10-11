@@ -219,8 +219,13 @@ class EmberService:
 
     # ---------- session ----------
 
+    #: heart-chat 前端不传 session_id（OpenAI 兼容请求没有这个字段），
+    #: 全部聊天共用一个固定会话——跨请求保持上下文与 turn_ledger 记账。
+    #: 独立会话隔离等前端支持 session 字段后再启用（独立项）。
+    DEFAULT_SESSION_ID = "heart-chat-main"
+
     def get_or_create_session(self, session_id: str | None) -> Session:
-        sid = session_id or uuid.uuid4().hex[:12]
+        sid = session_id or self.DEFAULT_SESSION_ID
         if sid not in self.sessions:
             sess = Session(sid)
             # 重启恢复计数（r4 第 2 项）：该 session 有存档 → 计数接续最大

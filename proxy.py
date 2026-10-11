@@ -130,12 +130,58 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    # ---------- 流式 chat（SSE 透传） ----------
+
+    def _handle_stream_chat(self, payload: dict) -> None:
+        """stream:true 的 chat：Ember 完整跑完对话循环（召回注入/写入工具/
+        记账/存档，与 chat_completion 同一实现），最终回复以 OpenAI 兼容的
+        SSE 流返回——一个内容 chunk + finish chunk + [DONE]。
+
+        说明：不做逐 token 真流式（Ember 的对话循环含工具轮，切分复杂）；
+        前端 streamChat 按行解析 SSE，单 chunk 流完全兼容，只是首字延迟
+        等于整轮生成时间（与 Phase 3 非流式体验一致）。UA 上报/写入工具
+        结果依赖完整回复，不适合边生成边推。
+        """
+        try:
+            result = SERVICE.chat_completion(payload)
+        except Exception as ex:  # chat 失败 → 502 JSON（前端 res.ok 分支处理）
+            return self._json(502, {"error": {"message": str(ex)[:300]}})
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+
+        def sse(obj: dict) -> None:
+            self.wfile.write(f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
+                             .encode("utf-8"))
+
+        try:
+            content = result["choices"][0]["message"].get("content") or ""
+            sse({"id": result.get("id"), "object": "chat.completion.chunk",
+                 "model": result.get("model"),
+                 "choices": [{"index": 0,
+                              "delta": {"role": "assistant", "content": content},
+                              "finish_reason": None}]})
+            sse({"id": result.get("id"), "object": "chat.completion.chunk",
+                 "model": result.get("model"),
+                 "choices": [{"index": 0, "delta": {},
+                              "finish_reason": "stop"}],
+                 "usage": result.get("usage") or {},
+                 "ember": result.get("ember")})
+            self.wfile.write(b"data: [DONE]\n\n")
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # 前端断开，无话可说
+
     # ---------- POST ----------
 
     def do_POST(self):
         path = urlparse(self.path).path
         if path == "/v1/chat/completions":
             payload = self._read_body()
+            if payload.get("stream"):
+                return self._handle_stream_chat(payload)
             try:
                 result = SERVICE.chat_completion(payload)
                 return self._json(200, result)
