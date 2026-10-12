@@ -156,12 +156,18 @@ def main():
               str(r7)[:160])
         service.hook_turn_end("sc7", "好。")
 
-        print("== S8 会话错配守卫 ==")
+        print("== S8 会话错配与串轮竞态守卫 ==")
         service.hook_turn_start("sc8", "开一轮。")
         e8 = service.hook_turn_end("别的会话", "回复")
         check("session_id 不匹配拒绝收轮",
               e8["ok"] is False and "sc8" in e8.get("reason", ""), str(e8))
-        service.hook_turn_end("sc8", "正常收轮")
+        r8b = service.hook_turn_start("sc8", "连发第二条（覆盖活跃轮）。")
+        e8c = service.hook_turn_end("sc8", "慢到的旧轮回报", turn=r8b["turn"] - 1)
+        check("stale turn_end 被拒收",
+              e8c["ok"] is False and "stale" in e8c.get("reason", ""), str(e8c))
+        e8d = service.hook_turn_end("sc8", "当前轮正常收轮", turn=r8b["turn"])
+        check("当前轮号正常收轮", e8d["ok"] is True and e8d["turn"] == r8b["turn"],
+              str(e8d))
 
         print("== S9 重启接续：turn 计数从存档恢复 ==")
         service2 = EmberService(EmberStore(tmp), MockLLMClient(), model="mock-chat")

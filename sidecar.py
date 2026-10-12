@@ -117,8 +117,14 @@ async def _hook_turn_end(request: Request) -> JSONResponse:
         body = await request.json()
     except Exception:
         body = {}
+    raw_turn = body.get("turn")
+    try:
+        turn = int(raw_turn) if raw_turn is not None else None
+    except (TypeError, ValueError):
+        turn = None
     return JSONResponse(SERVICE.hook_turn_end(
-        body.get("session_id"), str(body.get("assistant_reply") or "")))
+        body.get("session_id"), str(body.get("assistant_reply") or ""),
+        turn))
 
 
 class BearerAuthMiddleware:

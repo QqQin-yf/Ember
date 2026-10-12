@@ -1131,11 +1131,14 @@ class EmberService:
         }
 
     def hook_turn_end(self, session_id: str | None,
-                      assistant_reply: str) -> dict[str, Any]:
+                      assistant_reply: str,
+                      turn: int | None = None) -> dict[str, Any]:
         """轮后钩子：原文存档（用户原话 + 最终回复）并收掉进行中的一轮。
 
-        缺轮后钩子的轮次不存档——与代理形态「chat 失败不计入历史」同
-        语义；turn 计数允许留洞（与记账空洞同款历史遗留语义）。
+        turn 校验（防串轮竞态）：用户连发两条时，前一轮的 turn_end 可能
+        晚于后一轮的 turn_start 到达——对不上号的上报拒收（stale），
+        不污染新一轮的出处账。缺轮后钩子的轮次不存档——与代理形态
+        「chat 失败不计入历史」同语义；turn 计数允许留洞。
         """
         live = self._live_turn
         if live is None:
@@ -1145,6 +1148,10 @@ class EmberService:
         if session_id and session.session_id != session_id:
             return {"ok": False,
                     "reason": f"live turn 属于会话 {session.session_id}"}
+        if turn is not None and live["turn"] != turn:
+            return {"ok": False,
+                    "reason": f"stale turn_end（期望 turn-{live['turn']}，"
+                              f"收到 turn-{turn}，疑似慢到的旧轮回报）"}
         # assistant 原话也进会话账本：key_quotes 的 ai 侧逐字核对语料
         session.messages.append({"role": "assistant",
                                  "content": assistant_reply,
