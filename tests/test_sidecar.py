@@ -197,6 +197,18 @@ def main():
         check("chat 召回仍注入（共用流水线）",
               r11b["ember"]["memory"]["recalled_count"] >= 1,
               str(r11b["ember"]["memory"])[:160])
+
+        print("== S12 持久语料：重启后引用更早存档轮的原话不再误伤 ==")
+        # sc1 的 turn-1 用户原话已在 TranscriptStore 落盘；service2 是重启后
+        # 的新实例（内存会话为空）——修正前引更早轮原话必然全部 dropped
+        service2.hook_turn_start("sc1", "重启后再写一条。")
+        r12 = service2.sidecar_create_memory_event(write_args(
+            user_quote="今天我们决定把 Ember 的传播模型改成"))
+        check("存档原话跨重启核对通过（持久语料生效）",
+              r12.get("status") == "created"
+              and not r12.get("dropped_quotes"),
+              str(r12.get("dropped_quotes")))
+        service2.hook_turn_end("sc1", "好，这条也记下了。")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

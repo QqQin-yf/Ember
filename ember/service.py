@@ -852,15 +852,16 @@ class EmberService:
             provenance_refs=["memory-writer", f"chat:{session.session_id}"],
         )
 
-    @staticmethod
-    def _verify_key_quotes(event: Event, session: Session) -> list[dict[str, str]]:
+    def _verify_key_quotes(self, event: Event,
+                           session: Session) -> list[dict[str, str]]:
         """key_quotes 逐字核对（r4 第 3.2 项，确定性，代码侧）。
 
-        每条 text 逐字查找本会话原文（session.messages 中对应 role 的
-        content；用户侧消息历史里存的就是原话，不含召回前缀）。做空白
-        归一容错（与 locate_turn 同款策略）。对不上的条目从 event 上
-        丢弃并返回（调用方写进 tool result）；原话的价值在于是真话，
-        不能让改写或编造的句子混进去。
+        每条 text 逐字查找本会话原文。核对语料 = 落盘存档（TranscriptStore，
+        重启不丢——2026-10-12 修正：旁路形态下 sidecar 重启会清空内存会话，
+        易失语料会让「引用更早对话的原话」全部误伤）∪ 内存会话（当前轮
+        由钩子刚写入、尚未存档的部分）。做空白归一容错（与 locate_turn
+        同款策略）。对不上的条目从 event 上丢弃并返回（调用方写进 tool
+        result）；原话的价值在于是真话，不能让改写或编造的句子混进去。
         """
         import re
 
@@ -868,10 +869,20 @@ class EmberService:
             return re.sub(r"\s+", "", s or "")
 
         corpus_by_role: dict[str, list[str]] = {"user": [], "assistant": []}
+
+        def _feed(role: Any, content: Any) -> None:
+            if role in corpus_by_role and isinstance(content, str):
+                corpus_by_role[role].append(content)
+
+        # 持久语料：原文存档（该会话全部已存档轮次）
+        max_turn = self.transcripts.max_turn(session.session_id)
+        if max_turn > 0:
+            for row in self.transcripts.get(
+                    session.session_id, list(range(1, max_turn + 1))):
+                _feed(row.get("role"), row.get("content"))
+        # 易失语料：内存会话（当前轮钩子刚写入、尚未存档）
         for m in session.messages:
-            role = m.get("role")
-            if role in corpus_by_role and isinstance(m.get("content"), str):
-                corpus_by_role[role].append(m["content"])
+            _feed(m.get("role"), m.get("content"))
 
         def _find_anywhere(text: str, speaker: str) -> bool:
             t, tn = text, _norm(text)
