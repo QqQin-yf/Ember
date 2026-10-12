@@ -512,10 +512,12 @@ class EmberService:
         dropped = self._verify_key_quotes(event, session)
 
         # 出处句对 → 精确 turn_span（§4.1：起尾句由 AI 随写入给出，
-        # 代码侧确定性定位；定位失败/未给 → 粗锚点 turn_refs 兜底）
+        # 代码侧确定性定位；定位失败/未给 → 粗锚点 turn_refs 兜底。
+        # 2026-10-12 裁决：定位语料=持久存档∪内存（与 key_quotes 同源），
+        # 句对失败静默丢弃不加回执——旁路元数据，不为它增加机制）
         quote_spans = validated.get("quote_spans") or []
         if quote_spans:
-            pairs = spans_from_quotes(quote_spans, session.messages)
+            pairs = spans_from_quotes(quote_spans, self._quote_corpus(session))
             if pairs:
                 self.turn_spans.fill(event.event_id, pairs,
                                      filled_by="memory-writer")
@@ -852,16 +854,29 @@ class EmberService:
             provenance_refs=["memory-writer", f"chat:{session.session_id}"],
         )
 
+    def _quote_corpus(self, session: Session) -> list[dict[str, Any]]:
+        """逐字核对与出处定位的共用语料：落盘存档 ∪ 内存会话。
+
+        存档行与内存消息同形（role/content/turn），重启不丢——旁路形态下
+        内存会话随进程清空，易失语料会让「引用更早对话」全部落空
+        （2026-10-12 裁决：语料以持久存档为准，内存只补当轮未存档部分）。
+        """
+        max_t = self.transcripts.max_turn(session.session_id)
+        archive = (self.transcripts.get(session.session_id,
+                                        list(range(1, max_t + 1)))
+                   if max_t > 0 else [])
+        return archive + session.messages
+
     def _verify_key_quotes(self, event: Event,
                            session: Session) -> list[dict[str, str]]:
         """key_quotes 逐字核对（r4 第 3.2 项，确定性，代码侧）。
 
-        每条 text 逐字查找本会话原文。核对语料 = 落盘存档（TranscriptStore，
-        重启不丢——2026-10-12 修正：旁路形态下 sidecar 重启会清空内存会话，
-        易失语料会让「引用更早对话的原话」全部误伤）∪ 内存会话（当前轮
-        由钩子刚写入、尚未存档的部分）。做空白归一容错（与 locate_turn
-        同款策略）。对不上的条目从 event 上丢弃并返回（调用方写进 tool
-        result）；原话的价值在于是真话，不能让改写或编造的句子混进去。
+        每条 text 逐字查找本会话原文。核对语料见 _quote_corpus（持久存档
+        ∪ 内存——2026-10-12 修正：旁路形态下 sidecar 重启会清空内存会话，
+        易失语料会让「引用更早对话的原话」全部误伤）。做空白
+        归一容错（与 locate_turn 同款策略）。对不上的条目从 event 上
+        丢弃并返回（调用方写进 tool result）；原话的价值在于是真话，
+        不能让改写或编造的句子混进去。
         """
         import re
 
@@ -874,14 +889,7 @@ class EmberService:
             if role in corpus_by_role and isinstance(content, str):
                 corpus_by_role[role].append(content)
 
-        # 持久语料：原文存档（该会话全部已存档轮次）
-        max_turn = self.transcripts.max_turn(session.session_id)
-        if max_turn > 0:
-            for row in self.transcripts.get(
-                    session.session_id, list(range(1, max_turn + 1))):
-                _feed(row.get("role"), row.get("content"))
-        # 易失语料：内存会话（当前轮钩子刚写入、尚未存档）
-        for m in session.messages:
+        for m in self._quote_corpus(session):
             _feed(m.get("role"), m.get("content"))
 
         def _find_anywhere(text: str, speaker: str) -> bool:

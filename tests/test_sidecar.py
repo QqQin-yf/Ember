@@ -200,14 +200,21 @@ def main():
 
         print("== S12 持久语料：重启后引用更早存档轮的原话不再误伤 ==")
         # sc1 的 turn-1 用户原话已在 TranscriptStore 落盘；service2 是重启后
-        # 的新实例（内存会话为空）——修正前引更早轮原话必然全部 dropped
+        # 的新实例（内存会话为空）——修正前引更早轮原话必然全部 dropped，
+        # 出处句对也定位不到（当时定位语料只有内存）
         service2.hook_turn_start("sc1", "重启后再写一条。")
         r12 = service2.sidecar_create_memory_event(write_args(
-            user_quote="今天我们决定把 Ember 的传播模型改成"))
+            user_quote="今天我们决定把 Ember 的传播模型改成",
+            quote_spans=[{"start_quote": "今天我们决定把",
+                          "end_quote": "改成 Route Search。"}]))
         check("存档原话跨重启核对通过（持久语料生效）",
               r12.get("status") == "created"
               and not r12.get("dropped_quotes"),
               str(r12.get("dropped_quotes")))
+        ev12 = service2.store.get_event(r12["event_id"])
+        span12 = service2.turn_spans.span_of_event(ev12)
+        check("存档句跨重启精确定位（当前轮锚点在 turn 4，span 含 1 即真定位）",
+              any(s <= 1 <= e for s, e in span12), str(span12))
         service2.hook_turn_end("sc1", "好，这条也记下了。")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
