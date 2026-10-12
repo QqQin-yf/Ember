@@ -235,6 +235,9 @@ def main():
                         {"cue_type": "lexical", "cue": "国庆"},
                         {"cue_type": "lexical", "cue": "河南"},
                     ],
+                    # quote_spans 必填（2026-10-12）：摘本轮用户原话首尾片段
+                    "quote_spans": [{"start_quote": text[:8],
+                                     "end_quote": text[-8:]}],
                 }, ensure_ascii=False)
                 return msg
         mc = EmberService(EmberStore(tmp), MultiCueLLM(), model="mock-chat")

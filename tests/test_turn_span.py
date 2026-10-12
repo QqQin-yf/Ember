@@ -58,10 +58,15 @@ def test_v1_compat():
 def test_degrade():
     with tempfile.TemporaryDirectory() as root:
         ts = TurnSpanStore(root)
-        # 无回填有锚点 → min/max 单区间
-        assert ts.span_of("EVT-X", anchor_turns=[4, 2, 9]) == [(2, 9)]
-        # 无回填无锚点 → 空列表（未知出处）
-        assert ts.span_of("EVT-Y") == []
+        # 未回填 → []（无真实坐标，诚实上报——2026-10-12 裁决移除锚点代答）
+        assert ts.span_of("EVT-X") == []
+        # span_of_event 同语义：turn_refs 只是出生图章，不再代答坐标
+        ev = type("E", (), {"event_id": "EVT-X",
+                            "turn_refs": ["turn-4"]})()
+        assert ts.span_of_event(ev) == []
+        # 回填后 → 精确区间
+        ts.fill("EVT-X", [(2, 9)])
+        assert ts.span_of("EVT-X") == [(2, 9)]
         # fill 空 spans 拒绝
         try:
             ts.fill("EVT-Z", [])
@@ -95,6 +100,35 @@ def test_file_format_v2():
         print("ok  test_file_format_v2")
 
 
+def test_spans_from_quotes_half_valid():
+    # 2026-10-12 裁决：半有效句对 → 缺失端取保证边界，区间必含真实跨度；
+    # 双盲 → 整对放弃。语料=持久存档∪内存（见 service._quote_corpus）。
+    from ember.turn_span import spans_from_quotes
+    msgs = [
+        {"role": "user", "turn": 1,
+         "content": "今天我们决定把 Ember 的传播模型改成 Route Search。"},
+        {"role": "assistant", "turn": 2, "content": "好的，记下了。"},
+        {"role": "user", "turn": 3, "content": "那梦通道也一起对一下吧。"},
+    ]
+    # 起句有效、尾句编造 → 终点取最新轮（保证边界）
+    r = spans_from_quotes(
+        [{"start_quote": "今天我们决定把", "end_quote": "这句话不存在"}], msgs)
+    assert r == [(1, 3)], r
+    # 起句编造、尾句有效 → 起点取最早轮
+    r = spans_from_quotes(
+        [{"start_quote": "这句话不存在", "end_quote": "梦通道"}], msgs)
+    assert r == [(1, 3)], r
+    # 双盲 → 整对放弃
+    r = spans_from_quotes(
+        [{"start_quote": "不存在甲", "end_quote": "不存在乙"}], msgs)
+    assert r == [], r
+    # 全有效 → 精确区间（跨轮）
+    r = spans_from_quotes(
+        [{"start_quote": "今天我们决定把", "end_quote": "梦通道"}], msgs)
+    assert r == [(1, 3)], r
+    print("ok  test_spans_from_quotes_half_valid")
+
+
 if __name__ == "__main__":
     test_fill_and_reload()
     test_norm()
@@ -102,4 +136,5 @@ if __name__ == "__main__":
     test_degrade()
     test_covers()
     test_file_format_v2()
+    test_spans_from_quotes_half_valid()
     print("turn_span tests: all passed")

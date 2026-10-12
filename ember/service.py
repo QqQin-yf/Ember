@@ -502,6 +502,23 @@ class EmberService:
          [, dropped_quotes]}。
         """
         event = self._build_event(session, turn, validated["event"])
+
+        # 出处句对定位与拒绝判定必须先于落盘：双盲句对（提供了 quote_spans
+        # 却一对都定位不上）在写库前拒绝，不留「已入库但回执 failed」的
+        # 半成品——否则模型按回执重试就会写出重复事件。
+        # 2026-10-12 裁决：定位语料=持久存档∪内存（与 key_quotes 同源）；
+        # 半有效句对取保证边界；双盲 → 整条写入拒绝（模型引了记录里不存在
+        # 的句子，粗锚点兜底会把错误坐标写进账本，宁可报错让它逐字重摘）。
+        # quote_spans 必填非空（writer.validate 封死省略路径）——粗锚点只
+        # 作为旧事件的查询时降级存在，新事件一律带真实时间坐标。
+        quote_spans = validated["quote_spans"]
+        span_pairs = spans_from_quotes(quote_spans,
+                                       self._quote_corpus(session))
+        if not span_pairs:
+            raise ValueError(
+                "quote_spans 全部未能定位：起尾句均未在会话记录中逐字找到"
+                "——请逐字核对原文后重摘")
+
         self.store.write_event(event)
 
         # key_quotes 逐字核对（r4 第 3.2 项，确定性代码侧）：
@@ -511,16 +528,9 @@ class EmberService:
         # 丢弃清单写进 tool result 让模型知道哪句没对上
         dropped = self._verify_key_quotes(event, session)
 
-        # 出处句对 → 精确 turn_span（§4.1：起尾句由 AI 随写入给出，
-        # 代码侧确定性定位；定位失败/未给 → 粗锚点 turn_refs 兜底。
-        # 2026-10-12 裁决：定位语料=持久存档∪内存（与 key_quotes 同源），
-        # 句对失败静默丢弃不加回执——旁路元数据，不为它增加机制）
-        quote_spans = validated.get("quote_spans") or []
-        if quote_spans:
-            pairs = spans_from_quotes(quote_spans, self._quote_corpus(session))
-            if pairs:
-                self.turn_spans.fill(event.event_id, pairs,
-                                     filled_by="memory-writer")
+        if span_pairs:
+            self.turn_spans.fill(event.event_id, span_pairs,
+                                 filled_by="memory-writer")
 
         routes = []
         for r in validated["recall_routes"]:

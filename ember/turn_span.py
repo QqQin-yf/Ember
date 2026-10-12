@@ -9,11 +9,14 @@
 设计（架构文档 §4.1，2026-10-08 定稿）：
 - 回填的是**允许断开的区间列表**，如 [(1,10),(15,20)]——
   一个 Event 的来源对话可能跳过中间的无关轮次。
-- 实时写入：turn_refs 只盖粗锚点（写入那一刻的 turn）——现状不变。
+- 实时写入：turn_refs 盖出生图章（写入那一刻的 turn，仅出处观察字段，
+  不作为时间坐标使用）。
 - 精确区间唯一来源 = 写入时实时定位（2026-10-12 裁决：定位语料=持久
   存档∪内存，见 service._quote_corpus；原设计的「Sleep 调用①全窗口
-  回填」移除——不建第二真相源）。定位失败的句对静默丢弃，事件降级
-  粗锚点，span_of_event 查询时自动兜底，梦通道不受阻。
+  回填」移除——不建第二真相源；turn_refs 锚点代答同裁决移除——出生
+  时刻不冒充经历时刻）。定位失败的句对整对拒绝写入（双盲）；半有效
+  取保证边界。span_of 查询未回填 → []，调用方按"未知出处"处理
+  （梦选材跳过、翻原文 not_archived，均有现成路径）。
 - 本层提供定位（spans_from_quotes）+ 写入口（fill）+ 查询接口。
 - 回填产物落旁路文件 turn_spans.jsonl（append-only，可重建），
   不写进 Event 本体（铁律：Event 不存运行时/派生状态）。
@@ -76,15 +79,26 @@ def spans_from_quotes(quote_spans: list[dict],
                       messages: list[dict]) -> list[tuple[int, int]]:
     """一组 (start_quote, end_quote) → 归并后的 turn 区间列表。
 
-    单段匹配失败丢弃；起尾都能定位才算一段。空返回 = 全部失败
-    （调用方降级粗锚点）。
+    起尾都定位 → 精确区间；只有一端定位 → 缺失端取保证边界
+    （起点未知=会话最早轮，终点未知=最新轮——真实跨度必被该区间包含，
+    2026-10-12 裁决：半有效优于粗锚点，宽覆盖不编造）；两端都定位不到
+    → 整对放弃（无任何真实坐标）。空返回 = 全部放弃（调用方降级粗锚点）。
     """
+    turns = [m.get("turn") for m in messages
+             if isinstance(m.get("turn"), int)]
+    if not turns:
+        return []
+    lo, hi = min(turns), max(turns)
     pairs: list[tuple[int, int]] = []
     for qs in quote_spans or []:
         s = locate_turn(qs.get("start_quote", ""), messages)
         e = locate_turn(qs.get("end_quote", ""), messages)
-        if s is None or e is None:
+        if s is None and e is None:
             continue
+        if s is None:
+            s = lo
+        if e is None:
+            e = hi
         pairs.append((min(s, e), max(s, e)))
     if not pairs:
         return []
@@ -181,29 +195,18 @@ class TurnSpanStore:
         self.provenance[event_id] = filled_by
         return entry
 
-    def span_of(self, event_id: str, anchor_turns: list[int] | None = None
-                ) -> list[tuple[int, int]]:
+    def span_of(self, event_id: str) -> list[tuple[int, int]]:
         """查询 Event 的 turn 区间列表。
 
-        已回填 → 精确区间列表（可能断开）；未回填 → 降级：
-        - 有锚点列表（event.turn_refs 解析出的序数）→ [(min, max)]
-        - 都没有 → []，调用方按"未知出处"处理
+        已回填 → 精确区间列表（可能断开）；未回填 → []（无真实坐标，
+        调用方按"未知出处"处理——2026-10-12 裁决移除 turn_refs 锚点
+        代答：出生时刻不冒充经历时刻）。
         """
-        if event_id in self.spans:
-            return self.spans[event_id]
-        if anchor_turns:
-            return [(min(anchor_turns), max(anchor_turns))]
-        return []
+        return list(self.spans.get(event_id, []))
 
     def span_of_event(self, event) -> list[tuple[int, int]]:
-        """便捷：直接从 Event 对象解析锚点降级。"""
-        import re
-        turns = []
-        for ref in (getattr(event, "turn_refs", None) or []):
-            m = re.search(r"(\d+)$", str(ref))
-            if m:
-                turns.append(int(m.group(1)))
-        return self.span_of(getattr(event, "event_id", ""), turns)
+        """便捷：按 event_id 查区间；无回填 → []。"""
+        return self.span_of(getattr(event, "event_id", ""))
 
     def covers(self, event_id: str, turn: int) -> bool:
         """turn 是否落在该 Event 的任一区间内（候选组装的交集判断）。"""

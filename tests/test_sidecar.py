@@ -37,9 +37,12 @@ def check(name: str, cond: bool, detail: str = ""):
         print(f"  [FAIL] {name}  {detail}")
 
 
+_UNSET = object()
+
+
 def write_args(user_quote: str | None = None,
                cues: tuple[str, ...] = ("Ember",),
-               quote_spans: list[dict[str, str]] | None = None,
+               quote_spans: list[dict[str, str]] | None | object = _UNSET,
                extra_ai_quote: str | None = None) -> dict:
     """一份合法的 create_memory_event 参数（字段集与 validate 对齐）。"""
     quotes: list[dict[str, str]] = []
@@ -63,7 +66,12 @@ def write_args(user_quote: str | None = None,
         },
         "recall_routes": [{"cue_type": "lexical", "cue": c} for c in cues],
     }
-    if quote_spans:
+    if quote_spans is _UNSET:
+        # quote_spans 必填（2026-10-12 裁决）：默认给一对可定位的起尾句
+        args["quote_spans"] = [
+            {"start_quote": "今天我们决定把", "end_quote": "改成 Route Search。"}]
+    else:
+        # 传 [] 显式模拟「没给」（校验拒绝）
         args["quote_spans"] = quote_spans
     return args
 
@@ -216,6 +224,26 @@ def main():
         check("存档句跨重启精确定位（当前轮锚点在 turn 4，span 含 1 即真定位）",
               any(s <= 1 <= e for s, e in span12), str(span12))
         service2.hook_turn_end("sc1", "好，这条也记下了。")
+
+        print("== S13 双盲句对：整条写入拒绝，回执指路 ==")
+        n_events_before = len(service2.store.all_events())
+        service2.hook_turn_start("sc1", "再写一条。")
+        r13 = service2.sidecar_create_memory_event(write_args(
+            quote_spans=[{"start_quote": "这句话不存在111",
+                          "end_quote": "这句话不存在222"}]))
+        check("双盲句对 → failed 且回执指路",
+              r13.get("status") == "failed"
+              and "quote_spans" in r13.get("error", ""),
+              str(r13)[:160])
+        check("拒绝发生在落盘前（库中没有半成品）",
+              len(service2.store.all_events()) == n_events_before)
+        # 「没给」也封死：省略/空 quote_spans → 校验拒绝（quote_spans 必填）
+        r13b = service2.sidecar_create_memory_event(write_args(quote_spans=[]))
+        check("没给句对 → 校验拒绝（必填封死省略路径）",
+              r13b.get("status") == "failed"
+              and "quote_spans" in r13b.get("error", ""),
+              str(r13b)[:160])
+        service2.hook_turn_end("sc1", "好。")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

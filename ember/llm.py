@@ -134,6 +134,8 @@ class MockLLMClient:
                 "key_quotes": [],
             },
             "recall_routes": [{"cue_type": "lexical", "cue": anchor}] + extra_routes,
+            # quote_spans 必填（2026-10-12 裁决）：摘本轮用户原话的首尾片段
+            "quote_spans": [{"start_quote": text[:8], "end_quote": text[-8:]}],
         }
         return {
             "role": "assistant",

@@ -265,6 +265,10 @@ def test_read_memory_source():
                         ingest_time=_now_iso(), summary="长", core="长",
                         turn_refs=["turn-1"])
             store2.write_event(ev2)
+            # 出处区间显式回填（2026-10-12 裁决移除锚点代答后，翻原文
+            # 依赖真实 span；本测试意图是截断行为，区间给 (1,1) 即可）
+            from ember.turn_span import TurnSpanStore
+            TurnSpanStore(root2).fill("EVT-097-xxxx", [(1, 1)])
             svc3 = EmberService(store2, FakeClient(), model="mock")
             call3 = {"function": {"name": "read_memory_source",
                                   "arguments": json.dumps(

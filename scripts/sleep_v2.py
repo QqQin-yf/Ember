@@ -145,13 +145,10 @@ def assemble_materials(new_event_ids: list[str], events: dict[str, dict],
         ev = events.get(new_id)
         if ev is None:
             continue
-        # dict 无属性，不能用 span_of_event（getattr 静默降级），直接按 id 查；
-        # 未回填时用 turn_refs 锚点降级（与 span_of_event 语义一致）
+        # dict 无属性，不能用 span_of_event，直接按 id 查。
+        # 2026-10-12 裁决：无 span 即无真实坐标，诚实跳过——不再用
+        # turn_refs 锚点代答（出生时刻不冒充经历时刻）
         turns = spans.span_of(new_id)
-        if not turns:
-            anchor = [int(m.group(1)) for ref in (ev.get("turn_refs") or [])
-                      for m in [re.search(r"(\d+)$", str(ref))] if m]
-            turns = spans.span_of(new_id, anchor)
         if not turns:
             continue
         # 记账带出的旧 events（该新 Event 被召回的那几轮）；

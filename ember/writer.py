@@ -27,7 +27,8 @@ TOOL_DESCRIPTION = (
     "记录一条值得长期保存的经历（Event）。只在出现具体的、值得留存的经历时调用："
     "明确的决定、变化、结果、认知转变或重要互动。普通寒暄、闲聊、进行中的琐碎"
     "对话不要调用；拿不准时不要调用。各字段填法见参数描述；系统字段"
-    "（id、时间戳、出处等）由系统生成，无需提供。"
+    "（id、时间戳、出处等）由系统生成，无需提供。每次写入必须附 quote_spans"
+    "（起尾句逐字摘自对话原文，无法定位的写入会被拒绝）。"
     "同一条经历只调用一次：返回 status=created 即已写入成功，"
     "不要因为 dropped_quotes（原话未通过逐字核对）或任何细节不满意而重复调用——"
     "重复调用会产生重复记忆。被丢的原话只说明摘录与原文有出入，记忆本身已完整保存。"
@@ -50,7 +51,7 @@ def build_tools_spec() -> list[dict[str, Any]]:
             "parameters": {
                 "type": "object",
                 "additionalProperties": False,
-                "required": ["event", "recall_routes"],
+                "required": ["event", "recall_routes", "quote_spans"],
                 "properties": {
                     "event": {
                         "type": "object",
@@ -200,6 +201,11 @@ def validate_writer_arguments(args: dict[str, Any]) -> tuple[dict[str, Any] | No
     if unknown:
         return None, f"多余的顶层字段: {sorted(unknown)}"
 
+    # quote_spans 必填（2026-10-12 裁决：新事件一律带真实时间坐标，
+    # 不给/给空都算不合法——粗锚点只作为旧事件的查询时降级存在）
+    if "quote_spans" not in args:
+        return None, "缺少字段: quote_spans（起尾句对，逐字摘自对话原文）"
+
     event = args.get("event")
     required_event = [
         "summary", "participants", "objects", "context", "core",
@@ -259,23 +265,22 @@ def validate_writer_arguments(args: dict[str, Any]) -> tuple[dict[str, Any] | No
         if not isinstance(r.get("cue"), str) or not r["cue"].strip():
             return None, f"recall_routes[{i}].cue 必须是非空字符串"
 
-    # quote_spans 可选：给出时逐对校验（起/尾句均须非空字符串）
+    # quote_spans 必填非空：逐对校验（起/尾句均须非空字符串）
     quote_spans = args.get("quote_spans")
-    if quote_spans is not None:
-        if not isinstance(quote_spans, list):
-            return None, "quote_spans 必须是数组"
-        allowed_q = {"start_quote", "end_quote"}
-        for i, q in enumerate(quote_spans):
-            if not isinstance(q, dict):
-                return None, f"quote_spans[{i}] 不是对象"
-            if set(q) - allowed_q:
-                return None, f"quote_spans[{i}] 含未声明字段: {sorted(set(q) - allowed_q)}"
-            for k in ("start_quote", "end_quote"):
-                if not isinstance(q.get(k), str) or not q[k].strip():
-                    return None, f"quote_spans[{i}].{k} 必须是非空字符串"
+    if not isinstance(quote_spans, list) or not quote_spans:
+        return None, "quote_spans 必须是非空数组（至少一对起尾句，逐字摘自对话原文）"
+    allowed_q = {"start_quote", "end_quote"}
+    for i, q in enumerate(quote_spans):
+        if not isinstance(q, dict):
+            return None, f"quote_spans[{i}] 不是对象"
+        if set(q) - allowed_q:
+            return None, f"quote_spans[{i}] 含未声明字段: {sorted(set(q) - allowed_q)}"
+        for k in ("start_quote", "end_quote"):
+            if not isinstance(q.get(k), str) or not q[k].strip():
+                return None, f"quote_spans[{i}].{k} 必须是非空字符串"
 
     return {"event": event, "recall_routes": routes,
-            "quote_spans": quote_spans or []}, None
+            "quote_spans": quote_spans}, None
 
 
 def parse_tool_call(message: dict[str, Any]) -> dict[str, Any] | None:
