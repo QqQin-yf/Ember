@@ -283,6 +283,60 @@ def validate_writer_arguments(args: dict[str, Any]) -> tuple[dict[str, Any] | No
             "quote_spans": quote_spans}, None
 
 
+# ---------------------------------------------------------------------------
+# revise_memory_event（2026-10-14 momo 拍板：冷静期修正）
+# ---------------------------------------------------------------------------
+
+REVISE_TOOL_NAME = "revise_memory_event"
+
+# 可修改字段 = 对事实的叙述（含参与者的更正）；cue 经 recall_cues 整体重设。
+# 锁死 = 与原文/系统的绑定（id、时间戳、出处、摘录）——摘录与原文的绑定
+# 一动双盲核对就废，出处一动回指就断。
+REVISE_ALLOWED_FIELDS = ("summary", "participants", "objects", "context",
+                         "core", "outcome", "state", "affect",
+                         "significance", "details")
+REVISE_LOCKED_FIELDS = ("key_quotes", "quote_spans", "turn_refs",
+                        "raw_ref", "source_ref")
+
+REVISE_TOOL_DESCRIPTION = (
+    "修改一条自己写下的记忆（冷静期内）。只在用户当场指出记忆内容"
+    "与事实不符（例如把「去过某地」记成了「住在某地」）时调用："
+    "提供 event_id 和需要修正的字段。系统字段（id、时间戳、出处、"
+    "逐字摘录）不可修改；已进入夜间维护的记忆不可修改——那种情况"
+    "请改用 create_memory_event 写一条更正记忆并说明修正关系。"
+)
+
+
+def build_revise_tool_spec() -> list[dict[str, Any]]:
+    """revise_memory_event 的 MCP 工具 schema（旁路专用，代理循环不挂）。"""
+    props: dict[str, Any] = {
+        "event_id": {"type": "string",
+                     "description": "要修改的记忆 id"},
+        "recall_cues": {
+            "type": "array",
+            "description": "（可选）整体重设这条记忆的召回线索"
+                           "（原来怎么被想起来的）；提供即全量替换",
+            "items": {"type": "string"},
+        },
+    }
+    for f in REVISE_ALLOWED_FIELDS:
+        props[f] = {"type": "string",
+                    "description": f"（可选）{f} 的新内容"}
+    return [{
+        "type": "function",
+        "function": {
+            "name": REVISE_TOOL_NAME,
+            "description": REVISE_TOOL_DESCRIPTION,
+            "strict": False,
+            "parameters": {
+                "type": "object",
+                "properties": props,
+                "required": ["event_id"],
+            },
+        },
+    }]
+
+
 def parse_tool_call(message: dict[str, Any]) -> dict[str, Any] | None:
     """从 writer 返回的 message 中提取 create_memory_event 调用。
 

@@ -68,6 +68,10 @@ class EmberStore:
             if route.status == "active" and route.matcher == "lexical":
                 self._cue_index[route.cue.strip().lower()].add(route.route_id)
 
+    def rebuild_index(self) -> None:
+        """公开入口：cue 索引重建（revise 改 route 后调用）。"""
+        self._rebuild_index()
+
     def index_snapshot(self) -> dict[str, list[str]]:
         """cue -> route_ids，用于验收/调试查看。"""
         return {k: sorted(v) for k, v in sorted(self._cue_index.items())}

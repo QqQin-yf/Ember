@@ -34,9 +34,9 @@ try:
     check("反向查询", ledger.ember_turns_of("t-000001") == [("s1", 1)])
     check("未登记返回 None", ledger.heart_id_of("s1", 99) is None)
 
-    # 缺失 heart_meta：不写账、不报错
-    check("无 turn_id 不写账", ledger.record("s1", 3, None) is None)
-    check("空串不写账", ledger.record("s1", 3, "  ") is None)
+    # 2026-10-14 无条件记账：turn 号本身永远落账（计数恢复职责）
+    check("无 turn_id 也记最小账", ledger.record("s1", 3, None) is not None)
+    check("空串 turn_id 也记最小账", ledger.record("s1", 3, "  ") is not None)
 
     # 落盘重载：映射持久
     ledger2 = TurnLedger(root)
@@ -60,13 +60,16 @@ try:
         turn_refs = ["turn-3"]
 
     s = spans.span_of_event(_FakeEvent())
-    check("未回填降级到锚点单点区间", s == [(3, 3)])
+    # 2026-10-12 裁决：移除锚点代答（出生时刻不冒充经历时刻）——
+    # 未回填 → 空列表，调用方按「未知出处」处理
+    check("未回填不降级锚点（返回空列表）", s == [])
 
     class _FakeEvent2:
         event_id = "EVT-002-bbbbbb"
         turn_refs = ["turn-2", "turn-7"]
 
-    check("未回填降级到锚点 min/max", spans.span_of_event(_FakeEvent2()) == [(2, 7)])
+    check("未回填不降级锚点 min/max（空列表）",
+          spans.span_of_event(_FakeEvent2()) == [])
 
     class _FakeEvent3:
         event_id = "EVT-003-cccccc"

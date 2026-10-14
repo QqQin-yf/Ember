@@ -34,7 +34,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ember.llm import MockLLMClient
 from ember.service import EmberService
 from ember.store import EmberStore
-from ember.writer import READ_SOURCE_TOOL_NAME, TOOL_NAME
+from ember.writer import (READ_SOURCE_TOOL_NAME, REVISE_TOOL_NAME,
+                          TOOL_NAME)
 
 import mcp.types as types
 from mcp.server.lowlevel import Server
@@ -74,6 +75,8 @@ async def _list_tools() -> list[types.Tool]:
 async def _call_tool(name: str, arguments: dict) -> list[types.TextContent]:
     if name == TOOL_NAME:
         result = SERVICE.sidecar_create_memory_event(arguments or {})
+    elif name == REVISE_TOOL_NAME:
+        result = SERVICE.sidecar_revise_memory_event(arguments or {})
     elif name == READ_SOURCE_TOOL_NAME:
         result = SERVICE.sidecar_read_memory_source(
             (arguments or {}).get("event_id") or "")
@@ -99,6 +102,19 @@ async def _lifespan(app):
 
 # ---------- 钩子层：失败如实上报，绝不抛 500 挡前端 ----------
 
+def _opt_int(body: dict, key: str) -> int | None:
+    """钩子请求体的可选整数 id（message_id 类）：int 或数字串 → int，
+    其余（缺省/null/空/非数字）→ None。脏值不挡主流程。"""
+    v = body.get(key)
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, int):
+        return v
+    if isinstance(v, str) and v.strip().lstrip("-").isdigit():
+        return int(v.strip())
+    return None
+
+
 async def _hook_turn_start(request: Request) -> JSONResponse:
     try:
         body = await request.json()
@@ -109,7 +125,9 @@ async def _hook_turn_start(request: Request) -> JSONResponse:
         return JSONResponse({"injected": False, "injected_text": None,
                              "reason": "empty message"})
     return JSONResponse(SERVICE.hook_turn_start(
-        body.get("session_id"), message, body.get("heart_turn_id")))
+        body.get("session_id"), message, body.get("heart_turn_id"),
+        user_message_id=_opt_int(body, "user_message_id"),
+        context_start_id=_opt_int(body, "context_start_id")))
 
 
 async def _hook_turn_end(request: Request) -> JSONResponse:
@@ -124,7 +142,7 @@ async def _hook_turn_end(request: Request) -> JSONResponse:
         turn = None
     return JSONResponse(SERVICE.hook_turn_end(
         body.get("session_id"), str(body.get("assistant_reply") or ""),
-        turn))
+        turn, assistant_message_id=_opt_int(body, "assistant_message_id")))
 
 
 class BearerAuthMiddleware:

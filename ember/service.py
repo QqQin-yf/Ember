@@ -36,12 +36,13 @@ from .direction import DirectionMatcher, DirectionVectorStore
 from .turn_ledger import TurnLedger
 from .recall_ledger import RecallLedger
 from .turn_span import TurnSpanStore, spans_from_quotes
-from .transcript import TranscriptStore
+from . import source_client
 from .dream_ledger import DreamLedger
 from .dream_source import DreamSource
 from .writer import (
     TOOL_NAME,
     READ_SOURCE_TOOL_NAME,
+    build_revise_tool_spec,
     EMBEDDED_WRITER_PROMPT,
     build_tools_spec,
     validate_writer_arguments,
@@ -210,9 +211,9 @@ class EmberService:
         self.turn_spans = TurnSpanStore(getattr(store, "root", ""))
         # 召回记账（10-08 定稿 §3.2）：候选组装与旧 Cue 收紧的共同前置，旁路只观察
         self.recall_ledger = RecallLedger(getattr(store, "root", ""))
-        # 会话原文存档（r4 第 1 项）：每轮成功后落盘 user/assistant 原文；
-        # 重启恢复计数与 read_memory_source 的数据来源
-        self.transcripts = TranscriptStore(getattr(store, "root", ""))
+        # 会话原文存档已退役（2026-10-14 去原文化）：原文只存后端消息树
+        # 一份，ember 经 source_client 按 message_id 按需拉取（用完即弃）；
+        # 轮次持久账 = turn_ledger（无条件记账，重启恢复计数用）
         # heart 梦通道 v3（2026-10-10 契约定稿）：选材器 + 夜账本，均旁路。
         # DreamSource 需要 source_session 属性——Event 上动态补（见下）
         self.dream_ledger = DreamLedger(getattr(store, "root", ""))
@@ -235,11 +236,12 @@ class EmberService:
         sid = session_id or self.DEFAULT_SESSION_ID
         if sid not in self.sessions:
             sess = Session(sid)
-            # 重启恢复计数（r4 第 2 项）：该 session 有存档 → 计数接续最大
+            # 重启恢复计数（r4 第 2 项；2026-10-14 改源）：turn_ledger 无条件
+            # 记账（transcripts 退役后账本是轮次唯一持久账），计数接续最大
             # turn，避免与重启前轮次撞号（记账/turn_span 串号）。
             # 只恢复计数，不恢复 messages 历史——上下文恢复由 momo 定为
             # 独立项（涉及 wire 层一致性/缓存/前端，另行设计）。
-            saved_max = self.transcripts.max_turn(sid)
+            saved_max = self.turn_ledger.max_turn(sid)
             if saved_max > 0:
                 sess.turn_counter = saved_max
             self.sessions[sid] = sess
@@ -358,13 +360,8 @@ class EmberService:
             content = "（空回复）"
         session.messages.append({"role": "assistant", "content": content, "turn": turn})
 
-        # 原文存档（r4 第 1 项）：本轮成功结束，用户原话（不带召回前缀）
-        # + 最终回复各存一行；chat 失败走上面 except 分支不会到这里
-        try:
-            self.transcripts.append_turn(session.session_id, turn,
-                                         user_text, content)
-        except OSError:
-            pass  # 存档是旁路，落盘失败不阻断对话返回
+        # 原文存档已退役（2026-10-14）：原文只存后端消息树一份，
+        # ember 按 message_id 按需拉取（source_client），不再自存。
 
         return {
             "id": f"chatcmpl-{uuid.uuid4().hex[:24]}",
@@ -392,16 +389,23 @@ class EmberService:
     # ---------- 召回流水线（chat 与轮前钩子共用，2026-10-12 抽取） ----------
 
     def run_recall_pipeline(self, session: Session, turn: int,
-                            user_text: str) -> dict[str, Any]:
-        """本地召回全流水线：Cue/Entity 双路 → Sleep 过滤 → Relation 展开
-        → 召回记账 → 前缀块构建。
+                            user_text: str,
+                            context_start_id: int | None = None
+                            ) -> dict[str, Any]:
+        """本地召回全流水线：Cue/Entity 双路 → Sleep 过滤 → 窗口过滤
+        → Relation 展开 → 召回记账 → 前缀块构建。
 
         两条入口（chat_completion / hook_turn_start）共用同一实现。
         记账失败不阻断（旁路只观察）。返回：
         {prefix, recalled_count, entity_recalled, entity_names,
-         filtered_by_sleep, resolved_brought, direction_focused,
-         direction_reason, summary_fallback, semantic_matched,
-         semantic_reason}
+         filtered_by_sleep, filtered_by_window, resolved_brought,
+         direction_focused, direction_reason, summary_fallback,
+         semantic_matched, semantic_reason}
+
+        窗口过滤（2026-10-14 去原文化，图第 2 点拍板）：context_start_id
+        = 当前窗口起点（后端 message_id），经 turn_ledger 换算成起点
+        turn 后，来源 turn 区间全部 ≥ 起点的候选滤掉——原文就在现场，
+        记忆只负责窗口外的事。无来源坐标（span 未回填）保守保留。
         """
         direct_recaller = DirectRecall(self.store)
         recalled_ctx = direct_recaller.recall(user_text)
@@ -436,6 +440,28 @@ class EmberService:
                 if eid not in excluded]
             entity_event_ids = [
                 eid for eid in entity_event_ids if eid not in excluded]
+
+        # 窗口过滤（2026-10-14 去原文化）：来源全部在当前窗口内的候选
+        # 滤掉——原文就在现场，召回只负责窗口外/被截断前的事。
+        start_turn = None
+        if context_start_id is not None:
+            start_turn = self.turn_ledger.turn_at_or_after(
+                session.session_id, context_start_id)
+        window_excluded: list[str] = []
+        if start_turn is not None:
+            for eid in set(recalled_ctx.recalled_events) | set(entity_event_ids):
+                spans = self.turn_spans.span_of(eid)
+                if not spans:
+                    continue  # 无真实出处坐标 → 保守保留
+                if min(s for s, _ in spans) >= start_turn:
+                    window_excluded.append(eid)
+            if window_excluded:
+                recalled_ctx.recalled_events = [
+                    eid for eid in recalled_ctx.recalled_events
+                    if eid not in window_excluded]
+                entity_event_ids = [
+                    eid for eid in entity_event_ids
+                    if eid not in window_excluded]
 
         # 双路合流：Entity 区域 Event 并入（去重），来源标注留待 Presentation 扩展
         for eid in entity_event_ids:
@@ -482,6 +508,7 @@ class EmberService:
             "entity_recalled": len(entity_hits),
             "entity_names": [h.name for h in entity_hits],
             "filtered_by_sleep": len(excluded),
+            "filtered_by_window": len(window_excluded),
             "resolved_brought": [dst for dst, _ in resolved_brought],
             "direction_focused": direction_focused,
             "direction_reason": direction_reason,
@@ -633,9 +660,10 @@ class EmberService:
         """翻原文单事件实现（只读；代理工具循环与 MCP 旁路工具共用）。
 
         取原文 = Event 的 source_ref 解析 session + turn_spans 精确区间
-        （无则降级 turn_refs 锚点），从 TranscriptStore 取这些轮的
-        user/assistant 原文。无存档（旧数据）→ not_archived，不报错不编造。
-        superseded 事件也可读——这是显式翻看，不是自动召回。
+        （无则 not_archived），语料 = 内存会话 ∪ source_client 按需拉取
+        （2026-10-14 退役 transcripts：原文只存后端一份）。两边都没有
+        → not_archived，不报错不编造。superseded 事件也可读——这是
+        显式翻看，不是自动召回。
         """
         import re
         eid = (event_id or "").strip()
@@ -650,13 +678,21 @@ class EmberService:
         if sess is None or not spans:
             return {"status": "not_archived", "event_id": resolved,
                     "reason": "该事件没有可定位的原文存档"
-                              "（写入早于存档功能或出处未回填）"}
+                              "（写入早于定位功能或出处未回填）"}
         sid = sess.group(1)
         turns = [t for s, e in spans for t in range(s, e + 1)]
-        rows = self.transcripts.get(sid, turns)
+        want = set(turns)
+        rows = [m for m in self.sessions.get(sid).messages
+                if m.get("turn") in want] if sid in self.sessions else []
+        have = {m.get("turn") for m in rows}
+        if len(have) < len(want):
+            rows += self._fetched_corpus(sid, want - have)
+        rows.sort(key=lambda r: (r.get("turn", 0),
+                                 0 if r.get("role") == "user" else 1))
         if not rows:
             return {"status": "not_archived", "event_id": resolved,
-                    "reason": "该事件的原文轮次没有存档"}
+                    "reason": "该事件的原文轮次拉取不到"
+                              "（后端原文接口未配置或不可达）"}
         transcript = "\n".join(
             f"[turn {r['turn']}] {r['role']}: {r['content']}" for r in rows)
         truncated = False
@@ -864,18 +900,44 @@ class EmberService:
             provenance_refs=["memory-writer", f"chat:{session.session_id}"],
         )
 
-    def _quote_corpus(self, session: Session) -> list[dict[str, Any]]:
-        """逐字核对与出处定位的共用语料：落盘存档 ∪ 内存会话。
+    def _fetched_corpus(self, sid: str, turns: set[int] | None = None
+                        ) -> list[dict[str, Any]]:
+        """向后端原文接口按需拉语料（2026-10-14，transcripts 退役）。
 
-        存档行与内存消息同形（role/content/turn），重启不丢——旁路形态下
-        内存会话随进程清空，易失语料会让「引用更早对话」全部落空
-        （2026-10-12 裁决：语料以持久存档为准，内存只补当轮未存档部分）。
+        拉取区间 = turn_ledger 覆盖的 message_id 全幅；每行经 ledger
+        标回 ember turn 坐标（语料同形，定位逻辑零改动）。归属不明的
+        行丢弃。turns 给定时只留这些轮。提供方未配置/不可达 → []
+        （调用方按「只有内存语料」降级，引用内存外原话会如实核对失败）。
         """
-        max_t = self.transcripts.max_turn(session.session_id)
-        archive = (self.transcripts.get(session.session_id,
-                                        list(range(1, max_t + 1)))
-                   if max_t > 0 else [])
-        return archive + session.messages
+        try:
+            span = self.turn_ledger.message_span(sid, 1, 10 ** 9)
+            if span is None:
+                return []
+            rows = source_client.fetch_source_range(sid, span[0], span[1])
+        except (source_client.SourceUnavailable, OSError):
+            return []
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            t = self.turn_ledger.turn_of_message(sid, r["message_id"])
+            if t is None:
+                continue
+            if turns is not None and t not in turns:
+                continue
+            out.append({"role": r["role"], "content": r["content"],
+                        "turn": t})
+        return out
+
+    def _quote_corpus(self, session: Session) -> list[dict[str, Any]]:
+        """逐字核对与出处定位的共用语料：内存会话 ∪ 按需拉取（去原文化）。
+
+        2026-10-14 退役 transcripts：原文只存后端一份，缺的轮次经
+        source_client 现拉（用完即弃，不落盘）。拉取失败 → 只用内存
+        ——引用内存外原话会如实定位失败（双盲拒绝），绝不编造。
+        """
+        fetched = self._fetched_corpus(session.session_id)
+        known = {m.get("turn") for m in session.messages}
+        extra = [r for r in fetched if r["turn"] not in known]
+        return session.messages + extra
 
     def _verify_key_quotes(self, event: Event,
                            session: Session) -> list[dict[str, str]]:
@@ -1131,26 +1193,35 @@ class EmberService:
     # 设计约束：无感工具——上下文永远以前端为准；失败如实回执不编造。
 
     def hook_turn_start(self, session_id: str | None, message: str,
-                        heart_turn_id: str | None = None) -> dict[str, Any]:
+                        heart_turn_id: str | None = None,
+                        user_message_id: int | None = None,
+                        context_start_id: int | None = None) -> dict[str, Any]:
         """轮前钩子：开新一轮 + 本地召回，返回注入文本。
 
         返回 {injected, injected_text, session_id, turn, memory}。
         injected_text 为前端本轮自行注入的 [记忆浮现] 前缀块（无命中
         为 null）。同时记录进行中的一轮供 MCP 写入工具关联出处；
         同会话连续两次 turn_start（重新生成/重发）覆盖旧上下文。
+
+        user_message_id（可选，2026-10-14 去原文化）：本轮刺激源在后端
+        消息树的行 id——turn_ledger 登记映射，Event 本体不存（铁律）。
+        context_start_id（可选）：当前窗口起点（后端 message_id），驱动
+        召回起点过滤（来源全在窗口内的候选滤掉）。
         """
         session = self.get_or_create_session(session_id)
         turn = session.next_turn()
-        self.turn_ledger.record(session.session_id, turn, heart_turn_id)
-        rec = self.run_recall_pipeline(session, turn, message)
+        self.turn_ledger.record(session.session_id, turn, heart_turn_id,
+                                user_message_id=user_message_id)
+        rec = self.run_recall_pipeline(session, turn, message,
+                                       context_start_id=context_start_id)
         session.messages.append({"role": "user", "content": message, "turn": turn})
         self._live_turn = {"session": session, "turn": turn,
                            "user_text": message}
         stats = {k: rec[k] for k in (
             "recalled_count", "entity_recalled", "entity_names",
-            "filtered_by_sleep", "resolved_brought", "direction_focused",
-            "direction_reason", "summary_fallback", "semantic_matched",
-            "semantic_reason")}
+            "filtered_by_sleep", "filtered_by_window", "resolved_brought",
+            "direction_focused", "direction_reason", "summary_fallback",
+            "semantic_matched", "semantic_reason")}
         return {
             "injected": bool(rec["prefix"]),
             "injected_text": rec["prefix"] or None,
@@ -1161,13 +1232,18 @@ class EmberService:
 
     def hook_turn_end(self, session_id: str | None,
                       assistant_reply: str,
-                      turn: int | None = None) -> dict[str, Any]:
+                      turn: int | None = None,
+                      assistant_message_id: int | None = None) -> dict[str, Any]:
         """轮后钩子：原文存档（用户原话 + 最终回复）并收掉进行中的一轮。
 
         turn 校验（防串轮竞态）：用户连发两条时，前一轮的 turn_end 可能
         晚于后一轮的 turn_start 到达——对不上号的上报拒收（stale），
         不污染新一轮的出处账。缺轮后钩子的轮次不存档——与代理形态
         「chat 失败不计入历史」同语义；turn 计数允许留洞。
+
+        assistant_message_id（可选，2026-10-14 去原文化）：本轮回复在后端
+        消息树的行 id——turn_ledger 补记（record_reply），供召回起点
+        过滤与原文区间换算使用。
         """
         live = self._live_turn
         if live is None:
@@ -1186,17 +1262,17 @@ class EmberService:
                                  "content": assistant_reply,
                                  "turn": live["turn"]})
         try:
-            self.transcripts.append_turn(session.session_id, live["turn"],
-                                         live["user_text"], assistant_reply)
+            self.turn_ledger.record_reply(session.session_id, live["turn"],
+                                          assistant_message_id)
         except OSError:
-            pass  # 存档是旁路，落盘失败不阻断收轮
+            pass
         self._live_turn = None
         return {"ok": True, "session_id": session.session_id,
                 "turn": live["turn"]}
 
     def sidecar_tool_specs(self) -> list[dict[str, Any]]:
-        """MCP tools/list 工具清单——与代理形态同一份 schema 真相源。"""
-        return build_tools_spec()
+        """MCP tools/list 工具清单（含冷静期修正工具）。"""
+        return build_tools_spec() + [build_revise_tool_spec()[0]]
 
     def sidecar_create_memory_event(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """MCP 工具 create_memory_event 执行体：进行中的一轮 + 参数 → 落库。
@@ -1217,6 +1293,121 @@ class EmberService:
                                               validated)
         except (ValueError, KeyError, OSError) as ex:
             return {"status": "failed", "error": str(ex)[:300]}
+
+    # ---------- 修改记忆（冷静期修正，2026-10-14 momo 拍板） ----------
+
+    _SLEEP_PROGRESS_FILE = "sleep_progress.jsonl"
+
+    def _sleep_done_ids(self) -> set[str]:
+        """已进入过夜间维护的 event_id 集合（sleep_progress.jsonl，可重建）。"""
+        p = os.path.join(getattr(self.store, "root", ""),
+                         self._SLEEP_PROGRESS_FILE)
+        done: set[str] = set()
+        if os.path.exists(p):
+            with open(p, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        d = json.loads(line)
+                        if d.get("event_id"):
+                            done.add(d["event_id"])
+                    except json.JSONDecodeError:
+                        continue
+        return done
+
+    def _normalize_revise_list(self, value: Any) -> list[str]:
+        """list 字段归一：str → [str]（单值更正为主），list 原样收。"""
+        if isinstance(value, list):
+            return [str(v) for v in value]
+        return [str(value)]
+
+    def sidecar_revise_memory_event(
+            self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """MCP 工具 revise_memory_event 执行体：冷静期内直改本尊。
+
+        冷静期 = 该 event 尚未进入过夜间维护（sleep_progress 无记录）——
+        sleep 派生物（向量/关系/实体归属）尚未建立，改本尊无旧引用要追；
+        过冷静期拒绝并指路 resolves（写更正事件，sleep 判联自动压旧）。
+        字段白名单：叙述类可改（participants/objects/details 接受单值或
+        数组）；出处/摘录/时间坐标锁死（动了双盲核对废、回指断）。
+        无留痕（改了就改了，momo 裁决）；存储层面为 append 覆盖（加载时
+        新行盖旧行），不加任何 revisions 字段。
+        """
+        from .models import RecallRoute
+        from .writer import REVISE_ALLOWED_FIELDS, REVISE_LOCKED_FIELDS
+
+        eid = str((arguments or {}).get("event_id") or "").strip()
+        resolved = self._resolve_event_id(eid) if eid else None
+        if resolved is None:
+            return {"status": "failed",
+                    "error": f"找不到该 event_id: {eid}"}
+        event = self.store.get_event(resolved)
+
+        # 冷静期判定：进过夜间维护 → 定稿，指路 resolves
+        if resolved in self._sleep_done_ids():
+            return {
+                "status": "rejected",
+                "event_id": resolved,
+                "reason": "该记忆已定稿（进入过夜间维护），不能直接修改。"
+                          "请改用 create_memory_event 写一条更正记忆，"
+                          "在 core 里说明它修正了哪条旧认知。",
+            }
+
+        # 锁死字段显式拒绝（防模型绕过白名单）
+        for locked in REVISE_LOCKED_FIELDS:
+            if locked in (arguments or {}):
+                return {"status": "failed", "event_id": resolved,
+                        "error": f"字段 {locked} 不可修改（与原文/系统的绑定）"}
+
+        revised: list[str] = []
+        for field in REVISE_ALLOWED_FIELDS:
+            if field not in (arguments or {}):
+                continue
+            value = arguments[field]
+            if value is None or (isinstance(value, str) and not value.strip()):
+                continue
+            # participants/objects/details/context/outcome/state/affect
+            # 均为 list[str] 型字段：单值更正为主，str → [str] 归一
+            if field in ("summary", "core", "significance"):
+                setattr(event, field, str(value).strip())
+            else:
+                setattr(event, field, self._normalize_revise_list(value))
+            revised.append(field)
+
+        # 召回线索整体重设（可选）：旧 active routes 退役，按新 cues 重建
+        cues = (arguments or {}).get("recall_cues")
+        if isinstance(cues, list) and cues:
+            new_cues = [str(c).strip() for c in cues if str(c).strip()]
+            if new_cues:
+                for route in list(self.store._routes.values()):  # noqa: SLF001
+                    if route.event_id == resolved and route.status == "active":
+                        route.status = "retired"
+                        self.store.write_route(route)
+                for i, cue in enumerate(new_cues):
+                    self.store.write_route(RecallRoute(
+                        route_id=f"rt_{resolved}_rv{i + 1:02d}",
+                        event_id=resolved,
+                        matcher="lexical",
+                        cue_type="lexical",
+                        cue=cue,
+                        status="active",
+                        evidence_refs=[event.raw_ref],
+                        provenance_refs=["memory-revise"],
+                    ))
+                revised.append("recall_cues")
+
+        if not revised:
+            return {"status": "failed", "event_id": resolved,
+                    "error": "没有提供任何可修改字段"
+                             f"（可改: {', '.join(REVISE_ALLOWED_FIELDS)}"
+                             "，或 recall_cues）"}
+
+        self.store.write_event(event)  # append 覆盖：加载时新行盖旧行
+        self.store.rebuild_index()
+        return {"status": "revised", "event_id": resolved,
+                "revised_fields": revised}
 
     def sidecar_read_memory_source(self, event_id: str) -> dict[str, Any]:
         """MCP 工具 read_memory_source 执行体（只读，同代理形态实现）。"""

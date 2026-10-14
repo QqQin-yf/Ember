@@ -186,8 +186,9 @@ def main():
 
         print("== S10 工具清单与代理形态同源 ==")
         names = {s["function"]["name"] for s in service2.sidecar_tool_specs()}
-        check("两件工具齐全",
-              names == {"create_memory_event", "read_memory_source"},
+        check("三件工具齐全（含 revise）",
+              names == {"create_memory_event", "read_memory_source",
+                        "revise_memory_event"},
               str(names))
 
         print("== S11 代理形态回归：chat 流程仍走同一召回/写入实现 ==")
@@ -206,22 +207,46 @@ def main():
               r11b["ember"]["memory"]["recalled_count"] >= 1,
               str(r11b["ember"]["memory"])[:160])
 
-        print("== S12 持久语料：重启后引用更早存档轮的原话不再误伤 ==")
-        # sc1 的 turn-1 用户原话已在 TranscriptStore 落盘；service2 是重启后
-        # 的新实例（内存会话为空）——修正前引更早轮原话必然全部 dropped，
-        # 出处句对也定位不到（当时定位语料只有内存）
+        print("== S12 跨重启语料（去原文化 2026-10-14）：未配置拉取 → 如实拒绝 ==")
+        # sc1 的 turn-1 原话已不在本地（transcripts 退役，原文只存后端）；
+        # service2 是重启后新实例（内存为空），EMBER_SOURCE_URL 未配置 →
+        # 拉不到 → 引用更早轮原话如实核对失败（绝不编造）
         service2.hook_turn_start("sc1", "重启后再写一条。")
         r12 = service2.sidecar_create_memory_event(write_args(
             user_quote="今天我们决定把 Ember 的传播模型改成",
             quote_spans=[{"start_quote": "今天我们决定把",
                           "end_quote": "改成 Route Search。"}]))
-        check("存档原话跨重启核对通过（持久语料生效）",
-              r12.get("status") == "created"
-              and not r12.get("dropped_quotes"),
-              str(r12.get("dropped_quotes")))
-        ev12 = service2.store.get_event(r12["event_id"])
+        check("拉取未配置 → 跨重启核对如实拒绝",
+              r12.get("status") == "failed", str(r12)[:200])
+        service2.hook_turn_end("sc1", "好，这条也记下了。")
+
+        print("== S12b 跨重启语料：配置原文接口后核对通过 ==")
+        # 账本补记 sc1 turn-1 的 message_id 映射 + mock 原文接口返回当轮原文
+        from ember import source_client as sc
+        service2.turn_ledger.record("sc1", 1, None, user_message_id=901)
+        service2.turn_ledger.record_reply("sc1", 1, assistant_message_id=902)
+        orig_url, orig_fetch = sc.SOURCE_URL, sc.fetch_source_range
+        sc.SOURCE_URL = "http://source-mock"
+        sc.fetch_source_range = lambda sid, a, b: [
+            {"message_id": 901, "role": "user",
+             "content": "今天我们决定把 Ember 的传播模型改成 Route Search。"},
+            {"message_id": 902, "role": "assistant",
+             "content": "好的，这个决定我记下了。"},
+        ]
+        try:
+            service2.hook_turn_start("sc1", "重启后再写一条（已配置拉取）。")
+            r12b = service2.sidecar_create_memory_event(write_args(
+                user_quote="今天我们决定把 Ember 的传播模型改成",
+                quote_spans=[{"start_quote": "今天我们决定把",
+                              "end_quote": "改成 Route Search。"}]))
+        finally:
+            sc.SOURCE_URL, sc.fetch_source_range = orig_url, orig_fetch
+        check("拉取语料跨重启核对通过",
+              r12b.get("status") == "created"
+              and not r12b.get("dropped_quotes"), str(r12b.get("dropped_quotes")))
+        ev12 = service2.store.get_event(r12b["event_id"])
         span12 = service2.turn_spans.span_of_event(ev12)
-        check("存档句跨重启精确定位（当前轮锚点在 turn 4，span 含 1 即真定位）",
+        check("拉取句跨重启精确定位（span 含 turn 1）",
               any(s <= 1 <= e for s, e in span12), str(span12))
         service2.hook_turn_end("sc1", "好，这条也记下了。")
 

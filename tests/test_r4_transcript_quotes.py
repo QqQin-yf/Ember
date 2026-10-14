@@ -1,18 +1,9 @@
 # -*- coding: utf-8 -*-
-"""r4 交接单测试：原文存档 / 重启恢复计数 / key_quotes / read_memory_source。
+"""r4 交接单测试（2026-10-14 去原文化后同步）：重启恢复计数 / key_quotes /
+read_memory_source（拉取版）。
 
-覆盖（对应交接单"验证"清单）：
-1. TranscriptStore：append/get 按轮升序/max_turn/has_session
-2. chat 成功后 transcripts 多两行、user 行不含召回前缀（mock client 全链）
-3. chat 失败（LLMError）不写存档
-4. 重启恢复计数：新建 EmberService 读同一目录，同 session 下一轮
-   turn = 原最大 turn + 1；messages 为空（上下文恢复=独立项）
-5. key_quotes：校验（>3 条整条拒绝/字段校验/空数组合法）；
-   逐字核对（对得上保留、对不上丢弃并进 dropped_quotes→tool result）
-6. 呈现：召回前缀出现原话行（她/我 标注）与 read_memory_source 指引；
-   summary_fallback 不出现原话行
-7. read_memory_source：有存档返回原文（turn_spans 区间）；无存档
-   not_archived；超长截断；unknown id → not_found
+transcripts.jsonl 已退役（原文只存后端一份，ember 按 message_id 按需拉取）：
+原「存档」类断言改为退役语义（不再落盘/账本记账/拉取语料）。
 """
 import json
 import os
@@ -23,7 +14,6 @@ from datetime import datetime, timezone
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE)
 
-from ember.transcript import TranscriptStore  # noqa: E402
 from ember.store import EmberStore  # noqa: E402
 from ember.models import Event  # noqa: E402
 from ember.writer import validate_writer_arguments  # noqa: E402
@@ -98,40 +88,23 @@ GOOD_WRITER_ARGS = {
 }
 
 
-def test_transcript_store():
-    with tempfile.TemporaryDirectory() as root:
-        ts = TranscriptStore(root)
-        ts.append_turn("s1", 1, "用户一", "回复一")
-        ts.append_turn("s1", 3, "用户三", "回复三")
-        ts.append_turn("s2", 1, "另会话", "另回复")
-        rows = ts.get("s1", [3, 1])
-        check("get 按 turn 升序 + 同轮 user 在前",
-              [r["turn"] for r in rows] == [1, 1, 3, 3]
-              and rows[0]["role"] == "user" and rows[1]["role"] == "assistant",
-              str([(r["turn"], r["role"]) for r in rows]))
-        s2_rows = ts.get("s2", [1])
-        check("跨 session 隔离",
-              len(s2_rows) == 2 and s2_rows[0]["content"] == "另会话",
-              str([(r["turn"], r["role"]) for r in s2_rows]))
-        check("max_turn / has_session",
-              ts.max_turn("s1") == 3 and ts.has_session("s1")
-              and ts.max_turn("nope") == 0 and not ts.has_session("nope"))
-        check("无文件 get 为空", ts.get("ghost", [1, 2]) == [])
-
-
 def test_chat_archives_and_failure():
     with tempfile.TemporaryDirectory() as root:
         svc = _mk_service(root)
         payload = {"session_id": "sA", "model": "mock",
                    "messages": [{"role": "user", "content": "就按这个方案定稿吧。"}]}
         resp = svc.chat_completion(payload)
-        rows = TranscriptStore(root).get("sA", [1])
-        check("成功轮存档两行", len(rows) == 2
-              and rows[0]["content"] == "就按这个方案定稿吧。"
-              and rows[1]["role"] == "assistant", str(rows))
+        # 2026-10-14 transcripts 退役：chat 不再落原文存档，
+        # 轮次持久账 = turn_ledger（原文按 message_id 按需拉取）
+        check("成功轮不再写存档",
+              not os.path.exists(os.path.join(root, "transcripts.jsonl")))
+        check("轮次落账本（无条件记账）",
+              svc.turn_ledger.max_turn("sA") == 1)
         check("user 行不含召回前缀",
-              not rows[0]["content"].startswith("[Ember"))
-        # chat 失败：LLM 抛错 → 不写存档
+              all(not m["content"].startswith("[Ember")
+                  for m in svc.sessions["sA"].messages
+                  if m.get("role") == "user"))
+        # chat 失败：LLM 抛错 → 不记账不存档
         svc2 = EmberService(EmberStore(root), FakeClient(fail_first=True))
         try:
             svc2.chat_completion({"session_id": "sB", "model": "mock",
@@ -140,7 +113,8 @@ def test_chat_archives_and_failure():
         except Exception:
             raised = True
         check("chat 失败抛 LLMError", raised)
-        check("失败轮不写存档", TranscriptStore(root).get("sB", [1]) == [])
+        check("失败轮不写存档",
+              not os.path.exists(os.path.join(root, "transcripts.jsonl")))
 
 
 def test_restart_resume_counter():
@@ -153,7 +127,7 @@ def test_restart_resume_counter():
         # 模拟重启：全新 EmberService 读同一目录
         svc2 = EmberService(EmberStore(root), FakeClient(), model="mock")
         sess = svc2.get_or_create_session("sR")
-        check("重启后计数恢复到最大 turn",
+        check("重启后计数恢复到最大 turn（账本恢复）",
               sess.turn_counter == 3, f"counter={sess.turn_counter}")
         check("重启后 messages 为空（上下文恢复=独立项）",
               sess.messages == [])
@@ -162,8 +136,8 @@ def test_restart_resume_counter():
                                                    "content": "重启后第一句"}]})
         check("重启后下一轮 turn = 原最大 + 1", resp["ember"]["turn"] == 4,
               str(resp["ember"]["turn"]))
-        check("重启后轮次存档接续",
-              TranscriptStore(root).max_turn("sR") == 4)
+        check("重启后轮次账本接续",
+              svc2.turn_ledger.max_turn("sR") == 4)
 
 
 def test_key_quotes_validation():
@@ -253,11 +227,9 @@ def test_read_memory_source():
         content2 = json.loads(tool_msg2["content"])
         check("无存档 → not_archived 不报错",
               content2["status"] == "not_archived", str(content2)[:120])
-        # 超长截断
+        # 超长截断（2026-10-14 改源：语料经 source_client 拉取）
         with tempfile.TemporaryDirectory() as root2:
-            ts = TranscriptStore(root2)
             long_text = "很长的原文" * 2000
-            ts.append_turn("sL", 1, long_text, long_text)
             store2 = EmberStore(root2)
             ev2 = Event(event_id="EVT-097-xxxx", version_id="v",
                         source_ref="conversation/session-sL",
@@ -270,11 +242,23 @@ def test_read_memory_source():
             from ember.turn_span import TurnSpanStore
             TurnSpanStore(root2).fill("EVT-097-xxxx", [(1, 1)])
             svc3 = EmberService(store2, FakeClient(), model="mock")
-            call3 = {"function": {"name": "read_memory_source",
-                                  "arguments": json.dumps(
-                                      {"event_id": "EVT-097-xxxx"})}}
-            svc3._handle_read_source_call(svc3.get_or_create_session("sL"),
-                                          [call3])
+            # mock 拉取：账本登记第 1 轮的 message_id，原文接口返回长文本
+            svc3.turn_ledger.record("sL", 1, None, user_message_id=500)
+            svc3.turn_ledger.record_reply("sL", 1, assistant_message_id=501)
+            from ember import source_client as sc
+            orig_fetch = sc.fetch_source_range
+            sc.fetch_source_range = lambda sid, a, b: [
+                {"message_id": 500, "role": "user", "content": long_text},
+                {"message_id": 501, "role": "assistant", "content": long_text},
+            ]
+            try:
+                call3 = {"function": {"name": "read_memory_source",
+                                      "arguments": json.dumps(
+                                          {"event_id": "EVT-097-xxxx"})}}
+                svc3._handle_read_source_call(svc3.get_or_create_session("sL"),
+                                              [call3])
+            finally:
+                sc.fetch_source_range = orig_fetch
             tool_msg3 = [m for m in svc3.sessions["sL"].messages
                          if m.get("role") == "tool"][-1]
             content3 = json.loads(tool_msg3["content"])
@@ -319,14 +303,13 @@ def test_presentation_lines():
 
 
 def main():
-    test_transcript_store()
     test_chat_archives_and_failure()
     test_restart_resume_counter()
     test_key_quotes_validation()
     test_verify_and_presentation()
     test_read_memory_source()
     test_presentation_lines()
-    total = 29
+    total = 26
     if failures:
         print(f"\n{total - len(failures)}/{total} checks passed，失败：{failures}")
         sys.exit(1)
