@@ -39,14 +39,21 @@ TOP1_FLOOR = 0.30
 MARGIN_FLOOR = 0.04
 
 
-def embed_text(text: str, timeout: int = 30) -> list[float]:
+def embed_text(text: str, timeout: int = 6, retries: int = 2) -> list[float]:
     """通过硅基流动 API 调 Qwen3-Embedding-8B 产出向量（momo 2026-10-09 选型）。
 
-    - 服务不可用/超时 → 抛异常，调用方降级（DirectionMatchResult
-      reason=embed_failed → Entity 全区域回退，不引入新行为）；
+    - 瞬时故障（超时/连接错/429/5xx）自动重试 retries 次（退避 0.5s/1s）
+      ——单次调用零重试时免费档的偶发抖动直接变成召回降级（2026-10-15
+      momo 实测「经常超时」的根因）；
+    - 401/400（key 未配置或请求错）不重试直接抛——重试无意义；
+    - 全部重试耗尽 → 抛异常，调用方降级（DirectionMatchResult
+      reason=embed_failed → Entity 全区域回退，不引入新行为；
+      cue 语义段 → 本轮纯词面）；
     - 换 embedding 模型 = 向量空间迁移：direction_vectors.jsonl 全量重算
       （build_direction_vectors.py），新旧模型的向量绝不能混比（§5.3）。
     """
+    import time
+    import urllib.error
     import urllib.request
     api_key = os.environ.get("EMBER_EMBED_API_KEY", "")
     base = os.environ.get("EMBER_EMBED_BASE_URL",
@@ -55,16 +62,30 @@ def embed_text(text: str, timeout: int = 30) -> list[float]:
     if not api_key:
         raise RuntimeError("EMBER_EMBED_API_KEY 未配置，无法调用 embedding 服务")
     body = json.dumps({"model": model, "input": text}).encode("utf-8")
-    req = urllib.request.Request(
-        base.rstrip("/") + "/embeddings", data=body,
-        headers={"Content-Type": "application/json",
-                 "Authorization": f"Bearer {api_key}"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-    vec = data["data"][0]["embedding"]
-    if not isinstance(vec, list) or not vec:
-        raise ValueError(f"unexpected embedding output: {json.dumps(data)[:120]}")
-    return vec
+    last_exc: Exception | None = None
+    for attempt in range(retries + 1):
+        req = urllib.request.Request(
+            base.rstrip("/") + "/embeddings", data=body,
+            headers={"Content-Type": "application/json",
+                     "Authorization": f"Bearer {api_key}"})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            vec = data["data"][0]["embedding"]
+            if not isinstance(vec, list) or not vec:
+                raise ValueError(
+                    f"unexpected embedding output: {json.dumps(data)[:120]}")
+            return vec
+        except urllib.error.HTTPError as exc:
+            if exc.code in (400, 401, 403):
+                raise           # 配置/鉴权错，重试无意义
+            last_exc = exc      # 429 限流 / 5xx → 退避重试
+        except (urllib.error.URLError, OSError, TimeoutError,
+                ValueError, KeyError, IndexError) as exc:
+            last_exc = exc      # 超时/连接/响应形态错 → 退避重试
+        if attempt < retries:
+            time.sleep(0.5 * (2 ** attempt))
+    raise last_exc  # type: ignore[misc]
 
 
 def cosine(a: list[float], b: list[float]) -> float:
