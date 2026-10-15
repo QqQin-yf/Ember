@@ -75,6 +75,28 @@ class SleepStateStore:
         return [eid for eid, s in self.event_status.items()
                 if s in RECALL_EXCLUDED_STATUSES and eid.count("-") >= 2]
 
+    def mark(self, event_id: str, status: str,
+             evidence: str = "", provenance: str = "") -> None:
+        """标记事件状态（superseded/outdated）：内存同步 + append jsonl。
+
+        append 安全：__post_init__ 加载时后行覆盖先行（同 event_id）。
+        """
+        self.event_status[event_id] = status
+        short = "-".join(event_id.split("-")[:2])
+        if short and short != event_id:
+            self.event_status[short] = status
+        if provenance:
+            self.provenance[event_id] = provenance
+        row: dict[str, Any] = {"event_id": event_id, "status": status}
+        if evidence:
+            row["status_evidence"] = evidence
+        if provenance:
+            row["_provenance"] = provenance
+        os.makedirs(self.root, exist_ok=True)
+        with open(os.path.join(self.root, SLEEP_STATE_FILE), "a",
+                  encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "loaded": bool(self.event_status),

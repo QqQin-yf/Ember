@@ -80,6 +80,14 @@ class RelationStore:
     def all(self) -> list[EventRelation]:
         return list(self._relations.values())
 
+    def add(self, rel: EventRelation) -> EventRelation:
+        """落一条边：内存 + append jsonl（工程层追加，可重建）。"""
+        self._relations[rel.relation_id] = rel
+        p = os.path.join(self.root, RELATIONS_FILE)
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rel.to_dict(), ensure_ascii=False) + "\n")
+        return rel
+
     def resolvers_of(self, event_id: str) -> list[EventRelation]:
         """谁修正/解决了这个事件：src(可完整 id 或前缀) -> active resolves 边。"""
         short = "-".join(event_id.split("-")[:2])

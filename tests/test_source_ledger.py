@@ -28,12 +28,19 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from ember.service import EmberService
+from ember.service import (EmberService, EmberStore as _ES_unused,
+                           select_recall_units)
 from ember.store import EmberStore
 from ember.llm import MockLLMClient
-from ember.models import Event
+from ember.models import Event, RecallRoute
+from ember.recall import EntityHit, RouteHit
 from ember.turn_ledger import TurnLedger
 from ember import source_client
+
+
+def _service(tmp: Path) -> EmberService:
+    return EmberService(EmberStore(str(tmp / "data")), MockLLMClient(),
+                        model="test")
 
 
 def _service(tmp: Path) -> EmberService:
@@ -55,6 +62,156 @@ def _make_event(svc: EmberService, sid: str, turn: int,
         state=["旧状态"], affect=["旧感受"], significance="旧意义",
         details=["旧细节"],
     )
+
+
+def _hit(eid: str, matcher: str, cue: str = "c") -> RouteHit:
+    return RouteHit(route_id=f"rt_{eid}_{matcher}", event_id=eid,
+                    cue=cue, matcher=matcher, cue_type="lexical")
+
+
+def _ehit(entity_id: str, name: str) -> EntityHit:
+    return EntityHit(entity_id=entity_id, name=name, matched_via=name)
+
+
+def _sel_ids(units: list[dict]) -> list[str]:
+    return [eid for u in units for eid in u["event_ids"]]
+
+
+class RecallSeatTests(unittest.TestCase):
+    """置信分组与名额（2026-10-14 定稿）：组 1 优先、组 2 补位、上限 3。"""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.store = EmberStore(str(self.tmp / "data"))
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _add(self, eid: str, entity_id: str | None = None,
+             ts: str = "2026-10-14T00:00:00+08:00") -> None:
+        ev = Event(event_id=eid, version_id=eid + "-v1",
+                   source_ref="conversation/session-s1", raw_ref="r",
+                   event_time=ts, ingest_time=ts,
+                   summary=eid, core=eid)
+        self.store.write_event(ev)
+
+    def _register(self, rows: list[dict]) -> None:
+        from ember.recall import register_event_entity_refs
+        register_event_entity_refs(str(self.tmp / "data" / "events.jsonl"))
+
+    def _ev_row(self, eid: str, entity_id: str | None) -> dict:
+        now = "2026-10-14T00:00:00+08:00"
+        row = {"event_id": eid, "version_id": eid + "-v1",
+               "source_ref": "s", "raw_ref": "r", "event_time": now,
+               "ingest_time": now, "summary": eid, "core": eid,
+               "entity_refs": [entity_id] if entity_id else []}
+        # 直接写 jsonl：register_event_entity_refs 读的是文件侧字段
+        p = self.tmp / "data" / "events.jsonl"
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        return row
+
+    def test_deterministic_beats_semantic(self) -> None:
+        # 组 1（lexical）优先填满：A 组 1、B/C 组 2 → 全进但 A 第一
+        self._add("EVT-A")
+        self._add("EVT-B")
+        self._add("EVT-C")
+        units, dropped = select_recall_units(
+            ["EVT-A", "EVT-B", "EVT-C"],
+            [_hit("EVT-A", "lexical"), _hit("EVT-B", "semantic"),
+             _hit("EVT-C", "semantic")],
+            [], [], self.store)
+        ids = _sel_ids(units)
+        self.assertEqual(ids[0], "EVT-A")
+        self.assertEqual(len(ids), 3)
+        self.assertEqual(dropped, 0)
+        self.assertEqual([u["group"] for u in units], [1, 2, 2])
+
+    def test_seat_limit_drops_overflow(self) -> None:
+        # 4 条确定性命中 → 3 席，dropped=1
+        for eid in ("EVT-1", "EVT-2", "EVT-3", "EVT-4"):
+            self._add(eid)
+        units, dropped = select_recall_units(
+            ["EVT-1", "EVT-2", "EVT-3", "EVT-4"],
+            [_hit("EVT-1", "lexical"), _hit("EVT-2", "lexical"),
+             _hit("EVT-3", "lexical"), _hit("EVT-4", "lexical")],
+            [], [], self.store)
+        self.assertEqual(len(_sel_ids(units)), 3)
+        self.assertEqual(dropped, 1)
+
+    def test_few_no_padding(self) -> None:
+        # 门槛哲学：只有 1 条真相关 → 只注 1 条，不强凑
+        self._add("EVT-1")
+        units, dropped = select_recall_units(
+            ["EVT-1"], [_hit("EVT-1", "lexical")], [], [], self.store)
+        self.assertEqual(len(_sel_ids(units)), 1)
+        self.assertEqual(dropped, 0)
+
+    def test_route_count_ordering(self) -> None:
+        # 组 1 内：双路命中（entity+lexical）排在单路（lexical）前
+        self._add("EVT-X", entity_id="ENT-1")
+        self._add("EVT-Y")
+        self._ev_row("EVT-X", "ENT-1")
+        units, dropped = select_recall_units(
+            ["EVT-X", "EVT-Y"],
+            [_hit("EVT-X", "lexical"), _hit("EVT-Y", "lexical")],
+            [_ehit("ENT-1", "某实体")], [], self.store)
+        self.assertEqual(dropped, 0)
+        # X 双路（entity+lexical）route_count=2 > Y 单路 1
+        self.assertEqual(units[0]["event_ids"], ["EVT-X"])
+        self.assertEqual(units[1]["event_ids"], ["EVT-Y"])
+
+    def test_entity_block_bundling(self) -> None:
+        # 实体块捆绑：块内 2 事件整体占 1 席；独立事件各占 1 席。
+        # 4 单元（块+S1+S2+S3）> 3 席 → S3 落选；块整体入选（含 2 事件）。
+        self._add("EVT-B1")
+        self._add("EVT-B2")
+        self._add("EVT-S1")
+        self._add("EVT-S2")
+        self._add("EVT-S3")
+        self._ev_row("EVT-B1", "ENT-1")
+        self._ev_row("EVT-B2", "ENT-1")
+        self._register([])  # 注册表读 jsonl 侧 entity_refs（_event_entity_of 依赖）
+        units, dropped = select_recall_units(
+            ["EVT-B1", "EVT-B2", "EVT-S1", "EVT-S2", "EVT-S3"],
+            [_hit("EVT-S1", "lexical"), _hit("EVT-S2", "lexical"),
+             _hit("EVT-S3", "lexical")],
+            [_ehit("ENT-1", "某实体")], [], self.store)
+        blocks = [u for u in units if u["kind"] == "entity_block"]
+        self.assertEqual(len(blocks), 1)
+        self.assertEqual(blocks[0]["event_ids"], ["EVT-B1", "EVT-B2"])
+        self.assertEqual(blocks[0]["route_count"], 1)  # 纯实体路，无 cue 撞中
+        # 4 单元竞争 3 席：块 1 席 + S1/S2 两席；S3（时间同分最后序）落选
+        self.assertEqual(dropped, 1)
+        sel_ids = _sel_ids(units)
+        self.assertEqual(len(sel_ids), 4)  # 块贡献 2 事件 + 2 独立
+        self.assertIn("EVT-B1", sel_ids)
+        self.assertIn("EVT-B2", sel_ids)
+        self.assertNotIn("EVT-S3", sel_ids)
+
+    def test_resolved_inheritance(self) -> None:
+        # 修正者继承被修正者的命中资格：A lexical 命中后被 superseded
+        # 排除，B（修正者）凭继承进组 1
+        self._add("EVT-B")
+        units, dropped = select_recall_units(
+            ["EVT-B"],
+            [_hit("EVT-A", "lexical")],  # A 的命中（A 已被过滤不在候选）
+            [], [("EVT-B", "EVT-A")], self.store)
+        self.assertEqual(dropped, 0)
+        self.assertEqual(units[0]["group"], 1)
+        self.assertEqual(units[0]["route_count"], 1)
+
+    def test_semantic_only_no_group1(self) -> None:
+        # 只有 semantic 命中 → 组 1 空，组 2 补位（全部注入）
+        self._add("EVT-S1")
+        self._add("EVT-S2")
+        units, dropped = select_recall_units(
+            ["EVT-S1", "EVT-S2"],
+            [_hit("EVT-S1", "semantic"), _hit("EVT-S2", "semantic")],
+            [], [], self.store)
+        self.assertEqual(len(_sel_ids(units)), 2)
+        self.assertEqual({u["group"] for u in units}, {2})
 
 
 def _write_event_with_span(svc: EmberService, session, turn: int,

@@ -150,6 +150,48 @@ async def _hook_turn_end(request: Request) -> JSONResponse:
         turn, assistant_message_id=_opt_int(body, "assistant_message_id")))
 
 
+# ---------- 挂关系（2026-10-14 设计稿 v2：借窗口跑，app 编排） ----------
+
+async def _sleep_link_batches(request: Request) -> JSONResponse:
+    """接口 1：材料出队——app 贴进窗口末尾给正主 AI 判联。"""
+    return JSONResponse(SERVICE.sidecar_link_batches())
+
+
+async def _sleep_link_submit(request: Request) -> JSONResponse:
+    """接口 2：交卷——app 转交窗口 AI 的 link_relations 结果。"""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    return JSONResponse(SERVICE.sidecar_link_submit(body))
+
+
+async def _sleep_link_progress(request: Request) -> JSONResponse:
+    """接口 3：进度——断线恢复时 app 问跑到哪了。"""
+    return JSONResponse(SERVICE.sidecar_link_progress())
+
+
+async def _sleep_structure_run(request: Request) -> JSONResponse:
+    """结构维护：散事件归属（第三方 LLM）+ 旧 cue 收紧。
+
+    编排顺序：挂在 link/submit 清完之后——挂完关系不等于没活儿，
+    还有这一步（契约见 API.md「编排顺序」）。
+    """
+    return JSONResponse(SERVICE.run_structure_maintenance())
+
+
+async def _sleep_sediment_evidence(request: Request) -> JSONResponse:
+    """沉淀证据接收：app 存下一版新沉淀后，交版本号 + 证据 id 挂账。
+
+    只做追加——证据为空 app 不调本接口（契约见 API.md §6）。
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    return JSONResponse(SERVICE.sidecar_sediment_evidence(body))
+
+
 class BearerAuthMiddleware:
     """最小 Bearer 鉴权（EMBER_TOKEN 设置时生效），MCP 与钩子一视同仁。"""
 
@@ -171,6 +213,16 @@ app = BearerAuthMiddleware(Starlette(
     routes=[
         Route("/ember/hooks/turn_start", _hook_turn_start, methods=["POST"]),
         Route("/ember/hooks/turn_end", _hook_turn_end, methods=["POST"]),
+        Route("/ember/sleep/link/batches", _sleep_link_batches,
+              methods=["GET"]),
+        Route("/ember/sleep/link/submit", _sleep_link_submit,
+              methods=["POST"]),
+        Route("/ember/sleep/link/progress", _sleep_link_progress,
+              methods=["GET"]),
+        Route("/ember/sleep/structure/run", _sleep_structure_run,
+              methods=["POST"]),
+        Route("/ember/sleep/sediment/evidence", _sleep_sediment_evidence,
+              methods=["POST"]),
         Mount("/mcp", app=_handle_mcp),
     ],
     lifespan=_lifespan,

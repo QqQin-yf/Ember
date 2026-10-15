@@ -21,7 +21,8 @@ sys.path.insert(0, BASE)
 from ember import executors  # noqa: E402
 
 
-GLM_ALL = {"judge": "glm", "split": "glm", "mount": "glm", "summary": "glm"}
+GLM_ALL = {"judge": "glm", "split": "glm", "mount": "glm",
+           "summary": "glm", "structure": "glm"}
 
 
 class TestLoadExecutors(unittest.TestCase):
@@ -38,7 +39,8 @@ class TestLoadExecutors(unittest.TestCase):
         out = self._read(json.dumps({"judge": "qwen3", "split": "glm",
                                      "mount": "qwen3", "summary": "glm"}))
         self.assertEqual(out, {"judge": "qwen3", "split": "glm",
-                               "mount": "qwen3", "summary": "glm"})
+                               "mount": "qwen3", "summary": "glm",
+                               "structure": "glm"})
 
     def test_missing_file_falls_back_to_glm(self):
         out = self._read(None)

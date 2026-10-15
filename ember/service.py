@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -27,16 +28,22 @@ from typing import Any
 
 from .llm import LLMError
 from .models import Event, PresentationContext, RecallRoute
-from .recall import DirectRecall, EntityRecall, register_event_entity_refs
-from .relation import RelationStore
+from .recall import (DirectRecall, EntityRecall, register_event_entity_refs,
+                     _event_entity_refs)
+from .relation import EventRelation, RELATION_TYPES, RelationStore
 from .sleep_state import SleepStateStore
-from .store import EmberStore
-from .entity import EntityStore
+from .store import EmberStore, EVENTS_FILE
+from .entity import Entity, EntityStore
+from .pair_seen import PairSeenStore
+from .sediment import SedimentStore
 from .direction import DirectionMatcher, DirectionVectorStore
 from .turn_ledger import TurnLedger
 from .recall_ledger import RecallLedger
 from .turn_span import TurnSpanStore, spans_from_quotes
 from . import source_client
+from . import executors
+from .cue_tighten import CueTightener
+from .prompts import STRUCTURE_SYSTEM_PROMPT, build_structure_user_prompt
 from .dream_ledger import DreamLedger
 from .dream_source import DreamSource
 from .writer import (
@@ -176,6 +183,110 @@ def _strip_internal(m: dict[str, Any]) -> dict[str, Any]:
     return w
 
 
+def _event_entity_of(store, eid: str) -> str | None:
+    """事件的实体归属（单归属铁律取第一个）。
+
+    双源：运行时 Event 对象（dataclass 无此字段则回落）∪ jsonl 侧
+    entity_refs 注册表（service 构造时 register_event_entity_refs 读入）。
+    """
+    try:
+        ev = store.get_event(eid)
+    except KeyError:
+        return None
+    refs = getattr(ev, "entity_refs", None) or _event_entity_refs(eid)
+    return refs[0] if refs else None
+
+
+def _event_ingest_ts(store, eid: str) -> float:
+    try:
+        return datetime.fromisoformat(store.get_event(eid).ingest_time).timestamp()
+    except (KeyError, ValueError, TypeError):
+        return 0.0
+
+
+def _parse_llm_json(text: str) -> dict:
+    """LLM 输出 → JSON 对象：剥代码围栏，取首个 { 到末个 }。"""
+    t = (text or "").strip()
+    if t.startswith("```"):
+        t = re.sub(r"^```[a-zA-Z]*\s*", "", t).strip()
+        t = re.sub(r"\s*```$", "", t).strip()
+    start, end = t.find("{"), t.rfind("}")
+    if start < 0 or end <= start:
+        raise ValueError(f"LLM 输出里没有 JSON 对象: {(text or '')[:120]}")
+    return json.loads(t[start:end + 1])
+
+
+def select_recall_units(recalled_events: list[str], anchors: list,
+                        entity_hits: list, resolved_brought: list,
+                        store, seats: int = 3):
+    """置信分组与名额（2026-10-14 定稿）——召回注入的选取器。
+
+    组 1（确定性）：路①实体区域命中 / 路②lexical 字面命中
+    组 2（概率）：路③semantic 向量过阈命中
+    组内排序：命中路数 desc → 时间 desc（significance 数值化待定）
+    名额：组 1 优先填满 seats 席，组 2 只补空位；实体块整体占 1 席。
+    凑不满不强凑：过门槛剩几条注几条，一条没有就真的没有。
+    修正者继承被修正者的命中资格（B 因 A 而来）。
+
+    单元：{"kind": "entity_block"|"event", "entity_id", "event_ids",
+           "route_count", "group"}——实体块 = 概览 + 名下事件捆绑。
+    返回 (selected_units, dropped_by_seats)。
+    """
+    entity_hit_ids = {h.entity_id for h in entity_hits}
+    hit_matchers: dict[str, set[str]] = {}
+    for h in anchors:
+        hit_matchers.setdefault(h.event_id, set()).add(h.matcher)
+    resolved_src = dict(resolved_brought or [])  # 修正者 -> 被修正者
+
+    def _flags(eid: str) -> dict[str, bool]:
+        src = resolved_src.get(eid)
+        union = (hit_matchers.get(eid, set())
+                 | (hit_matchers.get(src, set()) if src else set()))
+        f = {"entity": False,
+             "lexical": "lexical" in union,
+             "semantic": "semantic" in union}
+        if _event_entity_of(store, eid) in entity_hit_ids:
+            f["entity"] = True
+        return f
+
+    def _unit_key(u: dict):
+        return (-u["route_count"],
+                -max(_event_ingest_ts(store, e) for e in u["event_ids"]))
+
+    units: list[dict] = []
+    block_of_entity: dict[str, dict] = {}
+    for eid in recalled_events:
+        ent = _event_entity_of(store, eid)
+        if ent is not None and ent in entity_hit_ids:
+            blk = block_of_entity.get(ent)
+            if blk is None:
+                blk = {"kind": "entity_block", "entity_id": ent,
+                       "event_ids": [], "route_count": 0, "group": 1}
+                units.append(blk)
+                block_of_entity[ent] = blk
+            blk["event_ids"].append(eid)
+        else:
+            f = _flags(eid)
+            rc = sum((f["entity"], f["lexical"], f["semantic"]))
+            group = 1 if (f["entity"] or f["lexical"]) else 2
+            units.append({"kind": "event", "event_ids": [eid],
+                          "route_count": rc, "group": group})
+    for blk in units:
+        if blk["kind"] != "entity_block":
+            continue
+        sub = [_flags(e) for e in blk["event_ids"]]
+        blk["route_count"] = (1
+                              + (1 if any(f["lexical"] for f in sub) else 0)
+                              + (1 if any(f["semantic"] for f in sub) else 0))
+
+    g1 = sorted((u for u in units if u["group"] == 1), key=_unit_key)
+    g2 = sorted((u for u in units if u["group"] == 2), key=_unit_key)
+    selected = list(g1[:seats])
+    selected += g2[:max(0, seats - len(selected))]
+    dropped = len(units) - len(selected)
+    return selected, dropped
+
+
 class EmberService:
     """Ember Proxy 的核心：单模型 chat + memory write（共用同一份 session 历史）。"""
 
@@ -201,6 +312,11 @@ class EmberService:
         # Relation 层 v1：resolves 边（被修正者 → 修正者），
         # 被过滤事件的修正者顶上（"旧观点被什么取代了"的入口）
         self.relation_store = RelationStore(getattr(store, "root", ""))
+        # PairSeen：判过的 (新, 旧) 对留痕——补跑/重跑不重复裁决（挂关系消费）
+        self.pair_seen = PairSeenStore(getattr(store, "root", ""))
+        # 沉淀证据账本（10-14 设计稿第 4 步）：正文与版本号归 app，
+        # ember 只收"某版 + 净新增证据 id"追加（app 存新版才调）
+        self.sediment_store = SedimentStore(getattr(store, "root", ""))
         # Direction 匹配层（10-05 通电）：向量做判断（选方向/判模糊），
         # 不做直接召回；方向向量由 scripts/build_direction_vectors.py 离线预计算
         self.direction_matcher = DirectionMatcher(
@@ -488,8 +604,17 @@ class EmberService:
                 if ev.raw_ref not in recalled_ctx.source_refs:
                     recalled_ctx.source_refs.append(ev.raw_ref)
 
+        # ---- 置信分组与名额（2026-10-14 定稿）----
+        # 组 1（确定性）：路①实体区域 / 路②lexical；组 2（概率）：路③semantic 过阈
+        # 组 1 优先填满 3 席，组 2 补位；实体块整体占 1 席；凑不满不强凑
+        selected_units, dropped_by_seats = select_recall_units(
+            recalled_ctx.recalled_events, recalled_ctx.recall_trace.anchors,
+            entity_hits, resolved_brought, self.store)
+        recalled_ctx.recalled_events = [
+            eid for u in selected_units for eid in u["event_ids"]]
+
         # 召回记账（10-08 定稿 §3.2）：三段通路各记一行，供 Sleep 候选组装
-        # 与旧 Cue 收紧消费。合流后记账——记的是过滤后真正带出的 event。
+        # 与旧 Cue 收紧消费。名额截断后记账——记的是真正注入前缀的 event。
         self._ledger_record(session, turn, recalled_ctx, entity_hits,
                             entity_event_ids, dir_result, excluded,
                             resolved_brought)
@@ -500,7 +625,8 @@ class EmberService:
                 recalled_ctx, entity_hits=entity_hits,
                 resolved_brought=resolved_brought,
                 summary_fallback=summary_fallback,
-                direction_focused=direction_focused)
+                direction_focused=direction_focused,
+                units=selected_units)
 
         return {
             "prefix": prefix,
@@ -509,6 +635,7 @@ class EmberService:
             "entity_names": [h.name for h in entity_hits],
             "filtered_by_sleep": len(excluded),
             "filtered_by_window": len(window_excluded),
+            "dropped_by_seats": dropped_by_seats,
             "resolved_brought": [dst for dst, _ in resolved_brought],
             "direction_focused": direction_focused,
             "direction_reason": direction_reason,
@@ -585,6 +712,8 @@ class EmberService:
         }
         if dropped:
             result["dropped_quotes"] = dropped
+        # 待配对队列（2026-10-14 设计稿 v2）：写入成功即记，挂关系出队消费
+        self.link_pending_add(event.event_id)
         return result
 
     def _handle_memory_tool_call(self, session: Session, turn: int,
@@ -754,7 +883,8 @@ class EmberService:
                              entity_hits: list | None = None,
                              resolved_brought: list[tuple[str, str]] | None = None,
                              summary_fallback: bool = False,
-                             direction_focused: str | None = None) -> str:
+                             direction_focused: str | None = None,
+                             units: list[dict] | None = None) -> str:
         """结构化前缀块：被唤起的记忆挂在用户消息前面（momo 裁决格式）。
 
         指向强度分层（momo 2026-10-01 裁决：无 must/may，纯运行时聚合）：
@@ -765,6 +895,10 @@ class EmberService:
         - Relation 带回（v1）→ 标注"旧观点已被新认知取代"
         summary_fallback（momo 10-04 裁决）：Direction 模糊/低分时不做
         全文注入，降级为 Entity 层 summary——事件摘要 + id，留主动检索入口。
+
+        置信分组呈现（2026-10-14 定稿）：units 非空时按名额选中后的
+        单元序列渲染——实体块（概览+名下事件捆绑）在前、独立事件在后；
+        units=None 时按旧平铺逻辑（兼容观察路径）。
         """
         entity_names = [h.name for h in (entity_hits or [])]
         resolved_map = dict(resolved_brought or [])
@@ -791,15 +925,8 @@ class EmberService:
             lines.append("[记忆概览结束——自然地运用，不要机械复述本结构]")
             return "\n".join(lines) + "\n\n"
 
-        if entity_names:
-            lead = (f"你提到了{'、'.join('〈' + n + '〉' for n in entity_names)}，"
-                    "与此相关的过往经历整体浮现")
-            if direction_focused:
-                lead += f"（沿着「{direction_focused.replace('dir_ember_', '').replace('_', ' ')}」这条线）"
-            lines.append(lead + "：")
-        else:
-            lines.append("以下是你因当前这句话想起的过往经历：")
-        for eid in ctx.recalled_events:
+        def _event_line(eid: str) -> None:
+            """单条事件行：修正承接 / 强度标注 / 原话 / 深挖指引。"""
             event = self.store.get_event(eid)
             hits = [h for h in ctx.recall_trace.anchors if h.event_id == eid]
             distinct_cues = sorted({h.cue for h in hits})
@@ -812,7 +939,7 @@ class EmberService:
                 quotes_line = self._format_key_quotes(event)
                 if quotes_line:
                     lines.append(f"  {quotes_line}")
-                continue
+                return
             if entity_names and not hits:
                 strength = "实体区域"
             elif len(distinct_cues) >= 2:
@@ -829,6 +956,40 @@ class EmberService:
                              f"read_memory_source(\"{eid}\")")
             else:
                 lines.append(f"  需要原话时可调用 read_memory_source(\"{eid}\")")
+
+        if units is not None:
+            # 置信分组呈现（2026-10-14 定稿）：实体块捆绑在前，
+            # 独立事件随后；块 = 「关于〈X〉：概览」+ 名下事件行
+            entity_by_id = {h.entity_id: h for h in (entity_hits or [])}
+            lead_blocks = [u for u in units if u["kind"] == "entity_block"]
+            if lead_blocks:
+                names = "、".join(
+                    f"〈{entity_by_id[b['entity_id']].name}〉"
+                    for b in lead_blocks if b["entity_id"] in entity_by_id)
+                lead = f"你提到了{names}，与此相关的过往经历整体浮现"
+                if direction_focused:
+                    line_label = (direction_focused
+                                  .replace("dir_ember_", "").replace("_", " "))
+                    lead += f"（沿着「{line_label}」这条线）"
+                lines.append(lead + "：")
+            for u in units:
+                if u["kind"] == "entity_block":
+                    h = entity_by_id.get(u["entity_id"])
+                    if h is not None:
+                        try:
+                            ent_summary = (self.entity_store.get(
+                                h.entity_id).summary or "").strip()
+                        except KeyError:
+                            ent_summary = ""
+                        if ent_summary:
+                            lines.append(f"关于〈{h.name}〉：{ent_summary}")
+                    for eid in u["event_ids"]:
+                        _event_line(eid)
+                else:
+                    _event_line(u["event_ids"][0])
+        else:
+            for eid in ctx.recalled_events:
+                _event_line(eid)
         lines.append("[记忆结束——自然地运用它们，不要机械复述本结构]")
         return "\n".join(lines) + "\n\n"
 
@@ -1412,3 +1573,566 @@ class EmberService:
     def sidecar_read_memory_source(self, event_id: str) -> dict[str, Any]:
         """MCP 工具 read_memory_source 执行体（只读，同代理形态实现）。"""
         return self.read_source_event(event_id)
+
+    # ---------- 挂关系（2026-10-14 设计稿 v2：借 Loism 的窗口跑） ----------
+    #
+    # 旧版：sleep_v2 脚本内 ember 自发 LLM 判联（JUDGE 管线，退役留参考）。
+    # 新版数据流：app 按钮进入 sleep → 接口 1 出材料（app 贴窗口末尾）→
+    # 正主 AI 强制调 link_relations → app 交卷（接口 2）→ 本体落库
+    # （三分支：relation 边 / superseded / 实体归属，与脚本同规则）→
+    # 断线恢复查进度（接口 3）。落库规则与 sleep_v2 逐条对齐。
+    #
+    # 待配对队列：link_pending.jsonl——write_validated_event 成功即记，
+    # 材料出队不扣减（等交卷成功才扣），断线重进材料照旧。
+
+    LINK_PENDING_FILE = "link_pending.jsonl"
+
+    def _link_pending_path(self) -> str:
+        return os.path.join(self.store.root, self.LINK_PENDING_FILE)
+
+    def link_pending_add(self, event_id: str) -> None:
+        with open(self._link_pending_path(), "a", encoding="utf-8") as f:
+            f.write(json.dumps({"event_id": event_id}) + "\n")
+
+    def _link_pending_list(self) -> list[str]:
+        p = self._link_pending_path()
+        if not os.path.exists(p):
+            return []
+        out: list[str] = []
+        with open(p, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    eid = json.loads(line).get("event_id")
+                except json.JSONDecodeError:
+                    continue
+                if eid and eid not in out:
+                    out.append(eid)
+        return out
+
+    def _link_pending_remove(self, event_ids: set[str]) -> None:
+        if not event_ids:
+            return
+        keep = [e for e in self._link_pending_list() if e not in event_ids]
+        tmp = self._link_pending_path() + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            for e in keep:
+                f.write(json.dumps({"event_id": e}) + "\n")
+        os.replace(tmp, self._link_pending_path())
+
+    def _patch_event_rows(self, updates: dict[str, dict],
+                          whitelist: tuple[str, ...] = ("change",
+                                                        "entity_refs")) -> None:
+        """events.jsonl 行级白名单回填（change / entity_refs）。
+
+        Event dataclass 不含 entity_refs（jsonl 侧字段），write_event 会
+        丢——与 sleep_v2.rewrite_events 同法：读行合并重写再重载内存。
+        """
+        if not updates:
+            return
+        p = self.store._path(EVENTS_FILE)  # noqa: SLF001
+        rows: list[dict] = []
+        if os.path.exists(p):
+            with open(p, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        rows.append(json.loads(line))
+        for row in rows:
+            eid = row.get("event_id") or ""
+            up = updates.get(eid)
+            if up is None:
+                short = "-".join(eid.split("-")[:2])
+                up = next((v for k, v in updates.items()
+                           if k == short or k.startswith(short + "-")), None)
+            if not up:
+                continue
+            for k in whitelist:
+                if k in up:
+                    row[k] = up[k]
+        tmp = p + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            for row in rows:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        os.replace(tmp, p)
+        self.store.reload()
+        from .recall import _EVENT_ENTITY_REFS
+        for eid, up in updates.items():
+            if "entity_refs" in up:
+                _EVENT_ENTITY_REFS[eid] = list(up["entity_refs"])
+
+    def _assemble_link_material(self, eid: str) -> dict | None:
+        """单份挂关系材料（sleep_v2.assemble_materials 的 service 版）。
+
+        候选 = 该事件 turn_span 区间 ∩ 召回记账带出的旧事件；排除
+        superseded/outdated 与判过留痕 pair；无 span / 无 session /
+        无候选 → None（诚实跳过，不冒充不编造）。
+        """
+        try:
+            ev = self.store.get_event(eid)
+        except KeyError:
+            return None
+        spans = self.turn_spans.span_of(eid)
+        if not spans:
+            return None
+        sess = re.match(r"conversation/session-([^/]+)",
+                        ev.source_ref or "")
+        if sess is None:
+            return None
+        sid = sess.group(1)
+        keys = [(sid, t) for span in spans for t in range(span[0], span[1] + 1)]
+        old_ids: list[str] = []
+        for oid in self.recall_ledger.events_recalled_in_turns(keys):
+            if oid == eid:
+                continue
+            if not self.sleep_state.recall_allowed(oid):
+                continue
+            if self.pair_seen.is_seen(eid, oid):
+                continue
+            old_ids.append(oid)
+        if not old_ids:
+            return None
+
+        def _ent_info(oid: str) -> tuple[str, str]:
+            ref = _event_entity_of(self.store, oid)
+            if not ref:
+                return "", ""
+            try:
+                return self.entity_store.get(ref).name, ref
+            except KeyError:
+                return "", ref
+
+        olds = []
+        for oid in old_ids:
+            try:
+                oe = self.store.get_event(oid)
+            except KeyError:
+                continue
+            name, ref = _ent_info(oid)
+            olds.append({"event_id": oid, "entity_name": name,
+                         "entity_id": ref, "core": oe.core or "",
+                         "summary": oe.summary or ""})
+        if not olds:
+            return None
+        ent_ref = _event_entity_of(self.store, eid)
+        try:
+            ent_name = (self.entity_store.get(ent_ref).name
+                        if ent_ref else "")
+        except KeyError:
+            ent_name = ""
+        return {"new_id": eid,
+                "new_event": {"event_id": eid, "core": ev.core or "",
+                              "summary": ev.summary or ""},
+                "entity_name": ent_name,
+                "old_events": olds}
+
+    def sidecar_link_batches(self) -> dict[str, Any]:
+        """接口 1（材料出队）：pending → 材料 → 均分 ≤5 批。
+
+        出队不扣 pending——交卷成功才扣；断线重进材料照旧（幂等）。
+        """
+        pending = self._link_pending_list()
+        materials = [m for m in
+                     (self._assemble_link_material(e) for e in pending) if m]
+        n = len(materials)
+        if n == 0:
+            return {"batches": [], "pending_total": len(pending),
+                    "materials_total": 0}
+        nbatch = min(5, n)
+        size = (n + nbatch - 1) // nbatch
+        batches = [{"batch_index": i // size,
+                    "materials": materials[i:i + size]}
+                   for i in range(0, n, size)]
+        return {"batches": batches, "pending_total": len(pending),
+                "materials_total": n}
+
+    def _validate_link_verdict(self, verdict: dict,
+                               material: dict) -> list[str]:
+        """sleep_v2.validate 的 service 版（同规则）。
+
+        校验基于**回传材料**：pair 只允许指向材料内旧事件（判联 AI
+        只能看到材料里的事，指向材料外=幻觉，整份拒绝）。
+        """
+        errs: list[str] = []
+        old_ids = {o["event_id"] for o in material.get("old_events", [])}
+        pairs = verdict.get("pairs")
+        if not isinstance(pairs, list):
+            return ["pairs 缺失或不是列表"]
+        seen_old: set[str] = set()
+        for p in pairs:
+            oid = p.get("old_event_id")
+            if oid not in old_ids:
+                errs.append(f"pair 指向材料外事件: {oid}")
+                continue
+            if oid in seen_old:
+                errs.append(f"pair 重复: {oid}")
+            seen_old.add(oid)
+            outcome = p.get("outcome")
+            if outcome not in ("relation", "neighbor", "none"):
+                errs.append(f"{oid} outcome 非法: {outcome}")
+                continue
+            if outcome == "relation":
+                if p.get("type") not in RELATION_TYPES:
+                    errs.append(f"{oid} relation type 非法: {p.get('type')}")
+                if p.get("confidence") not in ("high", "medium", "low"):
+                    errs.append(f"{oid} confidence 非法: {p.get('confidence')}")
+                if p.get("type") == "resolves":
+                    if not (p.get("change") or "").strip():
+                        errs.append(f"{oid} resolves 缺 change")
+                    if not (p.get("status_evidence") or "").strip():
+                        errs.append(f"{oid} resolves 缺 status_evidence")
+            elif outcome in ("neighbor", "none") and p.get("type"):
+                errs.append(f"{oid} {outcome} 不应带 type")
+
+        ent = verdict.get("entity") or {}
+        action = ent.get("action", "none")
+        if action not in ("extract", "attach", "none"):
+            errs.append(f"entity.action 非法: {action}")
+            return errs
+        new_id = material.get("new_id") or ""
+        if action == "extract":
+            if not (ent.get("name") or "").strip():
+                errs.append("extract 缺 name")
+            else:
+                try:
+                    existing = {e.name.strip().lower()
+                                for e in self.entity_store.all()}
+                except Exception:  # noqa: BLE001
+                    existing = set()
+                if ent["name"].strip().lower() in existing:
+                    errs.append(f"extract name 与已有 Entity 重复: {ent['name']}")
+            members = ent.get("member_event_ids") or []
+            if len(members) < 3:
+                errs.append(f"extract member 不足 3: {len(members)}")
+            for mid in members:
+                if _event_entity_of(self.store, mid):
+                    errs.append(f"member 已有归属（散事件才可入）: {mid}")
+        elif action == "attach":
+            target = ent.get("entity_id") or ""
+            valid_targets = {o.get("entity_id") for o in
+                             material.get("old_events", [])
+                             if o.get("entity_id")}
+            if target not in valid_targets:
+                errs.append(f"attach 目标不是材料内旧事件的实体: {target}")
+            if _event_entity_of(self.store, new_id):
+                errs.append("attach 目标新事件已有归属（单归属）")
+            close = ent.get("close", False)
+            if isinstance(close, str):
+                if close.lower() not in ("true", "false"):
+                    errs.append(f"close 非法: {close}")
+            if close and not (ent.get("close_reason") or "").strip():
+                errs.append("close=true 缺 close_reason")
+        return errs
+
+    def _apply_link_verdict(self, verdict: dict, material: dict,
+                            source_message_id: int | None = None) -> dict:
+        """sleep_v2.apply_verdict 的 service 版：三分支落库。
+
+        prov = sleep-link:window[:m<message_id>]——回指触发判联的窗口轮。
+        """
+        new_id = material.get("new_id") or ""
+        prov = "sleep-link:window"
+        if source_message_id:
+            prov += f":m{source_message_id}"
+        summary: dict[str, Any] = {"new_event": new_id, "relations": [],
+                                   "resolves": [], "entity_action": "none",
+                                   "marked_pairs": 0}
+
+        for p in verdict.get("pairs", []):
+            oid = p["old_event_id"]
+            outcome = p.get("outcome")
+            # 判过的 pair 全部留痕（含 relation）——补跑与首跑等价
+            self.pair_seen.mark(new_id, oid, verdict=str(outcome),
+                                decided_by=prov)
+            summary["marked_pairs"] += 1
+            if outcome != "relation":
+                continue
+            rel = EventRelation(
+                relation_id=f"rel_{uuid.uuid4().hex[:8]}",
+                src_event=oid,           # 方向固定：旧 → 新
+                dst_event=new_id,
+                type=p["type"],
+                confidence=p.get("confidence", "high"),
+                evidence_refs=[f"{prov}:{p.get('reason', '')}"],
+                provenance_refs=[prov],
+            )
+            self.relation_store.add(rel)
+            summary["relations"].append(f"{oid}--{p['type']}-->{new_id}")
+            if p["type"] == "resolves":
+                # 三处落盘之二三：status 标记 + change 补写
+                self.sleep_state.mark(oid, "superseded",
+                                      p.get("status_evidence", ""), prov)
+                self._patch_event_rows({oid: {"change": p.get("change", "")}})
+                summary["resolves"].append(oid)
+
+        ent = verdict.get("entity") or {}
+        summary.update(self._apply_entity_action(ent, [new_id], prov))
+        return summary
+
+    def sidecar_link_submit(self, body: dict[str, Any]) -> dict[str, Any]:
+        """接口 2（交卷）：app 把窗口 AI 的 link_relations 结果转交。
+
+        每份 {material, verdict}：校验基于回传材料（防幻觉指向材料外）
+        → 落库三分支 → pending 扣减。整条拒绝不炸（回执 errors）。
+        """
+        results = (body or {}).get("results") or []
+        saved: list[dict] = []
+        rejected: list[dict] = []
+        done_ids: set[str] = set()
+        for r in results:
+            material = r.get("material") or {}
+            verdict = r.get("verdict") or {}
+            new_id = (material.get("new_event") or {}).get("event_id") \
+                or material.get("new_id") or ""
+            errs = self._validate_link_verdict(verdict, material)
+            if errs:
+                rejected.append({"new_id": new_id, "errors": errs})
+                continue
+            summary = self._apply_link_verdict(
+                verdict, material,
+                source_message_id=(body or {}).get("source_message_id"))
+            if new_id:
+                done_ids.add(new_id)
+            saved.append({"new_id": new_id, **summary})
+        self._link_pending_remove(done_ids)
+        return {"saved": saved, "rejected": rejected,
+                "remaining_pending": self._link_pending_list()}
+
+    def sidecar_link_progress(self) -> dict[str, Any]:
+        """接口 3（进度/断点续跑）：pending 剩余 + 可组材料 + 剩余批数。"""
+        pending = self._link_pending_list()
+        ready = [m for m in
+                 (self._assemble_link_material(e) for e in pending) if m]
+        return {"pending_total": len(pending),
+                "materials_ready": len(ready),
+                "batches_remaining": min(5, len(ready)) if ready else 0,
+                "pending_events": pending}
+
+    def sidecar_sediment_evidence(self, body: dict[str, Any]) -> dict[str, Any]:
+        """沉淀证据接收（10-14 设计稿第 4 步，10.15 分工对齐版）。
+
+        app 真的存下一版新沉淀时才调——正文与版本号归 app，ember 只
+        把净新增证据 id 挂到该版名下：id 必须真实存在（防幻觉）→
+        去重（本版内 + 剔其他版本已有）→ 落账。同版本重交覆盖为
+        最新列表。证据为空 app 根本不该调（空集=调用方违约，拒收）。
+        """
+        body = body or {}
+        errors: list[str] = []
+        version = body.get("version")
+        if not isinstance(version, int) or version < 1:
+            errors.append(f"version 非法: {version!r}（应为 ≥1 的整数）")
+        ids = body.get("evidence_event_ids")
+        if not isinstance(ids, list) or not ids:
+            errors.append("evidence_event_ids 缺失或为空"
+                          "（证据为空时 app 不应调本接口）")
+        if errors:
+            return {"status": "rejected", "errors": errors}
+        unknown = [e for e in ids
+                   if not isinstance(e, str) or not e.strip()]
+        hallucinated: list[str] = []
+        for e in ids:
+            if isinstance(e, str) and e.strip() and \
+                    not self._sediment_event_exists(e.strip()):
+                hallucinated.append(e)
+        if unknown or hallucinated:
+            return {"status": "rejected",
+                    "errors": (["非法 event id: " + ", ".join(unknown)]
+                               if unknown else [])
+                    + (["不存在的事件 id（幻觉）: "
+                        + ", ".join(hallucinated)] if hallucinated else [])}
+        res = self.sediment_store.append(version,
+                                         [e.strip() for e in ids])
+        if not res["kept"]:
+            return {"status": "no_new_evidence",
+                    "version": version,
+                    "duplicates_dropped": res["duplicates"],
+                    "note": "全部 id 均为历史版本已有证据，本版不落账"}
+        return {"status": "appended", "version": version,
+                "evidence_kept": res["kept"],
+                "duplicates_dropped": res["duplicates"],
+                "latest_version": self.sediment_store.latest_version()}
+
+    def _sediment_event_exists(self, eid: str) -> bool:
+        try:
+            self.store.get_event(eid)
+            return True
+        except KeyError:
+            return False
+
+    def _apply_entity_action(self, ent: dict, attach_event_ids: list[str],
+                             prov: str) -> dict[str, Any]:
+        """归属动作落库（挂关系窗口判联与结构维护共用的 entity 段）。
+
+        extract：开新户 + 散事件入户新实体；attach：事件单归属挂到
+        已有实体 + 收尾判定/起算点重置。校验由调用方完成，这里只做
+        幂等兜底（已归属的跳过不重挂）。
+        """
+        action = ent.get("action", "none")
+        now = datetime.now(timezone.utc).astimezone().isoformat(
+            timespec="seconds")
+        out: dict[str, Any] = {"entity_action": action}
+        if action == "extract":
+            e = Entity(
+                entity_id=f"ent_{uuid.uuid4().hex[:8]}",
+                name=(ent.get("name") or "").strip(),
+                aliases=[a.strip() for a in (ent.get("aliases") or [])
+                         if a.strip()],
+                provenance_refs=[prov],
+            )
+            self.entity_store.upsert(e)
+            self.entity_store.save()
+            members = list(dict.fromkeys(ent.get("member_event_ids") or []))
+            patch = {mid: {"entity_refs": [e.entity_id]} for mid in members
+                     if not _event_entity_of(self.store, mid)}
+            self._patch_event_rows(patch)
+            out["entity_action"] = (f"extract:{e.entity_id}({e.name})"
+                                    f" x{len(patch)}")
+            out["entity_id"] = e.entity_id
+        elif action == "attach":
+            target = ent.get("entity_id") or ""
+            ids = [eid for eid in dict.fromkeys(attach_event_ids)
+                   if not _event_entity_of(self.store, eid)]
+            if ids:
+                self._patch_event_rows(
+                    {eid: {"entity_refs": [target]} for eid in ids})
+            out["entity_action"] = f"attach:{target}"
+            out["members_patched"] = len(ids)
+            # attach 顺带判目标实体收尾（momo 2026-10-09 裁决，照脚本）
+            close = ent.get("close", False)
+            if isinstance(close, str):
+                close = close.lower() == "true"
+            try:
+                target_ent = self.entity_store.get(target)
+            except KeyError:
+                target_ent = None
+            if target_ent is not None:
+                if close:
+                    if target_ent.status == "open":
+                        target_ent.close(now)
+                        out["attach_closed"] = target
+                    target_ent.closed_at = now
+                    self.entity_store.save()
+                    out["attach_reset_closed_at"] = target_ent.closed_at
+                elif target_ent.status == "closed":
+                    # 归入已 close 的实体且未判收尾 → 重置起算点
+                    target_ent.closed_at = now
+                    self.entity_store.save()
+                    out["attach_reset_closed_at"] = target_ent.closed_at
+        return out
+
+    def _apply_structure_assignments(self, verdict: dict,
+                                     stray_ids: set[str],
+                                     library_ids: set[str]) -> tuple[list,
+                                                                     list]:
+        """结构维护 verdict 逐条校验 + 落库（单条拒绝不炸整批）。
+
+        校验基于本次散事件清单（清单外 = 幻觉，拒绝该条）；实体目标
+        必须在清单里给过的实体库内；同批一个事件只允许被认领一次
+        （单归属铁律）。
+        """
+        saved: list[dict] = []
+        rejected: list[dict] = []
+        claimed: set[str] = set()
+        names_used: set[str] = set()
+        try:
+            existing_names = {e.name.strip().lower()
+                              for e in self.entity_store.all()}
+        except Exception:  # noqa: BLE001
+            existing_names = set()
+        assignments = verdict.get("assignments")
+        if not isinstance(assignments, list):
+            return saved, [{"action": "?",
+                            "errors": ["assignments 缺失或不是列表"]}]
+        for a in assignments:
+            if not isinstance(a, dict):
+                rejected.append({"action": "?",
+                                 "errors": ["assignment 不是对象"]})
+                continue
+            action = a.get("action")
+            if action == "extract":
+                errs: list[str] = []
+                name = (a.get("name") or "").strip()
+                members = list(dict.fromkeys(
+                    a.get("member_event_ids") or []))
+                if not name:
+                    errs.append("extract 缺 name")
+                elif (name.lower() in existing_names
+                      or name.lower() in names_used):
+                    errs.append(f"extract name 重复: {name}")
+                if len(members) < 3:
+                    errs.append(f"extract member 不足 3: {len(members)}")
+                for mid in members:
+                    if mid not in stray_ids:
+                        errs.append(f"member 不在本次散事件清单: {mid}")
+                    elif mid in claimed:
+                        errs.append(f"member 已被认领（单归属）: {mid}")
+                if errs:
+                    rejected.append({"action": action, "name": name,
+                                     "errors": errs})
+                    continue
+                names_used.add(name.lower())
+                claimed.update(members)
+                out = self._apply_entity_action(a, [], "sleep-structure")
+                saved.append({"action": action, "name": name, **out})
+            elif action == "attach":
+                errs = []
+                target = a.get("entity_id") or ""
+                ids = list(dict.fromkeys(a.get("event_ids") or []))
+                if target not in library_ids:
+                    errs.append(f"attach 目标不在实体库: {target}")
+                if not ids:
+                    errs.append("attach 缺 event_ids")
+                for eid in ids:
+                    if eid not in stray_ids:
+                        errs.append(f"event 不在本次散事件清单: {eid}")
+                    elif eid in claimed:
+                        errs.append(f"event 已被认领（单归属）: {eid}")
+                if errs:
+                    rejected.append({"action": action, "entity_id": target,
+                                     "errors": errs})
+                    continue
+                claimed.update(ids)
+                out = self._apply_entity_action(a, ids, "sleep-structure")
+                saved.append({"action": action, "entity_id": target, **out})
+            else:
+                rejected.append({"action": action,
+                                 "errors": [f"action 非法: {action}"]})
+        return saved, rejected
+
+    def run_structure_maintenance(self) -> dict[str, Any]:
+        """结构维护：散事件归属（第三方 LLM 判定）+ 旧 cue 收紧。
+
+        双 LLM 路线（momo 2026-10-14 拍板）：正主只判联，归属判定
+        外包第三方 LLM（task="structure"，engine 走 executors.json）。
+        app 编排在挂关系清完之后调用（顺序契约见 API.md）。
+        无散事件时跳过 LLM 只跑 cue 收紧；幂等——已归属的自动出清单。
+        """
+        strays = [ev for ev in self.store.all_events()
+                  if not _event_entity_of(self.store, ev.event_id)]
+        stray_mats = [{"event_id": ev.event_id, "core": ev.core or "",
+                       "summary": ev.summary or ""} for ev in strays]
+        report: dict[str, Any] = {"strays_total": len(stray_mats),
+                                  "saved": [], "rejected": [],
+                                  "cue_tighten": None}
+        if stray_mats:
+            ents = [{"entity_id": e.entity_id, "name": e.name,
+                     "status": e.status, "summary": e.summary or ""}
+                    for e in self.entity_store.all()]
+            user = build_structure_user_prompt(stray_mats, ents)
+            engine = executors.load_engine(
+                getattr(self.store, "root", ""), "structure")
+            text = executors.call_llm(STRUCTURE_SYSTEM_PROMPT, user, engine,
+                                      task="structure")
+            saved, rejected = self._apply_structure_assignments(
+                _parse_llm_json(text),
+                {m["event_id"] for m in stray_mats},
+                {e["entity_id"] for e in ents})
+            report["saved"] = saved
+            report["rejected"] = rejected
+        report["cue_tighten"] = CueTightener(
+            self.store, self.recall_ledger,
+            self.store._path(EVENTS_FILE),  # noqa: SLF001
+            self.entity_store).tighten()
+        return report
