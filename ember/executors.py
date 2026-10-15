@@ -4,15 +4,14 @@
 这个文件是干什么的：
   1. 读 executors.json（各 LLM 任务点的默认 engine 配置）；
   2. 提供公共 call_llm（glm API / qwen3 本地 docker 两个 engine），
-     供三个离线脚本（sleep_v2 / split_directions / mount_directions）
-     引用，取代原先各脚本里的重复实现。
+     供离线脚本与 service 的外包调用引用，取代重复实现。
 
 被谁调用：
-  - scripts/sleep_v2.py（任务点 judge，调用②裁决与归属）
+  - ember.service（任务点 structure，散事件归属判定）
   - scripts/split_directions.py（任务点 split，Direction 划分）
   - scripts/mount_directions.py（任务点 mount，Direction 挂载）
-  - scripts/sleep_run.py（judge 经由 sleep_v2 间接使用；
-    summary = Entity summary 重算，裁决后独立调用）
+  - （judge 随独立判联管线 2026-10-15 退役；summary 的 service
+    编排待接，接后走 task="summary"）
 
 executors.json 约定（momo 2026-10-09 拍板）：
   - 位置：ember-v3-mvp 根目录（BASE），无密钥、入 git；

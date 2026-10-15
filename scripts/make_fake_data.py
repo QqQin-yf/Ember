@@ -4,7 +4,7 @@
 跑法：python scripts/make_fake_data.py
       （可选环境变量 EMBER_DATA_DIR 覆盖目标目录，默认 data/）
 作用：捏造一套形态齐全的假记忆库——事件、召回线索、出处区间、
-账本映射、睡眠进度（含冷静期边界演示）、入梦记录。与任何真实
+账本映射、睡眠进度（含冷静期边界演示）。与任何真实
 数据零关系；想重来删掉目录重跑即可。
 
 形态清单：
@@ -12,7 +12,6 @@
 - 6 个事件（每事件 2 条 lexical 召回线索 + turn_span 出处区间）
 - sleep_progress：前 3 个事件标记已维护（revise 冷静期边界：
   前 3 个改不了走 resolves，后 3 个冷静期内可直改）
-- dream_ledger：1 个 ok 夜（前 2 个事件入梦，演示「入梦不再选中」）
 - 不造向量（向量是 sleep 派生物，lexical 召回不需要）
 
 安全：目标目录已有 events.jsonl 时拒绝执行（防误伤真实记忆库）。
@@ -126,20 +125,9 @@ for eid, _, _, _, _ in EVENTS[:3]:
         "recorded_at": _now(), "detail": {"note": "seed 预置"},
     })
 
-# ---------------------------------------------------------------- 梦账本
-# 一个 ok 夜：前 2 个事件已入梦（DreamSource 不会再选它们）
-_append("dream_ledger.jsonl", {
-    "kind": "night",
-    "event_ids": ["EVT-001-aaaaaa", "EVT-002-bbbbbb"],
-    "dream_id": "night-seed0001", "status": "ok", "skipped": [],
-    "recorded_at": _now(),
-})
-
 print(f"[seed] 完成：假记忆库已造在 {DATA}")
 print(f"  事件 6 个（前 3 个已过冷静期 / 后 3 个冷静期内可 revise）")
-print(f"  入梦  2 个（EVT-001/002，下夜选材会跳过）")
 print(f"  轮次  2 会话 × 6 轮（含 heart 坐标与 message_id 映射）")
 print(f"[seed] 配套环境变量（联调时指给对应服务）：")
-print(f"  EMBER_SOURCE_URL=<heart-chat 地址>（原文拉取）")
-print(f"  HEART_BASE_URL=<heart 地址>（梦推送）")
+print(f"  EMBER_SOURCE_URL=<后端地址>（原文拉取，契约见 API.md §7.2）")
 print(f"[seed] 完全重来：删掉该目录再跑一遍。")

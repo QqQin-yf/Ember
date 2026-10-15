@@ -1,8 +1,9 @@
 # ember 接口文档
 
-> ember：旁路记忆系统。职责边界：记忆写入（模型自主+校验）、召回注入、梦材料选材推送；
+> ember：旁路记忆系统。职责边界：记忆写入（模型自主+校验）、召回注入、sleep 夜间维护（挂关系/结构维护）、沉淀证据账本；
 > **不管**对话主路径——ember 挂了/未部署，聊天照常，只损失记忆能力。
-> 消费方：app（钩子组）、模型的工具循环（MCP 工具组）、heart（梦通道，ember 作为客户端）。
+> 消费方：app（钩子组 + sleep 编排 + 沉淀证据转交）、模型的工具循环（MCP 工具组）。
+> （梦已归 app 的 dream_submit 工具，ember 不再向 heart 推送——旧梦通道 2026-10-15 退役。）
 
 ## 1. 基础信息
 
@@ -274,17 +275,7 @@ MCP 工具名与机制标识不携带任何品牌信息（工具名会出现在�
 
 ## 7. ember 作为客户端
 
-### 7.1 梦通道（→ heart）
-
-一夜的编排（`push_dream_night`）：**选材 → 一次性批量推送 → 账本留痕**。
-
-- 时序：必须在 heart 入睡后推送（未入睡会被 400 拒收，不重试）
-- 推送：`POST <heart>/api/dream/material {"events": [{text, turn_span}]}`——turn_span 已由 ember 换算成 heart 坐标（`t-XXXXXX` 区间）
-- 重试：仅超时/不可达重试（≤3 次）；4xx 拒收不重试直接上抛
-- 无梦之夜照推空数组（`dream_id=null`，健康状态）
-- 账本：每夜记 pushed_ids / dream_id / skipped / status；failed 夜的材料不计入「已入梦」，仍可被后续夜选中
-
-### 7.2 原文提供接口（`/api/source`，Deliz 将来照此 schema 接管）
+### 7.1 原文提供接口（`/api/source`，Deliz 将来照此 schema 接管）
 
 10-14 去原文化后，ember 本地不存会话原文，原文只存后端消息树一份；ember 按需拉取、**用完即弃、本地不落盘**。当前提供方 = heart-chat 只读端点；Deliz 上线后只换 `EMBER_SOURCE_URL`，ember 与调用方零改动。
 
@@ -328,14 +319,9 @@ GET {EMBER_SOURCE_URL}/api/source?session_id={sid}&from={int}&to={int}
 
 | 变量 | 说明 |
 |---|---|
-| EMBER_HOST / EMBER_SIDECAR_PORT / EMBER_TOKEN | 监听与鉴权 |
+| EMBER_HOST / EMBER_SIDECAR_PORT / EMBER_TOKEN | 监听与鉴权（跨机部署 EMBER_TOKEN 必设，不设 = 不拦） |
 | EMBER_DATA_DIR | 记忆库目录（默认 data/） |
-| HEART_BASE_URL / HEART_AUTH_TOKEN / HEART_INSTANCE | 梦推送目标（heart） |
-| EMBER_SOURCE_URL / EMBER_SOURCE_TOKEN / EMBER_SOURCE_TIMEOUT | 原文提供接口（heart-chat `/api/source`，将来 Deliz 同 schema 接管——契约见 §7.2） |
+| EMBER_SOURCE_URL / EMBER_SOURCE_TOKEN / EMBER_SOURCE_TIMEOUT | 原文提供接口（heart-chat `/api/source`，将来 Deliz 同 schema 接管——契约见 §7.1） |
 | EMBER_EMBED_BASE_URL / EMBER_EMBED_API_KEY / EMBER_EMBED_MODEL | 向量服务 |
 | ZHIPU_API_KEY / EMBER_SLEEP_MODEL | Sleep 管线的 LLM |
 | EMBER_STRUCTURE_MODEL | 结构维护归属判定模型（缺省回落 EMBER_SLEEP_MODEL） |
-
-## 10. 代理形态（旧，待退役）
-
-`proxy.py`（OpenAI 兼容代理，8766）为历史形态，前端切换（B1）完成后退役；其能力已全部由旁路形态接管。

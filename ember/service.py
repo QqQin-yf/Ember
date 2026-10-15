@@ -44,8 +44,6 @@ from . import source_client
 from . import executors
 from .cue_tighten import CueTightener
 from .prompts import STRUCTURE_SYSTEM_PROMPT, build_structure_user_prompt
-from .dream_ledger import DreamLedger
-from .dream_source import DreamSource
 from .writer import (
     TOOL_NAME,
     READ_SOURCE_TOOL_NAME,
@@ -330,12 +328,8 @@ class EmberService:
         # 会话原文存档已退役（2026-10-14 去原文化）：原文只存后端消息树
         # 一份，ember 经 source_client 按 message_id 按需拉取（用完即弃）；
         # 轮次持久账 = turn_ledger（无条件记账，重启恢复计数用）
-        # heart 梦通道 v3（2026-10-10 契约定稿）：选材器 + 夜账本，均旁路。
-        # DreamSource 需要 source_session 属性——Event 上动态补（见下）
-        self.dream_ledger = DreamLedger(getattr(store, "root", ""))
-        self.dream_source = DreamSource(
-            self.store, self.turn_spans, self.turn_ledger,
-            self.dream_ledger, self.relation_store)
+        # （旧 heart 梦通道 v3——dream_source/dream_push/夜账本——已于
+        # 2026-10-15 退役：新版设计里梦归 app 的 dream_submit 工具）
         # 旁路形态（2026-10-12）：进行中的一轮（轮前钩子记下，MCP 写入
         # 工具自动关联出处；轮后钩子收掉）。单活跃轮——单用户部署够用。
         self._live_turn: dict[str, Any] | None = None
@@ -1289,48 +1283,9 @@ class EmberService:
 
     # ---------- heart 联动 ----------
 
-    def dream_material_preview(self) -> dict[str, Any]:
-        """选一夜梦材料但不推送（观察/联调用）：选材结果 + 跳过明细。"""
-        return self.dream_source.select()
-
-    def push_dream_night(self, pusher=None) -> dict[str, Any]:
-        """一夜的完整编排（heart v3，2026-10-10 契约）：
-
-        选材（DreamSource）→ 一次性批量推送（DreamPusher，重试≤3）
-        → 收 dream_id 即收工 → 夜账本留痕。
-
-        无梦之夜照推空数组（heart 返回 dream_id=null，健康状态）。
-        heart 拒收/不可达 → DreamPushError 上抛（统一诊断出口在调用方），
-        账本记 status=failed（材料没进殿堂，旧事仍可再挑）。
-        pusher 参数供测试注入 fake；生产从 .env 配置构造。
-        """
-        if pusher is None:
-            from .dream_push import DreamPusher
-            pusher = DreamPusher()
-        sel = self.dream_source.select()
-        try:
-            result = pusher.push_night(sel["events"])
-        except Exception as ex:
-            self.dream_ledger.record_night(
-                event_ids=sel["pushed_ids"], dream_id=None,
-                skipped=sel["skipped"], status="failed")
-            raise
-        self.dream_ledger.record_night(
-            event_ids=sel["pushed_ids"], dream_id=result.get("dream_id"),
-            skipped=sel["skipped"], status="ok")
-        return {
-            "ok": True,
-            "dream_id": result.get("dream_id"),
-            "pushed_count": len(sel["events"]),
-            "pushed_ids": sel["pushed_ids"],
-            "associated_ids": sel["associated_ids"],
-            "random_id": sel["random_id"],
-            "skipped": sel["skipped"],
-        }
-
-    def dream_ledger_status(self) -> dict[str, Any]:
-        """夜账本观察（夜数/入梦事件数），排障与回溯用。"""
-        return self.dream_ledger.to_dict()
+    # （旧梦通道 dream_material_preview / push_dream_night / 夜账本观察
+    #   已于 2026-10-15 退役——新版设计里梦归 app 的 dream_submit 工具，
+    #   ember 不再主动向 heart 推送；turn_ledger 观察保留）
 
     def turn_ledger_status(self) -> dict[str, Any]:
         """映射账本观察（含发号连续性缺口——重新生成/重发的排查料）。"""

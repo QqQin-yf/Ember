@@ -31,8 +31,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# .env 加载必须在其他 ember.* import 之前——source_client / dream_push
-# 的模块级常量（EMBER_SOURCE_URL / HEART_BASE_URL 等）在 import 时求值
+# .env 加载必须在其他 ember.* import 之前——source_client 等 ember
+# 模块的模块级常量（EMBER_SOURCE_URL 等）在 import 时求值
 from ember.env import load_env
 load_env(os.path.dirname(os.path.abspath(__file__)))
 
