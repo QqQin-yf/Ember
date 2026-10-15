@@ -43,7 +43,8 @@ from .turn_span import TurnSpanStore, spans_from_quotes
 from . import source_client
 from . import executors
 from .cue_tighten import CueTightener
-from .prompts import STRUCTURE_SYSTEM_PROMPT, build_structure_user_prompt
+from .prompts import (STRUCTURE_SYSTEM_PROMPT, build_structure_user_prompt,
+                      SUMMARY_SYSTEM_PROMPT, build_summary_user_prompt)
 from .writer import (
     TOOL_NAME,
     READ_SOURCE_TOOL_NAME,
@@ -1945,6 +1946,8 @@ class EmberService:
             out["entity_action"] = (f"extract:{e.entity_id}({e.name})"
                                     f" x{len(patch)}")
             out["entity_id"] = e.entity_id
+            if patch:
+                self._summary_dirty_add(e.entity_id)
         elif action == "attach":
             target = ent.get("entity_id") or ""
             ids = [eid for eid in dict.fromkeys(attach_event_ids)
@@ -1952,6 +1955,7 @@ class EmberService:
             if ids:
                 self._patch_event_rows(
                     {eid: {"entity_refs": [target]} for eid in ids})
+                self._summary_dirty_add(target)
             out["entity_action"] = f"attach:{target}"
             out["members_patched"] = len(ids)
             # attach 顺带判目标实体收尾（momo 2026-10-09 裁决，照脚本）
@@ -2057,12 +2061,16 @@ class EmberService:
         return saved, rejected
 
     def run_structure_maintenance(self) -> dict[str, Any]:
-        """结构维护：散事件归属（第三方 LLM 判定）+ 旧 cue 收紧。
+        """结构维护：散事件归属（第三方 LLM 判定）+ 旧 cue 收紧
+        + 实体 summary 夜批重算。
 
         双 LLM 路线（momo 2026-10-14 拍板）：正主只判联，归属判定
         外包第三方 LLM（task="structure"，engine 走 executors.json）。
+        summary 重算（task="summary"）：白天挂关系/结构维护里发生过
+        归属变更（extract/attach）的实体记入脏标记，收尾统一重算——
+        材料只含未被推翻的成员事件（superseded 的认知不进名片）。
         app 编排在挂关系清完之后调用（顺序契约见 API.md）。
-        无散事件时跳过 LLM 只跑 cue 收紧；幂等——已归属的自动出清单。
+        无散事件时跳过 LLM 只跑收紧与重算；幂等——已归属的自动出清单。
         """
         strays = [ev for ev in self.store.all_events()
                   if not _event_entity_of(self.store, ev.event_id)]
@@ -2071,6 +2079,7 @@ class EmberService:
         report: dict[str, Any] = {"strays_total": len(stray_mats),
                                   "saved": [], "rejected": [],
                                   "cue_tighten": None}
+        touched: set[str] = self._summary_dirty_take()
         if stray_mats:
             ents = [{"entity_id": e.entity_id, "name": e.name,
                      "status": e.status, "summary": e.summary or ""}
@@ -2086,8 +2095,110 @@ class EmberService:
                 {e["entity_id"] for e in ents})
             report["saved"] = saved
             report["rejected"] = rejected
+            for s in saved:
+                eid = s.get("entity_id")
+                if eid:
+                    touched.add(eid)
+        report["summary"] = self._refresh_entity_summaries(touched)
         report["cue_tighten"] = CueTightener(
             self.store, self.recall_ledger,
             self.store._path(EVENTS_FILE),  # noqa: SLF001
             self.entity_store).tighten()
         return report
+
+    # ---------- 实体 summary 夜批（2026-10-15 momo 拍板：提炼式重算） ----------
+    #
+    # 生产方（此前一直空转）：Entity.summary 的消费方早就在（召回渲染
+    # 「关于〈X〉：」、briefing 实体行），summary 任务点配置也齐全，
+    # 缺的只是编排——归属变更打脏标记，structure/run 收尾夜批重算。
+
+    SUMMARY_DIRTY_FILE = "summary_dirty.jsonl"
+
+    def _summary_dirty_path(self) -> str:
+        return os.path.join(self.store.root, self.SUMMARY_DIRTY_FILE)
+
+    def _summary_dirty_add(self, entity_id: str) -> None:
+        with open(self._summary_dirty_path(), "a", encoding="utf-8") as f:
+            f.write(json.dumps({"entity_id": entity_id}) + "\n")
+
+    def _summary_dirty_take(self) -> set[str]:
+        """读出并清空脏标记（夜批消费；空文件/不存在 → 空集）。"""
+        p = self._summary_dirty_path()
+        if not os.path.exists(p):
+            return set()
+        out: set[str] = set()
+        with open(p, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    eid = json.loads(line).get("entity_id")
+                except json.JSONDecodeError:
+                    continue
+                if eid:
+                    out.add(eid)
+        if out:
+            os.remove(p)
+        return out
+
+    def _entity_active_member_cores(self, entity_id: str) -> list[str]:
+        """实体名下未被推翻成员事件的 core（summary 重算材料）。
+
+        superseded 的事件不进材料——被推翻的认知不进名片
+        （momo 2026-10-15：概括未被推翻的 event）。
+        """
+        cores: list[str] = []
+        for ev in self.store.all_events():
+            if _event_entity_of(self.store, ev.event_id) != entity_id:
+                continue
+            if self.sleep_state.status_of(ev.event_id) == "superseded":
+                continue
+            c = ev.core or ev.summary or ""
+            if c:
+                cores.append(c)
+        return cores
+
+    def _refresh_entity_summaries(self, touched: set[str]) -> dict[str, Any]:
+        """夜批重算触碰过的实体 summary（task="summary"）。
+
+        单实体失败不牵连整批（报告如实记 errors）；材料 = 名下全部
+        未被推翻成员的 core；无成员材料（如成员全被推翻）跳过。
+        """
+        if not touched:
+            return {"updated": [], "failed": []}
+        engine = executors.load_engine(
+            getattr(self.store, "root", ""), "summary")
+        now = datetime.now(timezone.utc).astimezone().isoformat(
+            timespec="seconds")
+        updated: list[dict] = []
+        failed: list[dict] = []
+        for eid in sorted(touched):
+            try:
+                ent = self.entity_store.get(eid)
+            except KeyError:
+                continue
+            cores = self._entity_active_member_cores(eid)
+            if not cores:
+                continue
+            user = build_summary_user_prompt(ent.name, ent.summary or "",
+                                             cores)
+            try:
+                text = executors.call_llm(
+                    SUMMARY_SYSTEM_PROMPT, user, engine, task="summary")
+                new_summary = (_parse_llm_json(text).get("summary")
+                               or "").strip()
+            except Exception as exc:  # noqa: BLE001 — 单实体失败不牵连
+                failed.append({"entity_id": eid, "error": str(exc)[:160]})
+                continue
+            if not new_summary:
+                failed.append({"entity_id": eid, "error": "空 summary"})
+                continue
+            ent.summary = new_summary
+            ent.summary_at = now
+            self.entity_store.upsert(ent)
+            updated.append({"entity_id": eid, "name": ent.name,
+                            "chars": len(new_summary)})
+        if updated:
+            self.entity_store.save()
+        return {"updated": updated, "failed": failed}
