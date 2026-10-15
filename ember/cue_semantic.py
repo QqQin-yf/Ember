@@ -37,10 +37,12 @@ load_env(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 CUE_VECTORS_FILE = "cue_vectors.jsonl"
 
-# baseline 占位（未标定，铁律：不是已证明设计）。
-# Direction 聚焦阈值 0.47 针对方向描述长文本；Cue 是短语，相似度
-# 分布不同，标定实验（scripts/exp_cue_semantic.py，待做）前仅占位。
-CUE_SEMANTIC_FLOOR = 0.55
+# 初标定（2026-10-15，momo 实测：4 条 cue × 6 个查询词的 cosine 分布）——
+# 同义带（喜好 0.891 / 喜欢 0.791 / 热爱 0.763）与无关带（工作 0.606 /
+# 测试 0.598 / 天气 0.575）之间空档 0.61~0.76，取 0.70 两边留余量。
+# 样本仍小，cue 库变大后值得重标（对照 Direction 聚焦阈值 0.47 是
+# 长文本口径，Cue 短语分布不同，不可混用）。
+CUE_SEMANTIC_FLOOR = 0.70
 
 
 class CueVectorStore:
