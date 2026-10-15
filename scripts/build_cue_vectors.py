@@ -6,7 +6,7 @@
 （新 cue 在重建前没有向量，运行时只参与词面匹配，不报错。）
 
 职责：
-  读 data_real/recall_routes.jsonl 中 status=active 且 matcher=lexical
+  读 {EMBER_DATA_DIR}/recall_routes.jsonl 中 status=active 且 matcher=lexical
   的全部 route（去重：同一 cue 文本只算一次向量），逐条调
   ember.direction.embed_text（硅基流动 Qwen3-Embedding-8B）产出向量，
   整文件重写 cue_vectors.jsonl（route_id → {cue, vector, model}）。
@@ -25,7 +25,7 @@ sys.path.insert(0, BASE)
 from ember.direction import embed_text  # noqa: E402
 from ember.env import load_env  # noqa: E402
 
-DATA = os.path.join(BASE, "data_real")
+DATA = os.environ.get("EMBER_DATA_DIR", os.path.join(BASE, "data"))
 ROUTES_FILE = os.path.join(DATA, "recall_routes.jsonl")
 OUT_FILE = os.path.join(DATA, "cue_vectors.jsonl")
 

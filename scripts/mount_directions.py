@@ -34,7 +34,7 @@ from ember.prompts import (  # noqa: E402
 from ember import executors  # noqa: E402
 from ember.entity import EntityStore  # noqa: E402
 
-DATA = os.path.join(BASE, "data_real")
+DATA = os.environ.get("EMBER_DATA_DIR", os.path.join(BASE, "data"))
 EVENTS_FILE = os.path.join(DATA, "events.jsonl")
 
 DIRECTION_THRESHOLD = 8   # baseline（§5.1）：Entity 下 Event 达 8 个才划分/挂载

@@ -13,8 +13,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 from ember.direction import embed_text  # noqa: E402
 
 BASE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
-ENTITIES = os.path.join(BASE, "data_real", "entities.jsonl")
-OUT = os.path.join(BASE, "data_real", "direction_vectors.jsonl")
+DATA = os.environ.get("EMBER_DATA_DIR", os.path.join(BASE, "data"))
+ENTITIES = os.path.join(DATA, "entities.jsonl")
+OUT = os.path.join(DATA, "direction_vectors.jsonl")
 
 
 from ember.env import load_env
