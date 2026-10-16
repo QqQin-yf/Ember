@@ -232,6 +232,13 @@ app = BearerAuthMiddleware(Starlette(
 
 
 def main() -> None:
+    # token 兜底（Claude 2026-10-16）：监听非回环地址又没有 token = 敞门，
+    # 宁可拒绝启动也不悄悄裸奔——变量名拼错会当场炸出来
+    if HOST not in ("127.0.0.1", "localhost", "::1") and not TOKEN:
+        raise SystemExit(
+            "[ember-sidecar] 拒绝启动：EMBER_HOST 监听的是非回环地址"
+            f"（{HOST}）但 EMBER_TOKEN 为空——跨机部署必须设 token，"
+            "否则记忆库对网络不设防。本机自用请显式设 EMBER_HOST=127.0.0.1。")
     print(f"[ember-sidecar] listening on http://{HOST}:{PORT}")
     print(f"[ember-sidecar] mcp:   http://{HOST}:{PORT}/mcp")
     print("[ember-sidecar] hooks: POST /ember/hooks/turn_start | /ember/hooks/turn_end")
