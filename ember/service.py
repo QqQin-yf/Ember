@@ -2141,8 +2141,9 @@ class EmberService:
         if restored_total:
             notes.append(f"已唤醒 {restored_total} 条淡忘记忆的召回入口")
 
-        # ---- 实体卡（印象层先出）----
+        # ---- 实体卡（印象层先出；recent 不复读 items 已展示的成员）----
         entity_cards: list[dict[str, Any]] = []
+        hit_ids = [it["event_id"] for it in items]
         try:
             q_vec2 = q_vec
             if q_vec2 is None:
@@ -2159,20 +2160,20 @@ class EmberService:
                            if _event_entity_of(self.store,
                                                ev.event_id) == ent.entity_id]
                 members.sort(key=lambda e: e.ingest_time, reverse=True)
+                others = [m for m in members if m.event_id not in hit_ids]
                 entity_cards.append({
                     "entity_id": ent.entity_id, "name": ent.name,
                     "status": ent.status, "summary": ent.summary or "",
                     "member_count": len(members),
                     "recent": [{"event_id": m.event_id,
                                 "summary": m.summary or ""}
-                               for m in members[:3]],
+                               for m in others[:3]],
                 })
         except Exception:  # noqa: BLE001 — 实体卡失败不拦检索结果
             notes.append("实体印象检索暂不可达")
         entity_cards.sort(key=lambda c: c["name"])
 
         # ---- 命中形态判定（旧版 R10 平移：chain=共享同一实体）----
-        hit_ids = [it["event_id"] for it in items]
         if not items:
             relation, guidance = "none", ("没有找到相关记忆。可换个说法再查，"
                                           "或如实告知对方。")
