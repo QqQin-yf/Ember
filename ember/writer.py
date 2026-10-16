@@ -337,6 +337,54 @@ def build_revise_tool_spec() -> list[dict[str, Any]]:
     }]
 
 
+# ---------- search_memory（2026-10-15 设计夜：主动检索，新拟稿待 momo 过目） ----------
+
+SEARCH_TOOL_NAME = "search_memory"
+
+SEARCH_TOOL_DESCRIPTION = (
+    "按内容主动检索记忆库（捞取：自动浮现之外的另一条路）。"
+    "想确认某件事有没有发生过、寻找一段记得大概却说不清位置的经历、"
+    "或按时间范围回顾时调用。query 用自然语言描述要找的内容，"
+    "不要求出现事件原文的字词；time_range 可选，限定发生时间"
+    "（支持「昨天/上周/最近3天」等相对表达或 ISO 起止）；"
+    "k 可选，返回条数上限（默认 5，最多 20，超限自动钳制并告知）。"
+    "返回：实体卡（若命中心智空间）+ 命中条目清单（含状态标注——"
+    "淡忘中的/已被修正的会如实标注）+ 命中形态说明。"
+    "没有找到就如实说记不清，可换说法再查一次，不要编造。"
+)
+
+
+def build_search_tool_spec() -> list[dict[str, Any]]:
+    return [{
+        "type": "function",
+        "function": {
+            "name": SEARCH_TOOL_NAME,
+            "description": SEARCH_TOOL_DESCRIPTION,
+            "strict": False,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "要找的内容，自然语言描述",
+                    },
+                    "time_range": {
+                        "type": "string",
+                        "description": ("可选，发生时间过滤：ISO 起止"
+                                        "（YYYY-MM-DDTHH:MM:SS/…）或相对表达"
+                                        "（昨天/上周/最近N天/近两周）"),
+                    },
+                    "k": {
+                        "type": "integer",
+                        "description": "可选，返回条数上限（默认 5，最大 20）",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    }]
+
+
 def parse_tool_call(message: dict[str, Any]) -> dict[str, Any] | None:
     """从 writer 返回的 message 中提取 create_memory_event 调用。
 

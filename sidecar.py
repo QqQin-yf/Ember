@@ -40,7 +40,7 @@ from ember.llm import MockLLMClient
 from ember.service import EmberService
 from ember.store import EmberStore
 from ember.writer import (READ_SOURCE_TOOL_NAME, REVISE_TOOL_NAME,
-                          TOOL_NAME)
+                          SEARCH_TOOL_NAME, TOOL_NAME)
 
 import mcp.types as types
 from mcp.server.lowlevel import Server
@@ -85,6 +85,8 @@ async def _call_tool(name: str, arguments: dict) -> list[types.TextContent]:
     elif name == READ_SOURCE_TOOL_NAME:
         result = SERVICE.sidecar_read_memory_source(
             (arguments or {}).get("event_id") or "")
+    elif name == SEARCH_TOOL_NAME:
+        result = SERVICE.sidecar_search_memory(arguments or {})
     else:
         result = {"status": "failed", "error": f"未知工具: {name}"}
     return [types.TextContent(type="text",

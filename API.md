@@ -127,6 +127,20 @@ MCP 工具名与机制标识不携带任何品牌信息（工具名会出现在�
 
 回执：`{"status": "revised", "event_id", "revised_fields": [...]}`
 
+### 5.4 search_memory（主动检索）
+
+按内容主动检索记忆库——**自动浮现之外的另一条路**：浮起有竞争有衰减，捞起无竞争无衰减。想确认某件事、找一段说不清位置的经历、按时间回顾时调用。
+
+参数：`query`（必填，自然语言，不要求原文用词）+ `time_range`（可选，支持「昨天/上周/最近3天」相对表达或 ISO 起止 `a..b`）+ `k`（可选，默认 5 上限 20，超限钳制并告知）。
+
+响应要点：
+
+- **实体卡**（若查 query 与某实体的 summary 语义共振）：`{entity_id, name, status, summary, member_count, recent[3]}`——印象层先出，细节按 id 下钻
+- **items**：`{event_id, summary, ingest_time, status, entity_id}`——**全库可达**：`status` 如实标注 `normal / faded（淡忘中）/ superseded（+`superseded_by` 修正者指针）`
+- **relation + guidance**：命中形态 single / cluster / chain（chain = 共享同一实体）与对应行动建议；没有找到如实说记不清
+- **检索即提取**：命中入提取账（与召回同权）——刷新遗忘计时器，淡忘中的条目即时解除收紧（note 会告知「已唤醒 N 条」）
+- 向量服务不可达时自动降级关键词检索（note 告知）；`SEARCH_HIT_FLOOR=0.30` 为 baseline 待标定
+
 ## 6. Sleep 夜间维护（消费方：app 编排）
 
 用户在 app 侧按键进入 sleep（人为编排，与 heart 入睡档同构）后，app 按固定顺序编排两个阶段：**挂关系**（link，借窗口跑）与**结构维护**（structure，ember 自发第三方 LLM）。

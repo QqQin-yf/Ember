@@ -71,7 +71,7 @@ class StructureMaintenanceTests(unittest.TestCase):
         self._tmp.cleanup()
 
     def _run(self, verdict_text: str) -> dict:
-        """mock 第三方 LLM 输出，跑一遍结构维护。"""
+        """mock 第三方 LLM 输出 + 向量服务，跑一遍结构维护。"""
 
         def fake_call_llm(system, user, engine, task="judge"):
             self.captured.update(system=system, user=user,
@@ -79,7 +79,9 @@ class StructureMaintenanceTests(unittest.TestCase):
             return verdict_text
 
         with mock.patch("ember.executors.call_llm",
-                        side_effect=fake_call_llm):
+                        side_effect=fake_call_llm), \
+                mock.patch("ember.service.embed_text",
+                           return_value=[0.1, 0.2, 0.3]):
             out = self.svc.run_structure_maintenance()
         return out
 
@@ -133,7 +135,9 @@ class StructureMaintenanceTests(unittest.TestCase):
     def test_no_strays_skips_llm(self) -> None:
         """无散事件：跳过 LLM，只跑 cue 收紧。"""
         svc = _service(Path(self._tmp.name) / "empty")
-        with mock.patch("ember.executors.call_llm") as m:
+        with mock.patch("ember.executors.call_llm") as m, \
+                mock.patch("ember.service.embed_text",
+                           return_value=[0.1, 0.2, 0.3]):
             out = svc.run_structure_maintenance()
         m.assert_not_called()
         self.assertEqual(out["strays_total"], 0)

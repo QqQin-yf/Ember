@@ -69,9 +69,14 @@ class SummaryNightBatchTests(unittest.TestCase):
 
         self._p = mock.patch("ember.executors.call_llm", side_effect=fake_llm)
         self._mock = self._p.start()
+        # 夜批补向量不真调 embedding
+        self._pv = mock.patch("ember.service.embed_text",
+                              return_value=[0.1, 0.2, 0.3])
+        self._pv.start()
 
     def tearDown(self) -> None:
         self._p.stop()
+        self._pv.stop()
         self._tmp.cleanup()
 
     def _dirty_add(self) -> None:

@@ -98,11 +98,26 @@ class EmberStore:
         return route
 
     def retire_route(self, route_id: str) -> None:
-        """退休一条 route（第一阶段手动操作，未来归 Sleep 管）。"""
+        """退休一条 route（收紧判据由 CueTightener 决定）。"""
         route = self._routes[route_id]
         route.status = "retired"
         self._append(ROUTES_FILE, route)
         self._rebuild_index()
+
+    def restore_route(self, route_id: str) -> bool:
+        """恢复一条已收紧的 route（提取即 remembering：主动检索/召回
+        刷新计时器时解除淡忘）。已是 active 返回 False（幂等）。"""
+        route = self._routes.get(route_id)
+        if route is None or route.status == "active":
+            return False
+        route.status = "active"
+        self._append(ROUTES_FILE, route)
+        self._rebuild_index()
+        return True
+
+    def retired_routes_for_event(self, event_id: str) -> list[RecallRoute]:
+        return [r for r in self._routes.values()
+                if r.event_id == event_id and r.status == "retired"]
 
     # ---------- 读取 ----------
 

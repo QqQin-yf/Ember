@@ -147,6 +147,14 @@ class CueTightener:
                         {"event_id": eid, "reason": "ingest_time 缺失或不可解析"})
                     continue
 
+            # ---- 起算点融合最后提取（2026-10-15：提取 = 召回 ∪ 检索，
+            # 刷新一切计时器）——idle 从「原起算点」与「最后提取时间」
+            # 中较晚者起算，在用的永不收紧 ----
+            last_at = (self.ledger.last_extracted.get(eid) or "")
+            last_dt = _parse_iso(last_at) if last_at else None
+            if last_dt is not None and last_dt > anchor:
+                anchor = last_dt
+
             idle = (now - anchor).total_seconds() / 86400.0
             if idle < self.idle_days:
                 report["skipped"].append(

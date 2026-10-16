@@ -23,7 +23,7 @@ import os
 import re
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .llm import LLMError
@@ -36,7 +36,8 @@ from .store import EmberStore, EVENTS_FILE
 from .entity import Entity, EntityStore
 from .pair_seen import PairSeenStore
 from .sediment import SedimentStore
-from .direction import DirectionMatcher, DirectionVectorStore
+from .direction import (DirectionMatcher, DirectionVectorStore,
+                        embed_text)
 from .turn_ledger import TurnLedger
 from .recall_ledger import RecallLedger
 from .turn_span import TurnSpanStore, spans_from_quotes
@@ -45,6 +46,8 @@ from . import executors
 from .cue_tighten import CueTightener
 from .prompts import (STRUCTURE_SYSTEM_PROMPT, build_structure_user_prompt,
                       SUMMARY_SYSTEM_PROMPT, build_summary_user_prompt)
+from .core_semantic import (CoreVectorStore, EntitySummaryVectorStore,
+                            SEARCH_HIT_FLOOR, cosine)
 from .writer import (
     TOOL_NAME,
     READ_SOURCE_TOOL_NAME,
@@ -52,6 +55,8 @@ from .writer import (
     EMBEDDED_WRITER_PROMPT,
     build_tools_spec,
     validate_writer_arguments,
+    SEARCH_TOOL_NAME,
+    build_search_tool_spec,
 )
 
 
@@ -316,6 +321,11 @@ class EmberService:
         # 沉淀证据账本（10-14 设计稿第 4 步）：正文与版本号归 app，
         # ember 只收"某版 + 净新增证据 id"追加（app 存新版才调）
         self.sediment_store = SedimentStore(getattr(store, "root", ""))
+        # 内容语义向量（2026-10-15 设计夜）：core 全事件 + 实体 summary——
+        # search 捞出与实体卡的匹配地基；离线重建+夜批增量
+        self.core_vectors = CoreVectorStore(getattr(store, "root", ""))
+        self.entity_vectors = EntitySummaryVectorStore(
+            getattr(store, "root", ""))
         # Direction 匹配层（10-05 通电）：向量做判断（选方向/判模糊），
         # 不做直接召回；方向向量由 scripts/build_direction_vectors.py 离线预计算
         self.direction_matcher = DirectionMatcher(
@@ -1388,8 +1398,9 @@ class EmberService:
                 "turn": live["turn"]}
 
     def sidecar_tool_specs(self) -> list[dict[str, Any]]:
-        """MCP tools/list 工具清单（含冷静期修正工具）。"""
-        return build_tools_spec() + [build_revise_tool_spec()[0]]
+        """MCP tools/list 工具清单（含冷静期修正工具与主动检索）。"""
+        return (build_tools_spec() + [build_revise_tool_spec()[0]]
+                + build_search_tool_spec())
 
     def sidecar_create_memory_event(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """MCP 工具 create_memory_event 执行体：进行中的一轮 + 参数 → 落库。
@@ -1917,6 +1928,276 @@ class EmberService:
         except KeyError:
             return False
 
+    # ---------- search_memory（2026-10-15 设计夜：主动检索=捞取） ----------
+    #
+    # 自动浮现之外的另一条路：浮起有竞争有衰减，捞起无竞争无衰减——
+    # 全库可达（含 faded/superseded），捞出来如实标注状态。
+    # 检索即提取：命中即记账（route="search"），刷新一切计时器，
+    # 并即时解除该事件的 cue 收紧（重新被想起=重新获得浮现能力）。
+
+    SEARCH_K_DEFAULT = 5
+    SEARCH_K_MAX = 20
+    FADED_DAYS = 30.0   # 收紧后满 30 天未提取 → 淡忘（baseline）
+
+    @staticmethod
+    def _clamp_k(raw: Any) -> tuple[int, str | None]:
+        """k 钳制（旧版 R6 纪律）：缺省 5，超上限 20 钳到 20＋告知。"""
+        try:
+            k = int(raw)
+        except (TypeError, ValueError):
+            return EmberService.SEARCH_K_DEFAULT, None
+        if k > EmberService.SEARCH_K_MAX:
+            return EmberService.SEARCH_K_MAX, f"k={k} 已按上限 20 返回"
+        return (k, None) if k > 0 else (EmberService.SEARCH_K_DEFAULT, None)
+
+    @staticmethod
+    def _parse_time_range(expr: str) -> tuple[datetime, datetime] | None:
+        """time_range 表达 → (start, end) 本地时间。支持 ISO 起止（..或至
+        分隔）、单日、今天/昨天/前天/本周/上周/本月、最近N天/近N天/N天前/
+        近两周。解析失败返回 None（调用方如实回执）。"""
+        expr = (expr or "").strip()
+        if not expr:
+            return None
+        now = datetime.now(timezone.utc).astimezone()
+        day = timedelta(days=1)
+        rel = {"今天": (now, now), "昨天": (now - day, now - day),
+               "前天": (now - 2 * day, now - 2 * day),
+               "本周": (now - timedelta(days=now.weekday()), now),
+               "上周": (now - timedelta(days=now.weekday() + 7),
+                        now - timedelta(days=now.weekday() + 1)),
+               "本月": (now.replace(day=1), now),
+               "最近两周": (now - timedelta(days=14), now),
+               "近两周": (now - timedelta(days=14), now)}
+        m = re.match(r"^(?:最近|近|上)?(\d+)\s*天(?:前)?$", expr)
+        if m:
+            start = now - timedelta(days=int(m.group(1)))
+            return start, now
+        if expr in rel:
+            return rel[expr]
+        for sep in ("..", "至", "~"):
+            if sep in expr:
+                a, b = expr.split(sep, 1)
+                try:
+                    s = datetime.fromisoformat(a.strip()).astimezone()
+                    e = datetime.fromisoformat(b.strip()).astimezone()
+                except ValueError:
+                    return None
+                return min(s, e), max(s, e)
+        try:   # 单日
+            d = datetime.fromisoformat(expr).astimezone()
+            return d, d
+        except ValueError:
+            return None
+
+    def _event_idle_days(self, event_id: str) -> float | None:
+        """事件的遗忘时钟：now − max(原起算点, 最后提取时间)。
+
+        原起算点与收紧同源（close 时刻/写入时刻）；最后提取时间取自
+        账本（route 不限）。open 实体成员返回 None（豁免，无时钟）。
+        """
+        try:
+            ev = self.store.get_event(event_id)
+        except KeyError:
+            return None
+        ent_id = _event_entity_of(self.store, event_id)
+        if ent_id:
+            try:
+                ent = self.entity_store.get(ent_id)
+            except KeyError:
+                return None
+            if ent.status == "open":
+                return None
+            raw = ent.closed_at
+        else:
+            raw = ev.ingest_time
+        try:
+            anchor = datetime.fromisoformat(raw).astimezone()
+        except (TypeError, ValueError):
+            return None
+        last_at = self.recall_ledger.last_extracted.get(event_id) or ""
+        if last_at:
+            try:
+                last_dt = datetime.fromisoformat(last_at).astimezone()
+                anchor = max(anchor, last_dt)
+            except ValueError:
+                pass
+        return (datetime.now(timezone.utc).astimezone()
+                - anchor).total_seconds() / 86400.0
+
+    def is_faded(self, event_id: str) -> bool:
+        """淡忘：有 cue 且全部收紧，且遗忘时钟满 30 天未提取。
+
+        现算谓词——零存储，提取即自动解除（计时器刷新+restore）。
+        无 cue 的对象（观察条目）不归 faded 管。
+        """
+        routes = self.store.routes_for_event(event_id)
+        if not routes or any(r.status == "active" for r in routes):
+            return False
+        idle = self._event_idle_days(event_id)
+        return idle is not None and idle > self.FADED_DAYS
+
+    def _restore_event_cues(self, event_id: str) -> int:
+        """解除某事件的全部 cue 收紧（提取即 remembering）。返回条数。"""
+        return sum(1 for r in self.store.routes_for_event(event_id)
+                   if self.store.restore_route(r.route_id))
+
+    def sidecar_search_memory(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """MCP 工具 search_memory 执行体：捞取（全库可达，如实标注）。"""
+        args = arguments or {}
+        query = str(args.get("query") or "").strip()
+        if not query:
+            return {"status": "failed",
+                    "error": "query 必填：自然语言描述要找的内容"}
+        k, k_note = self._clamp_k(args.get("k"))
+        tr = self._parse_time_range(str(args.get("time_range") or ""))
+        if args.get("time_range") and tr is None:
+            return {"status": "failed",
+                    "error": ("time_range 解析失败：用「昨天/上周/最近3天」"
+                              "等相对表达或 ISO 起止（a..b）")}
+        notes: list[str] = []
+        if k_note:
+            notes.append(k_note)
+
+        # ---- 主模态：core 向量余弦；兜底：LIKE（embed 不可达）----
+        scored: list[tuple[str, float]] = []
+        try:
+            q_vec = embed_text(query)
+        except Exception:  # noqa: BLE001 — 基础设施失败降级关键词
+            q_vec = None
+        in_range: dict[str, bool] = {}
+        events = {ev.event_id: ev for ev in self.store.all_events()}
+        if q_vec is not None:
+            for row in self.core_vectors.all():
+                sim = cosine(q_vec, row["vector"])
+                if sim >= SEARCH_HIT_FLOOR:
+                    scored.append((row["event_id"], sim))
+            scored = [(eid, s) for eid, s in scored if eid in events]
+            scored.sort(key=lambda x: x[1], reverse=True)
+            pool = scored
+        else:
+            needle = query.lower()
+            pool = [(eid, 0.0) for eid, ev in events.items()
+                    if needle in (ev.core or "").lower()
+                    or needle in (ev.summary or "").lower()]
+            notes.append("向量服务不可达，已降级关键词检索")
+
+        # ---- 时间过滤（ingest_time 落区间）----
+        if tr is not None:
+            start, end = tr
+
+            def _in(eid: str) -> bool:
+                if eid in in_range:
+                    return in_range[eid]
+                raw = events[eid].ingest_time
+                try:
+                    t = datetime.fromisoformat(raw).astimezone()
+                    ok = start <= t <= end + timedelta(days=1)
+                except (TypeError, ValueError):
+                    ok = False
+                in_range[eid] = ok
+                return ok
+
+            pool = [(eid, s) for eid, s in pool if _in(eid)]
+
+        total = len(pool)
+        top = pool[:k]
+        if total > k:
+            notes.append(f"共 {total} 条相关，仅显示最相关的前 {k} 条")
+
+        # ---- 结果行（状态标注如实）----
+        items: list[dict[str, Any]] = []
+        ent_ids: list[list[str]] = []
+        restored_total = 0
+        for eid, sim in top:
+            ev = events[eid]
+            item: dict[str, Any] = {
+                "event_id": eid, "summary": ev.summary or "",
+                "ingest_time": ev.ingest_time,
+            }
+            status = "normal"
+            if self.sleep_state.status_of(eid) == "superseded":
+                status = "superseded"
+                res = self.relation_store.resolvers_of(eid)
+                if res:
+                    item["superseded_by"] = [r.dst_event for r in res]
+            elif self.is_faded(eid):
+                status = "faded"
+            item["status"] = status
+            refs = _event_entity_of(self.store, eid)
+            item["entity_id"] = refs or ""
+            ent_ids.append([refs] if refs else [])
+            if status == "faded":
+                restored_total += self._restore_event_cues(eid)
+            items.append(item)
+        if restored_total:
+            notes.append(f"已唤醒 {restored_total} 条淡忘记忆的召回入口")
+
+        # ---- 实体卡（印象层先出）----
+        entity_cards: list[dict[str, Any]] = []
+        try:
+            q_vec2 = q_vec
+            if q_vec2 is None:
+                q_vec2 = embed_text(query)
+            for row in self.entity_vectors.all():
+                sim = cosine(q_vec2, row["vector"])
+                if sim < SEARCH_HIT_FLOOR:
+                    continue
+                try:
+                    ent = self.entity_store.get(row["entity_id"])
+                except KeyError:
+                    continue
+                members = [ev for ev in events.values()
+                           if _event_entity_of(self.store,
+                                               ev.event_id) == ent.entity_id]
+                members.sort(key=lambda e: e.ingest_time, reverse=True)
+                entity_cards.append({
+                    "entity_id": ent.entity_id, "name": ent.name,
+                    "status": ent.status, "summary": ent.summary or "",
+                    "member_count": len(members),
+                    "recent": [{"event_id": m.event_id,
+                                "summary": m.summary or ""}
+                               for m in members[:3]],
+                })
+        except Exception:  # noqa: BLE001 — 实体卡失败不拦检索结果
+            notes.append("实体印象检索暂不可达")
+        entity_cards.sort(key=lambda c: c["name"])
+
+        # ---- 命中形态判定（旧版 R10 平移：chain=共享同一实体）----
+        hit_ids = [it["event_id"] for it in items]
+        if not items:
+            relation, guidance = "none", ("没有找到相关记忆。可换个说法再查，"
+                                          "或如实告知对方。")
+        elif len(items) == 1:
+            relation, guidance = "single", "清单里只有一条。判断是否就是要找的那件事；要看细节用 read_memory_source 下钻。"
+        else:
+            common: set[str] | None = None
+            for ids in ent_ids:
+                s = set(ids)
+                common = s if common is None else (common & s)
+            if common:
+                relation, guidance = "chain", ("这几条同属一个实体的经历链。"
+                                               "需要整体经过或某次细节，"
+                                               "按 event_id 用 "
+                                               "read_memory_source 下钻。")
+            else:
+                relation, guidance = "cluster", ("多条相似候选。呈现你已经想起"
+                                                 "的部分，向对方询问细节缩小"
+                                                 "范围；缩小不了就如实说记不清。")
+
+        # ---- 检索即提取：记账 + 计时器刷新 ----
+        if hit_ids:
+            self.recall_ledger.record("mcp", 0, "search", hit_ids,
+                                      via=f"query={query[:40]}")
+
+        out: dict[str, Any] = {
+            "status": "ok", "relation": relation, "guidance": guidance,
+            "items": items, "total": total,
+            "entity_cards": entity_cards,
+        }
+        if notes:
+            out["note"] = "；".join(notes)
+        return out
+
     def _apply_entity_action(self, ent: dict, attach_event_ids: list[str],
                              prov: str) -> dict[str, Any]:
         """归属动作落库（挂关系窗口判联与结构维护共用的 entity 段）。
@@ -2100,11 +2381,42 @@ class EmberService:
                 if eid:
                     touched.add(eid)
         report["summary"] = self._refresh_entity_summaries(touched)
+        report["vector_backfill"] = self._backfill_vectors()
         report["cue_tighten"] = CueTightener(
             self.store, self.recall_ledger,
             self.store._path(EVENTS_FILE),  # noqa: SLF001
             self.entity_store).tighten()
         return report
+
+    def _backfill_vectors(self) -> dict[str, Any]:
+        """夜批增量补向量：无 core 向量的新事件、无向量且 summary 非空
+        的新实体——search 与实体卡的索引保持新鲜。单条失败不牵连。"""
+        model = os.environ.get("EMBER_EMBED_MODEL",
+                               "Qwen/Qwen3-Embedding-8B")
+        added = {"events": 0, "entities": 0, "failed": 0}
+        for ev in self.store.all_events():
+            if self.core_vectors.has(ev.event_id):
+                continue
+            text = (ev.core or ev.summary or "").strip()
+            if not text:
+                continue
+            try:
+                self.core_vectors.upsert(ev.event_id, text,
+                                         embed_text(text), model)
+                added["events"] += 1
+            except Exception:  # noqa: BLE001 — 单条失败不牵连
+                added["failed"] += 1
+        for e in self.entity_store.all():
+            summary = (e.summary or "").strip()
+            if not summary or self.entity_vectors.has(e.entity_id):
+                continue
+            try:
+                self.entity_vectors.upsert(e.entity_id, summary,
+                                           embed_text(summary), model)
+                added["entities"] += 1
+            except Exception:  # noqa: BLE001 — 单条失败不牵连
+                added["failed"] += 1
+        return added
 
     # ---------- 实体 summary 夜批（2026-10-15 momo 拍板：提炼式重算） ----------
     #
