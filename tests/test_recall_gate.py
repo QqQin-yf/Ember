@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -24,9 +25,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from ember.llm import MockLLMClient
 from ember.models import (Event, PresentationContext, RecallTrace, RouteHit)
-from ember.recall import EntityHit
+from ember.recall import EntityHit, EntityRecall
 from ember.service import EmberService, select_recall_units
 from ember.store import EmberStore
+from ember.direction import DirectionMatcher, DirectionVectorStore
+from ember.entity import Direction, Entity, EntityStore
 
 NOW = "2026-10-15T12:00:00+08:00"
 FRESH = "2026-10-15T11:00:00+08:00"     # 1h 前——48h 豁免窗口内
@@ -375,6 +378,56 @@ class PrefixRenderTests(unittest.TestCase):
             self.ctx, units=[{"kind": "event", "event_ids": ["EVT-A"]}],
             strong_dropped=0)
         self.assertNotIn("另有", p0)
+
+
+class DirectionFocusGuardTests(unittest.TestCase):
+    """聚焦护栏：方向判定「清晰」但该方向名下零挂载 → 退回全区域。"""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name) / "data"
+        self.root.mkdir(parents=True)
+        self.store = EmberStore(str(self.root))
+        # 3 条事件挂 ent_x，全部没有 direction_refs（挂载从未跑过）
+        for i in (1, 2, 3):
+            self.store.write_event(Event(
+                event_id=f"EVT-{i}", version_id=f"EVT-{i}-v1",
+                source_ref="conversation/session-s1",
+                raw_ref=f"conversation/session-s1/turn-{i}",
+                event_time=OLD, ingest_time=OLD,
+                summary=f"事件{i}", core=f"事件{i}的叙述"))
+            ev = self.store.get_event(f"EVT-{i}")
+            ev.entity_refs = ["ent_x"]
+        # 实体带两个方向 + 方向向量（离线预计算产物的最小替身）
+        estore = EntityStore(str(self.root))
+        estore.upsert(Entity(entity_id="ent_x", name="项目X", directions=[
+            Direction(direction_id="dir_a", description="架构与机制设计"),
+            Direction(direction_id="dir_b", description="前端界面交互"),
+        ]))
+        estore.save()
+        with open(self.root / "direction_vectors.jsonl", "w",
+                  encoding="utf-8") as f:
+            f.write(json.dumps({"direction_id": "dir_a",
+                                "vector": [1.0, 0.0]}) + "\n")
+            f.write(json.dumps({"direction_id": "dir_b",
+                                "vector": [0.0, 1.0]}) + "\n")
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_focused_without_mounts_returns_full_region(self) -> None:
+        matcher = DirectionMatcher(
+            EntityStore(str(self.root)),
+            DirectionVectorStore(str(self.root)),
+            embed_fn=lambda text: [1.0, 0.0])   # 清晰指向 dir_a
+        er = EntityRecall(self.store, EntityStore(str(self.root)),
+                          direction_matcher=matcher)
+        hits, eids = er.recall("项目X 的架构机制怎么设计的")
+        self.assertEqual(len(hits), 1)
+        dr = er.last_direction_result
+        self.assertTrue(dr.focused and dr.top1[0] == "dir_a",
+                        str(dr and dr.to_dict()))
+        self.assertEqual(len(eids), 3)   # 零挂载 → 全区域，绝不缩成零
 
 
 if __name__ == "__main__":

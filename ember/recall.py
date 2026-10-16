@@ -135,12 +135,16 @@ class EntityRecall:
             self.last_direction_result = dr
             if dr.focused and dr.top1 is not None:
                 focused_dir = dr.top1[0]
-                event_ids = [
+                focused_ids = [
                     eid for eid in event_ids
                     if focused_dir in (
                         getattr(self.store.get_event(eid), "direction_refs", None)
                         or event_direction_refs(eid))
                 ]
+                # 聚焦护栏（2026-10-16）：该方向名下没有任何已挂载记忆
+                # （挂载未跑/未覆盖）→ 退回全区域，聚焦绝不缩成零
+                if focused_ids:
+                    event_ids = focused_ids
 
         return hits, event_ids
 

@@ -1,19 +1,22 @@
 # -*- coding: utf-8 -*-
 """Ember v3 — 全部 LLM 任务点的 prompt 定稿与用户消息组装。
 
-四个 prompt：
+五个 prompt：
 - SPLIT_SYSTEM_PROMPT    Direction 划分（§5.1）  → scripts/split_directions.py
 - MOUNT_SYSTEM_PROMPT    Direction 挂载（§5.2）  → scripts/mount_directions.py
-- SUMMARY_SYSTEM_PROMPT  Entity summary 重算（§2.1）→（service 编排待接）
+- LINK_SYSTEM_PROMPT     判联（挂关系，sleep 接口②）——借 Loism 窗口跑，
+  全文交付版见 SLEEP_LINK_SPEC.md；verdict 纪律由 service 校验器承担
+- SUMMARY_SYSTEM_PROMPT  Entity summary 重算（§2.1）→ service 夜批
 - STRUCTURE_SYSTEM_PROMPT 散事件归属（2026-10-14 设计稿 v2）
   → service.run_structure_maintenance
 
-（JUDGE_SYSTEM_PROMPT 已随独立判联管线于 2026-10-15 退役——
-判联借 Loism 窗口跑，verdict 纪律由 service 校验器承担，prompt 定义
-见 git 历史 e0ec0be 之前版本。）
+（历史备注：独立判联管线与 JUDGE_SYSTEM_PROMPT 已于 2026-10-15 退役。
+同日发现 MOUNT_SYSTEM_PROMPT 自初始提交起就误装判联内容——方向挂载
+prompt 从未存在，挂载脚本出生即坏；2026-10-16 判联内容正名为
+LINK_SYSTEM_PROMPT，MOUNT 补写真身。）
 
 均为 momo 逐字审过的定稿，改动需重新过目；
-STRUCTURE 为新拟稿，待 momo 过目。
+STRUCTURE / MOUNT（新写真身）为新拟稿，待 momo 过目。
 
 写入不设独立 prompt：实时写入由 EMBEDDED_WRITER_PROMPT（writer.py）
 承担（AI 调工具，主动记重要的事；sleep 只管维护，不重写内容）。
@@ -63,6 +66,24 @@ def build_split_user_prompt(entity_name: str, summaries: list[str]) -> str:
 
 
 MOUNT_SYSTEM_PROMPT = """\
+
+任务：为一条已有记忆挑选它所属的方向（Direction）。
+输入：方向清单（每行：方向 id + 一句描述）+ 一条记忆的完整叙述。
+挂载纪律（违反任何一条即不合格）：
+1. 只从输入清单里选，原样回填方向 id，不发明输入没有的方向。
+2. 一条记忆可以同时属于多个方向，但每个选中的方向都必须有具体的、\
+可以指出来的依据；"主题沾边"不算所属。
+3. 没有任何贴切方向就不挂（direction_ids 给空列表）——宁可让记忆\
+暂时无方向，也不硬塞。
+输出格式（只输出 JSON，无任何其他文字）：
+{
+  "direction_ids": ["选中的方向 id，原样回填"],
+  "reason": "一句话依据"
+}
+"""
+
+
+LINK_SYSTEM_PROMPT = """\
 
 材料中每条旧记忆可能标注了它所属的实体（Entity）。注意：\
 联系边只看两件事的内容之间有没有具体的、可以指出来的联系，\
