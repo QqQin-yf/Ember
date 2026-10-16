@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Ember v3 — 全部 LLM 任务点的 prompt 定稿与用户消息组装。
 
-五个 prompt：
+七个 prompt：
 - SPLIT_SYSTEM_PROMPT    Direction 划分（§5.1）  → scripts/split_directions.py
 - MOUNT_SYSTEM_PROMPT    Direction 挂载（§5.2）  → scripts/mount_directions.py
 - LINK_SYSTEM_PROMPT     判联（挂关系，sleep 接口②）——借 Loism 窗口跑，
@@ -9,6 +9,9 @@
 - SUMMARY_SYSTEM_PROMPT  Entity summary 重算（§2.1）→ service 夜批
 - STRUCTURE_SYSTEM_PROMPT 散事件归属（2026-10-14 设计稿 v2）
   → service.run_structure_maintenance
+- OBSERVE_SYSTEM_PROMPT  观察式记忆提炼（2026-10-16 设计夜定稿）
+  → service.run_observe_pass
+- OBSERVE_MERGE_PROMPT   观察高相似合并判定 → service._merge_observations
 
 （历史备注：独立判联管线与 JUDGE_SYSTEM_PROMPT 已于 2026-10-15 退役。
 同日发现 MOUNT_SYSTEM_PROMPT 自初始提交起就误装判联内容——方向挂载
@@ -16,7 +19,8 @@ prompt 从未存在，挂载脚本出生即坏；2026-10-16 判联内容正名�
 LINK_SYSTEM_PROMPT，MOUNT 补写真身。）
 
 均为 momo 逐字审过的定稿，改动需重新过目；
-STRUCTURE / MOUNT（新写真身）为新拟稿，待 momo 过目。
+STRUCTURE / MOUNT（新写真身）/ OBSERVE / OBSERVE_MERGE 为新拟稿，
+STRUCTURE 与 OBSERVE 两份已经 momo 过目。
 
 写入不设独立 prompt：实时写入由 EMBEDDED_WRITER_PROMPT（writer.py）
 承担（AI 调工具，主动记重要的事；sleep 只管维护，不重写内容）。
@@ -291,4 +295,88 @@ def build_structure_user_prompt(strays: list[dict],
         "\n\n## 尚无归属的散事件\n" + "\n".join(ev_lines) +
         "请按 system 指令输出 JSON。"
     )
+
+
+# ---------------------------------------------------------------------------
+# 观察式记忆——信息点提炼（2026-10-16 设计夜定稿，momo 过目）
+# ---------------------------------------------------------------------------
+
+OBSERVE_SYSTEM_PROMPT = """\
+任务：从一段对话原文里，捡出值得长期记住的「信息点」。
+对话里大量内容是过程性闲谈，只有少数信息藏在某句话里带过——
+你的职责是把这样的信息挑出来，凝成一句陈述。
+
+什么叫信息点（同时也是排除线）：
+- 只收「行为模式」：从对话互动里反复露出来的做事方式、习惯、\
+倾向（例：喜欢在对齐方案后再开始行动；嘴上说睡了实际还在\
+干活）。
+- 不收「个人档案」：名字、住址、就读、喜好清单这类静态资料\
+一律不记——那是用户档案的地盘，记了就是重复。
+- 不收「具体事件」：观察只收跨场景反复成立的行为规律。
+- 这个信息可能会被持续印证，意味着需要关注"又""总是"等字眼。
+
+硬性纪律（违反任何一条即不合格）：
+1. 归属绝对准确：信息挂到谁头上，以原文行首的说话人标注为准，\
+user 的习惯绝不能安到 assistant 头上，反之亦然。
+2. 不硬挖：材料里没有值得记的就输出空列表——宁可空手而归，\
+不编造、不把闲谈拔高成洞察。
+3. 只用材料里出现过的内容，不推测、不补充。
+4. 每条信息点配证据：从原文逐字摘出支撑它的原话（至多 3 条，\
+标注说话人），一个字都不能改。
+5. 一条信息点一句话，高度概括。禁止讲故事、禁止按时间线叙述。
+
+输出格式（只输出 JSON，无任何其他文字）：
+{
+  "observations": [
+    {"summary": "信息点一句话",
+     "quotes": [{"speaker": "user 或 ai", "text": "逐字原话"}]}
+  ]
+}
+"""
+
+
+def build_observe_user_prompt(owner_name: str, dialogue: str) -> str:
+    """组装观察提炼用户消息：用户称呼说明 + 对话原文行。"""
+    return (
+        f"（说明：对话中「user」一方的名字是「{owner_name}」，"
+        "信息点里提到用户时直接用这个名字。）\n\n"
+        "## 对话原文\n" + dialogue +
+        "\n\n请按 system 指令输出 JSON。"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 观察式记忆——高相似合并判定（2026-10-16 设计夜定稿，momo 过目）
+# ---------------------------------------------------------------------------
+
+OBSERVE_MERGE_PROMPT = """\
+任务：下面几条已有的观察记录可能在说同一件事。判断它们是否重复，
+重复就写出合并后的那条。
+
+判定纪律：
+1. 只在讲同一个具体信息点时才合并——同一习惯的两种措辞算重复，\
+主题相近但内容不同不算。
+2. 合并版必须能被所有原条目的证据共同支撑；原条目有出入时，\
+以更谨慎的表述为准。
+3. 不需要合并就如实输出不合并。
+
+输出格式（只输出 JSON，无任何其他文字）：
+{
+  "merge": true,
+  "summary": "合并后的信息点一句话",
+  "reason": "一句话依据"
+}
+"""
+
+
+def build_observe_merge_user_prompt(items: list[dict]) -> str:
+    """组装合并判定用户消息：一组高相似观察（summary + 证据原话）。"""
+    blocks = []
+    for i, it in enumerate(items, 1):
+        qs = "；".join(f"（{q.get('speaker')}）{q.get('text', '')}"
+                       for q in (it.get("quotes") or []))
+        blocks.append(f"{i}. {it.get('summary', '')}"
+                      + (f"\n   证据：{qs}" if qs else ""))
+    return ("## 待判定的观察记录\n" + "\n".join(blocks)
+            + "\n\n请按 system 指令输出 JSON。")
 

@@ -150,10 +150,13 @@
   ③ POST /ember/sleep/link/submit      → 交卷落库（pending 扣减）
        （断线重进：GET /ember/sleep/link/progress 查进度，材料照旧）
   ④ ①-③ 循环到 progress 归零
-  ⑤ POST /ember/sleep/structure/run    → 结构维护（散事件归属 + cue 收紧）
+  ⑤ POST /ember/sleep/structure/run    → 结构维护（散事件归属 + cue 收紧
+       + 观察提炼与合并，见下注）
   ⑥    app 判 dream / 沉淀（走 app 自己的工具与库）
        → app 真的存下一版新沉淀时：POST /ember/sleep/sediment/evidence
 ```
+
+> **观察式记忆（10.16 定稿）**：`structure/run` 收尾内置两步——**观察提炼**（每个会话查游标，未被事件 span 覆盖的消息攒够 300 条才调第三方 LLM，产 0-N 条「信息点」：只收行为模式，不收个人档案/具体事件，不硬挖，0 条合法；上限单次 400 条切片）与**高相似合并**（观察向量 ≥0.90 聚组 → LLM 判定并写合并版，旧的标 superseded）。观察事件 `origin=observe`、无 cue、**自动召回走附加席**（每轮拿输入向量比对观察层 core 向量，宽松阈值 ≥0.35 命中至多 1 条，不占 3 席，渲染为「（印象浮现）」弱标注，记账 route=observe）；**判联判出 relation = 印证 → 自动转正**（`origin=affirmed`），判 neighbor/none 放着不动。观察落库即 fill turn_span，判联材料组装与翻原文零改动兼容。配置：`EMBER_OWNER_NAME`（用户称呼，注入提炼 prompt）、`executors.json` 的 `observe` / `observe_merge` 任务点。
 
 > **沉淀分工（10.15 对齐）**：`dream_submit` / `sediment_submit` 都是 **app 的工具**，正文与版本号存 app 自己的库；ember 只收证据 id 追加（6.5）。**证据为空时 app 不调 6.5，什么信号都不发**；「sleep 结束」信号也由 app 自己记，ember / heart 均无感知。
 

@@ -69,6 +69,11 @@ class Event:
     key_quotes: list[dict[str, str]] = field(default_factory=list)
     # provenance
     provenance_refs: list[str] = field(default_factory=list)
+    # origin —— 事件出身："" = 实时写入（对话中模型自主触发）；
+    # "observe" = 观察式记忆（sleep 夜批从未覆盖区间提炼的信息点，
+    # 无 cue、语义召回走附加席）；被判联印证（判出 relation）后
+    # 改写为 "affirmed"（2026-10-16 设计夜定稿）。
+    origin: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

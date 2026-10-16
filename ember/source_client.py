@@ -71,10 +71,15 @@ def fetch_source_range(session_id: str, from_id: int,
     rows = data.get("messages")
     if not isinstance(rows, list):
         raise SourceUnavailable("source 响应缺 messages 数组")
-    return [
-        {"message_id": r.get("message_id"),
-         "role": r.get("role"),
-         "content": r.get("content") or ""}
-        for r in rows
-        if isinstance(r, dict) and isinstance(r.get("message_id"), int)
-    ]
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        if not isinstance(r, dict) or not isinstance(r.get("message_id"), int):
+            continue
+        row = {"message_id": r["message_id"],
+               "role": r.get("role"),
+               "content": r.get("content") or ""}
+        # created_at 透传（观察事件的原文诞生时刻用；后端没给就算了）
+        if r.get("created_at") is not None:
+            row["created_at"] = r["created_at"]
+        out.append(row)
+    return out

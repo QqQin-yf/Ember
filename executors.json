@@ -3,5 +3,7 @@
   "split": "glm",
   "mount": "glm",
   "summary": "glm",
-  "structure": "glm"
+  "structure": "glm",
+  "observe": "glm",
+  "observe_merge": "glm"
 }

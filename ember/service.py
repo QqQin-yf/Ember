@@ -45,7 +45,11 @@ from . import source_client
 from . import executors
 from .cue_tighten import CueTightener
 from .prompts import (STRUCTURE_SYSTEM_PROMPT, build_structure_user_prompt,
-                      SUMMARY_SYSTEM_PROMPT, build_summary_user_prompt)
+                      SUMMARY_SYSTEM_PROMPT, build_summary_user_prompt,
+                      OBSERVE_SYSTEM_PROMPT, build_observe_user_prompt,
+                      OBSERVE_MERGE_PROMPT, build_observe_merge_user_prompt)
+from . import observe as observe_mod
+from .observe import ObserveCursor, verify_quotes
 from .core_semantic import (CoreVectorStore, EntitySummaryVectorStore,
                             SEARCH_HIT_FLOOR, cosine)
 from .writer import (
@@ -408,6 +412,8 @@ class EmberService:
         self.turn_spans = TurnSpanStore(getattr(store, "root", ""))
         # 召回记账（10-08 定稿 §3.2）：候选组装与旧 Cue 收紧的共同前置，旁路只观察
         self.recall_ledger = RecallLedger(getattr(store, "root", ""))
+        # 观察游标（2026-10-16 ④observe）：每会话已检查到的后端 seq
+        self.observe_cursor = ObserveCursor(getattr(store, "root", ""))
         # 会话原文存档已退役（2026-10-14 去原文化）：原文只存后端消息树
         # 一份，ember 经 source_client 按 message_id 按需拉取（用完即弃）；
         # 轮次持久账 = turn_ledger（无条件记账，重启恢复计数用）
@@ -705,11 +711,24 @@ class EmberService:
                 except ValueError:
                     pass
 
+        # ---- 观察附加席（2026-10-16 ④observe）：不占 3 席，输入向量
+        # × 观察层 core 向量宽松命中至多 1 条——「一旦被召回才谈印证」
+        observe_extra = self._observe_extra_hit(
+            user_text, set(recalled_ctx.recalled_events))
+        units_for_prefix = selected_units
+        if observe_extra:
+            recalled_ctx.recalled_events.append(observe_extra)
+            ev = self.store.get_event(observe_extra)
+            if ev.raw_ref not in recalled_ctx.source_refs:
+                recalled_ctx.source_refs.append(ev.raw_ref)
+            units_for_prefix = selected_units + [
+                {"kind": "observe", "event_ids": [observe_extra]}]
+
         # 召回记账（10-08 定稿 §3.2）：三段通路各记一行，供 Sleep 候选组装
         # 与旧 Cue 收紧消费。名额截断后记账——记的是真正注入前缀的 event。
         self._ledger_record(session, turn, recalled_ctx, entity_hits,
                             entity_event_ids, dir_result, excluded,
-                            resolved_brought)
+                            resolved_brought, observe_extra=observe_extra)
 
         prefix = ""
         if recalled_ctx.recalled_events:
@@ -718,7 +737,7 @@ class EmberService:
                 resolved_brought=resolved_brought,
                 summary_fallback=summary_fallback,
                 direction_focused=direction_focused,
-                units=selected_units,
+                units=units_for_prefix,
                 strong_dropped=gate_stats["strong_dropped"])
 
         return {
@@ -731,6 +750,7 @@ class EmberService:
             "dropped_by_seats": gate_stats["dropped_by_seats"],
             "weak_pooled": gate_stats["weak_pooled"],
             "strong_dropped": gate_stats["strong_dropped"],
+            "observe_extra": observe_extra,
             "resolved_brought": [dst for dst, _ in resolved_brought],
             "direction_focused": direction_focused,
             "direction_reason": direction_reason,
@@ -1086,6 +1106,13 @@ class EmberService:
                     else:
                         _light_line(u["event_ids"][0])
                     continue
+                if u.get("kind") == "observe":
+                    # 观察附加席：不占 3 席的弱呈现（一句话信息点）
+                    oid = u["event_ids"][0]
+                    lines.append(f"- （印象浮现）"
+                                 f"{self.store.get_event(oid).summary}"
+                                 f"（{oid}）")
+                    continue
                 if u["kind"] == "entity_block":
                     h = entity_by_id.get(u["entity_id"])
                     if h is not None:
@@ -1275,7 +1302,8 @@ class EmberService:
                        ctx: PresentationContext, entity_hits: list,
                        entity_event_ids: list[str], dir_result,
                        excluded: list[str],
-                       resolved_brought: list[tuple[str, str]]) -> None:
+                       resolved_brought: list[tuple[str, str]],
+                       observe_extra: str | None = None) -> None:
         """召回记账：三段通路各记一行（route=cue/entity/relation）。
 
         记账对象 = Sleep 过滤后真正带出的 event；relation 行的 via 列
@@ -1315,6 +1343,11 @@ class EmberService:
             for dst, src in resolved_brought:
                 self.recall_ledger.record(
                     sid, turn, route="relation", event_ids=[dst], via=src)
+            # 观察附加席命中：route=observe（提取统一——刷新计时器与
+            # 注入去重；判联候选组装按 turn 不分 route，天然兼容）
+            if observe_extra:
+                self.recall_ledger.record(sid, turn, route="observe",
+                                          event_ids=[observe_extra])
         except Exception:
             pass  # 记账是旁路观察层，绝不阻断主对话
 
@@ -1951,6 +1984,17 @@ class EmberService:
 
         ent = verdict.get("entity") or {}
         summary.update(self._apply_entity_action(ent, [new_id], prov))
+
+        # 观察转正（2026-10-16 ④observe）：observe 事件在判联中判出
+        # 具体联系（relation）= 被印证 → origin 改 affirmed。
+        # 判 neighbor/none → 放着不动（无退场线，momo 拍板）。
+        if summary["relations"]:
+            try:
+                if (self.store.get_event(new_id).origin or "") == "observe":
+                    self._patch_event_rows({new_id: {"origin": "affirmed"}},
+                                           whitelist=("origin",))
+            except KeyError:
+                pass
         return summary
 
     def sidecar_link_submit(self, body: dict[str, Any]) -> dict[str, Any]:
@@ -2470,6 +2514,247 @@ class EmberService:
                                  "errors": [f"action 非法: {action}"]})
         return saved, rejected
 
+    def _observe_extra_hit(self, text: str,
+                           exclude: set[str]) -> str | None:
+        """观察附加席命中：输入向量 × 观察层 core 向量，宽松阈值，
+        至多 1 条（momo 2026-10-16：匹配宽松一点，被召回才谈印证）。
+
+        候选 = origin ∈ {observe, affirmed} 且未被 superseded 且不在
+        本轮主席里；向量缺失/失败 → 视为未命中，绝不阻断主对话。
+        """
+        cands = [ev for ev in self.store.all_events()
+                 if (getattr(ev, "origin", "") or "") in ("observe",
+                                                          "affirmed")
+                 and self.sleep_state.recall_allowed(ev.event_id)
+                 and ev.event_id not in exclude]
+        if not cands:
+            return None
+        try:
+            q = embed_text(text)
+        except Exception:  # noqa: BLE001 — 向量失败就当没命中
+            return None
+        best: str | None = None
+        best_sim = observe_mod.HIT_FLOOR
+        for ev in cands:
+            v = self.core_vectors.get(ev.event_id)
+            if not v:
+                continue
+            sim = cosine(q, v["vector"])
+            if sim >= best_sim:
+                best, best_sim = ev.event_id, sim
+        return best
+
+    # ---------- 观察式记忆（2026-10-16 设计夜定稿：④observe） ----------
+    #
+    # sleep 收尾三步：提炼（未覆盖区间 → 信息点）→ 判联转正（现成
+    # 管线零改动：判出 relation 即印证）→ 夜批合并（高相似聚 → LLM
+    # 定夺并写合并版，旧的标 superseded）。
+    # 观察事件落库时 fill turn_span = 证据区间对应轮次——判联材料
+    # 组装（span ∩ 召回记账）与 read_memory_source 因此零改动兼容。
+
+    def run_observe_pass(self) -> dict[str, Any]:
+        """观察提炼：逐会话查游标 → 未覆盖消息攒够门槛才调 LLM。"""
+        if not source_client.configured():
+            return {"status": "unconfigured", "created": 0}
+        sids = sorted({s for (s, _t) in self.turn_ledger.user_msg})
+        report: dict[str, Any] = {"status": "ok", "created": 0,
+                                  "sessions": []}
+        for sid in sids:
+            try:
+                out = self._observe_session(sid)
+            except source_client.SourceUnavailable as exc:
+                out = {"session": sid, "status": "unavailable",
+                       "error": str(exc), "created": 0}
+            except Exception as exc:  # noqa: BLE001 — 单会话失败不牵连
+                out = {"session": sid, "status": "failed",
+                       "error": str(exc), "created": 0}
+            report["sessions"].append(out)
+            report["created"] += out.get("created", 0)
+        return report
+
+    def _observe_session(self, sid: str) -> dict[str, Any]:
+        """单会话观察：拉增量 → 过滤 span 已覆盖 → 门槛 → 提炼。"""
+        cursor = self.observe_cursor.get(sid)
+        rows = source_client.fetch_source_range(sid, cursor + 1, 10 ** 9)
+        if not rows:
+            return {"session": sid, "status": "empty", "created": 0}
+        covered = self._covered_turns(sid)
+        unc: list[tuple[dict, int | None]] = []
+        for m in rows:
+            t = self.turn_ledger.turn_of_message(sid, m["message_id"])
+            if t is None or t not in covered:
+                unc.append((m, t))
+        if len(unc) < observe_mod.MIN_UNCOVERED:
+            return {"session": sid, "status": "below_threshold",
+                    "new_rows": len(rows), "uncovered": len(unc),
+                    "created": 0}
+        batch = unc[: observe_mod.MAX_BATCH]
+        user = build_observe_user_prompt(
+            os.environ.get("EMBER_OWNER_NAME", "user"),
+            observe_mod.dialogue_lines([m for m, _t in batch]))
+        engine = executors.load_engine(self.store.root, "observe")
+        raw = executors.call_llm(OBSERVE_SYSTEM_PROMPT, user, engine,
+                                 task="observe")
+        verdict = _parse_llm_json(raw)
+        obs_list = verdict.get("observations")
+        if not isinstance(obs_list, list):
+            obs_list = []
+        created: list[str] = []
+        for item in obs_list[: observe_mod.MAX_OUTPUT]:
+            eid = self._observe_create_event(sid, item, batch)
+            if eid:
+                created.append(eid)
+        # 游标推进：提炼成功即推进（0 条观察也算消化完毕）
+        self.observe_cursor.set(
+            sid, max(m["message_id"] for m, _t in batch))
+        return {"session": sid, "status": "ok", "uncovered": len(unc),
+                "processed": len(batch), "created": len(created),
+                "event_ids": created}
+
+    def _covered_turns(self, sid: str) -> set[int]:
+        """该会话已被任一事件的 turn_span 覆盖的 turn 集合。"""
+        covered: set[int] = set()
+        for ev in self.store.all_events():
+            m = re.match(r"conversation/session-([^/]+)", ev.source_ref or "")
+            if not m or m.group(1) != sid:
+                continue
+            for lo, hi in self.turn_spans.span_of(ev.event_id):
+                covered.update(range(lo, hi + 1))
+        return covered
+
+    def _observe_create_event(self, sid: str, item: Any,
+                              batch: list[tuple[dict, int | None]]
+                              ) -> str | None:
+        """一条观察 → Event 落库（origin=observe）+ span + 向量 + pending。"""
+        if not isinstance(item, dict):
+            return None
+        summary = str(item.get("summary", "")).strip()
+        if not summary:
+            return None
+        msgs = [m for m, _t in batch]
+        seqs = [m["message_id"] for m in msgs]
+        turns = sorted({t for _m, t in batch if t is not None})
+        eid = f"EVT-{len(self.store.all_events()) + 1:03d}-{uuid.uuid4().hex[:6]}"
+        first = batch[0][0]
+        event_time = _now_iso()
+        created = first.get("created_at")
+        if isinstance(created, (int, float)) and created > 0:
+            ts = created / 1000 if created > 10 ** 12 else created
+            event_time = datetime.fromtimestamp(
+                ts, tz=timezone.utc).astimezone().isoformat(timespec="seconds")
+        ev = Event(
+            event_id=eid, version_id=f"{eid}-v1",
+            source_ref=f"conversation/session-{sid}",
+            raw_ref=f"conversation/session-{sid}/seq-{min(seqs)}-{max(seqs)}",
+            event_time=event_time, ingest_time=_now_iso(),
+            turn_refs=[f"turn-{t}" for t in range(turns[0], turns[-1] + 1)]
+            if turns else [],
+            summary=summary, origin="observe",
+            key_quotes=verify_quotes(item.get("quotes"), msgs),
+            provenance_refs=["observe"],
+        )
+        self.store.write_event(ev)
+        if turns:
+            self.turn_spans.fill(eid, [(turns[0], turns[-1])],
+                                 filled_by="observe")
+        self.link_pending_add(eid)
+        try:
+            model = os.environ.get("EMBER_EMBED_MODEL",
+                                   "Qwen/Qwen3-Embedding-8B")
+            self.core_vectors.upsert(eid, summary, embed_text(summary), model)
+        except Exception:  # noqa: BLE001 — 向量失败不拦落库（夜批 backfill 兜底）
+            pass
+        return eid
+
+    def _merge_observations(self) -> dict[str, Any]:
+        """夜批合并：观察向量两两比对 → 高相似组 → LLM 判定并写合并版。"""
+        obs = [ev for ev in self.store.all_events()
+               if (getattr(ev, "origin", "") or "") == "observe"
+               and self.sleep_state.recall_allowed(ev.event_id)]
+        if len(obs) < 2:
+            return {"candidates": len(obs), "groups": 0, "merged": 0}
+        parent = list(range(len(obs)))
+
+        def find(i: int) -> int:
+            while parent[i] != i:
+                parent[i] = parent[parent[i]]
+                i = parent[i]
+            return i
+
+        for i in range(len(obs)):
+            for j in range(i + 1, len(obs)):
+                vi = self.core_vectors.get(obs[i].event_id)
+                vj = self.core_vectors.get(obs[j].event_id)
+                if not vi or not vj:
+                    continue
+                if (cosine(vi["vector"], vj["vector"])
+                        >= observe_mod.SIM_THRESHOLD):
+                    parent[find(i)] = find(j)
+        groups: dict[int, list[int]] = {}
+        for i in range(len(obs)):
+            groups.setdefault(find(i), []).append(i)
+        report: dict[str, Any] = {"candidates": len(obs), "groups": 0,
+                                  "merged": 0, "skipped": 0}
+        engine = executors.load_engine(self.store.root, "observe_merge")
+        for members in groups.values():
+            if len(members) < 2:
+                continue
+            members = members[: observe_mod.MAX_MERGE_GROUP]
+            report["groups"] += 1
+            items = [{"summary": obs[i].summary,
+                      "quotes": obs[i].key_quotes} for i in members]
+            try:
+                raw = executors.call_llm(
+                    OBSERVE_MERGE_PROMPT,
+                    build_observe_merge_user_prompt(items), engine,
+                    task="observe_merge")
+                v = _parse_llm_json(raw)
+            except Exception:  # noqa: BLE001 — 单组失败不牵连
+                report["skipped"] += 1
+                continue
+            merged_summary = str(v.get("summary", "")).strip()
+            if not v.get("merge") or not merged_summary:
+                continue
+            if self._observe_merged_event(obs, members, merged_summary):
+                report["merged"] += 1
+        return report
+
+    def _observe_merged_event(self, obs: list, members: list[int],
+                              summary: str) -> str | None:
+        """合并版落库：证据继承，旧观察标 superseded（召回自动不再带出）。"""
+        order = sorted(members, key=lambda i: obs[i].event_time)
+        oldest = obs[order[0]]
+        eid = f"EVT-{len(self.store.all_events()) + 1:03d}-{uuid.uuid4().hex[:6]}"
+        quotes: list[dict] = []
+        for i in order:
+            for q in obs[i].key_quotes or []:
+                if q not in quotes:
+                    quotes.append(dict(q))
+        ev = Event(
+            event_id=eid, version_id=f"{eid}-v1",
+            source_ref=oldest.source_ref, raw_ref=oldest.raw_ref,
+            event_time=oldest.event_time, ingest_time=_now_iso(),
+            turn_refs=list(oldest.turn_refs or []),
+            summary=summary, origin="observe", key_quotes=quotes[:3],
+            provenance_refs=["observe-merge"]
+                            + [obs[i].event_id for i in order],
+        )
+        self.store.write_event(ev)
+        spans = self.turn_spans.span_of(oldest.event_id)
+        if spans:
+            self.turn_spans.fill(eid, spans, filled_by="observe-merge")
+        self.link_pending_add(eid)
+        for i in order:
+            self.sleep_state.mark(obs[i].event_id, "superseded",
+                                  f"被合并观察 {eid} 取代", "observe-merge")
+        try:
+            model = os.environ.get("EMBER_EMBED_MODEL",
+                                   "Qwen/Qwen3-Embedding-8B")
+            self.core_vectors.upsert(eid, summary, embed_text(summary), model)
+        except Exception:  # noqa: BLE001
+            pass
+        return eid
+
     def run_structure_maintenance(self) -> dict[str, Any]:
         """结构维护：散事件归属（第三方 LLM 判定）+ 旧 cue 收紧
         + 实体 summary 夜批重算。
@@ -2515,6 +2800,10 @@ class EmberService:
             self.store, self.recall_ledger,
             self.store._path(EVENTS_FILE),  # noqa: SLF001
             self.entity_store).tighten()
+        # 观察式记忆（2026-10-16 ④observe）：提炼在前、合并在后
+        # （合并要比对刚落库观察的向量）
+        report["observe"] = self.run_observe_pass()
+        report["observe_merge"] = self._merge_observations()
         return report
 
     def _backfill_vectors(self) -> dict[str, Any]:

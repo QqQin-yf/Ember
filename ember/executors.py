@@ -35,7 +35,8 @@ import urllib.request
 EXECUTORS_FILE = "executors.json"
 
 ALLOWED_ENGINES = ("glm", "qwen3")
-KNOWN_TASKS = ("judge", "split", "mount", "summary", "structure")
+KNOWN_TASKS = ("judge", "split", "mount", "summary", "structure",
+               "observe", "observe_merge")
 
 # 各任务点的调用差异（原先散在三个脚本里的常量，集中到这张表）：
 #   model_env   glm 模型的环境变量名（回退 EMBER_SLEEP_MODEL，再回退 glm-4.7）
@@ -48,6 +49,11 @@ TASK_SPECS: dict[str, dict] = {
     "summary": {"model_env": "EMBER_SUMMARY_MODEL", "temperature": 0.3, "timeout": 120},
     "structure": {"model_env": "EMBER_STRUCTURE_MODEL", "temperature": 0.2,
                   "timeout": 180},
+    # observe 输入是长对话原文（≤400 条），给长超时
+    "observe": {"model_env": "EMBER_OBSERVE_MODEL", "temperature": 0.3,
+                "timeout": 300},
+    "observe_merge": {"model_env": "EMBER_MERGE_MODEL", "temperature": 0.2,
+                      "timeout": 120},
 }
 
 
