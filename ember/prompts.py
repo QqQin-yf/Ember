@@ -1,14 +1,13 @@
 # -*- coding: utf-8 -*-
 """Ember v3 — 全部 LLM 任务点的 prompt 定稿与用户消息组装。
 
-七个 prompt：
+五个 prompt：
 - SPLIT_SYSTEM_PROMPT    Direction 划分（§5.1）  → scripts/split_directions.py
 - MOUNT_SYSTEM_PROMPT    Direction 挂载（§5.2）  → scripts/mount_directions.py
 - LINK_SYSTEM_PROMPT     判联（挂关系，sleep 接口②）——借 Loism 窗口跑，
   全文交付版见 SLEEP_LINK_SPEC.md；verdict 纪律由 service 校验器承担
-- SUMMARY_SYSTEM_PROMPT  Entity summary 重算（§2.1）→ service 夜批
-- STRUCTURE_SYSTEM_PROMPT 散事件归属（2026-10-14 设计稿 v2）
-  → service.run_structure_maintenance
+  （2026-10-17 起归属 extract/attach + entity summary 当场写改全在
+  此处——glm structure 归属与夜批 summary 重算退役，momo 拍板）
 - OBSERVE_SYSTEM_PROMPT  观察式记忆提炼（2026-10-16 设计夜定稿）
   → service.run_observe_pass
 - OBSERVE_MERGE_PROMPT   观察高相似合并判定 → service._merge_observations
@@ -16,11 +15,12 @@
 （历史备注：独立判联管线与 JUDGE_SYSTEM_PROMPT 已于 2026-10-15 退役。
 同日发现 MOUNT_SYSTEM_PROMPT 自初始提交起就误装判联内容——方向挂载
 prompt 从未存在，挂载脚本出生即坏；2026-10-16 判联内容正名为
-LINK_SYSTEM_PROMPT，MOUNT 补写真身。）
+LINK_SYSTEM_PROMPT，MOUNT 补写真身。2026-10-17 STRUCTURE（散事件
+归属）与 SUMMARY（夜批重算）随归属/summary 生产线收编窗口而退役。）
 
 均为 momo 逐字审过的定稿，改动需重新过目；
-STRUCTURE / MOUNT（新写真身）/ OBSERVE / OBSERVE_MERGE 为新拟稿，
-STRUCTURE 与 OBSERVE 两份已经 momo 过目。
+STRUCTURE / MOUNT（新写真身）/ OBSERVE / OBSERVE_MERGE 曾为新拟稿，
+均已过目。
 
 写入不设独立 prompt：实时写入由 EMBEDDED_WRITER_PROMPT（writer.py）
 承担（AI 调工具，主动记重要的事；sleep 只管维护，不重写内容）。
@@ -134,10 +134,16 @@ LINK_SYSTEM_PROMPT = """\
 改用 attach）。
 输出：name（从事件原文提炼，必须是专名，不用普通词汇）、\
 aliases（对话中真实出现过的其他称呼，照原文）、\
-一句话说明、member_event_ids（只列尚无归属的散事件，已归属的不进）。
+一句话说明、member_event_ids（只列尚无归属的散事件，已归属的不进）、\
+summary（这个实体的第一版描述：三到六句，像一张名片——它是什么、\
+包括哪些方面、目前状态；是提炼不是汇编，不按事件罗列、不写变化过程）。
 
 二、attach（归入已有实体）——新记忆讲的正是某条旧记忆所属实体的\
-事时使用：输出该实体的 id。只有新记忆尚无归属时才可用。归入时顺带判断目标实体是否已经收尾（相关的事做完、结束或明确不再继续）：收尾了输出 "close": true 和一句话 close_reason；还活跃或拿不准就 "close": false。
+事时使用：输出该实体的 id。只有新记忆尚无归属时才可用。归入时\
+当场改写实体描述：对照名下全部成员输出新的 summary（三到六句，\
+同名片标准）；并顺带判断目标实体是否已经收尾（相关的事做完、\
+结束或明确不再继续）：收尾了输出 "close": true 和一句话 \
+close_reason；还活跃或拿不准就 "close": false。
 
 三、none（不做归属动作）——主题不聚焦，或只是跨主题的零星联系。\
 不提取也不归入时什么都不输出，事件保持散着。
@@ -158,6 +164,7 @@ aliases（对话中真实出现过的其他称呼，照原文）、\
     "name": "仅 extract 时填",
     "aliases": ["仅 extract 时填"],
     "description": "仅 extract 时填，一句话",
+    "summary": "仅 extract/attach 时填：实体描述（立户首版 / 对照全部成员的改写版）",
     "member_event_ids": ["仅 extract 时填"],
     "entity_id": "仅 attach 时填，目标已有实体",
     "close": "仅 attach 时填：true / false",
@@ -176,124 +183,6 @@ def build_mount_user_prompt(dir_lines: str, event_id: str, core: str) -> str:
         "## 方向清单\n" + dir_lines +
         "\n\n## 待挂载经历\n" +
         f"event_id: {event_id}\n" + core
-    )
-
-
-# ---------------------------------------------------------------------------
-# Entity summary 重算（§2.1，momo 2026-10-10 逐字审过）
-# ---------------------------------------------------------------------------
-
-SUMMARY_SYSTEM_PROMPT = """\
-任务：为「Ember记忆系统」中的一个实体撰写或更新它的整体描述\
-（Entity summary）。
-
-这个描述回答一个问题：这个实体是什么、现在怎么样。它是一份\
-提炼出来的整体认识，不是事件记录。
-
-输入：实体名 + 它名下全部事件的完整叙述（每条一段）。
-
-写作要求：
-- 三到六句话。把全部事件合并起来提炼出对实体的整体认识，\
-  包括它是什么、包括哪些方面、目前的状态，以及最近的情况。
-- 是提炼，不是汇编：禁止按事件逐条罗列、禁止按时间顺序叙述\
-  "先后做了什么"；多个事件指向的同一件事合并成一句话；\
-  细枝末节可以舍弃。
-- 最近发生的事可以反映进来，但要说成"目前/最近"的状态，\
-  不铺陈过程。
-- 概括依据只来自输入中出现过的内容，不推测、不补充输入之外\
-  的信息；事件之间没有提到的方面不写。
-- 通顺的自然语言，不要罗列 event_id，不要使用"摘要""事件"\
-  "材料"这类词。
-- 实体名用输入给出的写法；输入中出现的常用别名可自然融入。
-
-输出格式（只输出 JSON，无任何其他文字）：
-{
-  "summary": "三到六句话的整体描述"
-}
-"""
-
-
-def build_summary_user_prompt(entity_name: str, old_summary: str,
-                              cores: list[str]) -> str:
-    """组装 summary 重算的用户消息：实体名 + 旧描述（如有）+ 全部
-    未被推翻成员事件的完整叙述（core）。
-
-    cores: [完整叙述, ...]（调用方提取，已过滤 superseded，不含 id）
-    old_summary: 该实体现有 summary；为空串时省略该区块（首次生成）。
-    """
-    parts = [f"## 实体\n{entity_name}"]
-    if old_summary.strip():
-        parts.append("## 现有描述（可参考，按当前全部事件重新概括）\n"
-                     + old_summary.strip())
-    blocks = "\n".join(f"- {c}" for c in cores)
-    parts.append("## 该实体下全部事件\n" + blocks)
-    parts.append("请按 system 指令输出 JSON。")
-    return "\n\n".join(parts)
-
-
-# ---------------------------------------------------------------------------
-# 结构维护——散事件归属（2026-10-14 设计稿 v2；新拟稿，待 momo 过目）
-# ---------------------------------------------------------------------------
-
-STRUCTURE_SYSTEM_PROMPT = """\
-任务：记忆库里积了一批尚无实体归属的散事件。你拿到散事件清单和\
-已有实体库摘要，为散事件安排归属。
-
-动作二选一（每个动作独立给出，一个事件只能归一处）：
-
-一、extract（提取开新户）——同时满足以下全部条件：
-- 一组散事件围绕同一个对象/主题；
-- 该组散事件 ≥3 条；
-- 这个对象不是实体库里任何已有实体的子题（若是，改用 attach）。
-输出：name（从事件原文提炼，必须是专名，不用普通词汇）、\
-aliases（对话中真实出现过的其他称呼，照原文）、一句话说明、\
-member_event_ids（从散事件清单里选，原样回填 event_id）。
-
-二、attach（归入已有实体）——散事件讲的正是实体库里某个已有实体的\
-事时使用：输出该实体的 entity_id，event_ids 列出要归入的散事件\
-（原样回填 event_id）。
-
-判定纪律：
-- 从严：主题相近不等于归属；宁可让散事件继续散着，也不硬塞。
-- 与任何已有实体无关、也凑不齐立户的散事件，不给任何动作，\
-保持散着。
-- 一个事件只出现在一个动作里，不要重复分配。
-
-输出格式（只输出 JSON，无任何其他文字）：
-{
-  "assignments": [
-    {"action": "extract",
-     "name": "专名", "aliases": ["..."], "description": "一句话",
-     "member_event_ids": ["EVT-...", "EVT-...", "EVT-..."]},
-    {"action": "attach",
-     "entity_id": "ent_...", "event_ids": ["EVT-...", "EVT-..."]}
-  ]
-}
-"""
-
-
-def build_structure_user_prompt(strays: list[dict],
-                                entities: list[dict]) -> str:
-    """组装结构维护用户消息：实体库摘要 + 散事件清单。
-
-    strays: [{"event_id", "core", "summary"}]（调用方从库中筛出）
-    entities: [{"entity_id", "name", "status", "summary"}]
-    """
-    ent_lines = []
-    for e in entities:
-        ent_lines.append(
-            f"- {e['entity_id']} {e['name']}"
-            f"（{e.get('status') or 'open'}）{e.get('summary') or ''}")
-    ev_lines = []
-    for ev in strays:
-        ev_lines.append(f"event_id: {ev['event_id']}")
-        ev_lines.append(ev.get("core") or "")
-        ev_lines.append(f"（摘要：{ev.get('summary', '')}）")
-        ev_lines.append("")
-    return (
-        "## 已有实体库\n" + ("\n".join(ent_lines) or "（暂无实体）") +
-        "\n\n## 尚无归属的散事件\n" + "\n".join(ev_lines) +
-        "请按 system 指令输出 JSON。"
     )
 
 

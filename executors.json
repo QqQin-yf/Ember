@@ -2,8 +2,6 @@
   "judge": "glm",
   "split": "glm",
   "mount": "glm",
-  "summary": "glm",
-  "structure": "glm",
   "observe": "glm",
   "observe_merge": "glm"
 }

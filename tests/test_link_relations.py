@@ -138,6 +138,79 @@ class LinkRelationsTests(unittest.TestCase):
         self.assertEqual(self.svc.store.get_event("EVT-OLD").change,
                          "后来知道其实不是那样")
 
+    def test_entity_extract_and_attach_summary(self) -> None:
+        """归属当场写/改 entity summary（2026-10-17：夜批重算退役）。
+
+        extract 立户带 summary；attach 当场改写；不输出 summary 保旧值
+        （宽松校验，不整份拒）。
+        """
+        _add(self.svc, "EVT-N2", 7)
+        self.svc.turn_spans.fill("EVT-N2", [(7, 7)], filled_by="test")
+        self.svc.link_pending_add("EVT-N2")
+        _add(self.svc, "EVT-N3", 9)
+        self.svc.turn_spans.fill("EVT-N3", [(9, 9)], filled_by="test")
+        self.svc.link_pending_add("EVT-N3")
+
+        def mats() -> dict:
+            return {m["new_id"]: m for b in self._batches()["batches"]
+                    for m in b["materials"]}
+
+        # extract：三条散事件立户，当场带 summary
+        first = mats()
+        verdict = {"pairs": [],
+                   "entity": {"action": "extract", "name": "拖延症观察",
+                              "aliases": [], "description": "x",
+                              "member_event_ids": ["EVT-NEW", "EVT-N2",
+                                                   "EVT-N3"],
+                              "summary": "用户习惯先对齐方案再动手。"}}
+        sub = self.svc.sidecar_link_submit({"results": [
+            {"material": first["EVT-NEW"], "verdict": verdict},
+            {"material": first["EVT-N2"],
+             "verdict": {"pairs": [], "entity": {"action": "none"}}},
+            {"material": first["EVT-N3"],
+             "verdict": {"pairs": [], "entity": {"action": "none"}}}]})
+        self.assertEqual(len(sub["saved"]), 3)
+        ent_id = sub["saved"][0]["entity_id"]
+        ent = self.svc.entity_store.get(ent_id)
+        self.assertEqual(ent.summary, "用户习惯先对齐方案再动手。")
+        self.assertTrue(ent.summary_at)
+
+        # attach 当场改写：新事件出生轮里 EVT-NEW（带实体 id）浮起
+        self.svc.recall_ledger.record("s1", 11, "cue", ["EVT-NEW"],
+                                      cue="c")
+        _add(self.svc, "EVT-N4", 11)
+        self.svc.turn_spans.fill("EVT-N4", [(11, 11)], filled_by="test")
+        self.svc.link_pending_add("EVT-N4")
+        second = mats()
+        verdict2 = {"pairs": [],
+                    "entity": {"action": "attach", "entity_id": ent_id,
+                               "close": False,
+                               "summary": "改写后：拖延但可信。"}}
+        sub2 = self.svc.sidecar_link_submit(
+            {"results": [{"material": second["EVT-N4"],
+                          "verdict": verdict2}]})
+        self.assertEqual(len(sub2["saved"]), 1)
+        self.assertTrue(sub2["saved"][0].get("summary_rewritten"))
+        self.assertEqual(self.svc.entity_store.get(ent_id).summary,
+                         "改写后：拖延但可信。")
+
+        # attach 不输出 summary → 保旧值（宽松，不拒）
+        self.svc.recall_ledger.record("s1", 13, "cue", ["EVT-NEW"],
+                                      cue="c")
+        _add(self.svc, "EVT-N5", 13)
+        self.svc.turn_spans.fill("EVT-N5", [(13, 13)], filled_by="test")
+        self.svc.link_pending_add("EVT-N5")
+        third = mats()
+        verdict3 = {"pairs": [],
+                    "entity": {"action": "attach", "entity_id": ent_id,
+                               "close": False}}
+        sub3 = self.svc.sidecar_link_submit(
+            {"results": [{"material": third["EVT-N5"],
+                          "verdict": verdict3}]})
+        self.assertEqual(len(sub3["saved"]), 1)
+        self.assertEqual(self.svc.entity_store.get(ent_id).summary,
+                         "改写后：拖延但可信。")
+
     def test_submit_rejects_outside_material(self) -> None:
         """防幻觉：pair 指向材料外事件 → 整份拒绝，pending 不扣。"""
         material = self._batches()["batches"][0]["materials"][0]

@@ -184,13 +184,13 @@ class SearchMemoryTests(unittest.TestCase):
     def test_night_backfill(self) -> None:
         """夜批补向量：无向量的新事件被补上，已有的不重复。"""
         _add(self.svc, "EVT-009", "夜里新写的记忆内容")
-        with mock.patch("ember.executors.call_llm",
-                        return_value='{"assignments": []}'):
+        with mock.patch("ember.service.embed_text",
+                        return_value=[0.5, 0.5, 0.0]):
             report = self.svc.run_structure_maintenance()
         self.assertEqual(report["vector_backfill"]["events"], 1)
         self.assertTrue(self.svc.core_vectors.has("EVT-009"))
-        with mock.patch("ember.executors.call_llm",
-                        return_value='{"assignments": []}'):
+        with mock.patch("ember.service.embed_text",
+                        return_value=[0.5, 0.5, 0.0]):
             report2 = self.svc.run_structure_maintenance()
         self.assertEqual(report2["vector_backfill"]["events"], 0)
 

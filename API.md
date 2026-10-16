@@ -139,9 +139,9 @@
 
 ## 6. Sleep 夜间维护（消费方：app 编排）
 
-用户在 app 侧按键进入 sleep（人为编排，与 heart 入睡档同构）后，app 按固定顺序编排两个阶段：**挂关系**（link，借窗口跑）与**结构维护**（structure，ember 自发第三方 LLM）。
+用户在 app 侧按键进入 sleep（人为编排，与 heart 入睡档同构）后，app 按固定顺序编排两个阶段：**挂关系**（link，借窗口跑——2026-10-17 起归属判定 extract/attach 与 entity summary 当场写改也全在此处）与**收尾维护**（structure/run，ember 本地+轻活：cue 收紧 + 向量补建 + 观察提炼与合并）。
 
-> **编排顺序（务必对 app 讲清）**：挂关系清完**不等于没活儿了**——之后还有一步 `structure/run`。必须等 link 交卷清零（progress 归零）后再调 structure/run；漏调会留下散事件归属悬空、旧 cue 不收紧。
+> **编排顺序（务必对 app 讲清）**：挂关系清完**不等于没活儿了**——之后还有一步 `structure/run`。必须等 link 交卷清零（progress 归零）后再调 structure/run；漏调会漏掉 cue 收紧、向量补建与观察提炼。
 
 ```
 进入 sleep（app 按键）
@@ -150,11 +150,13 @@
   ③ POST /ember/sleep/link/submit      → 交卷落库（pending 扣减）
        （断线重进：GET /ember/sleep/link/progress 查进度，材料照旧）
   ④ ①-③ 循环到 progress 归零
-  ⑤ POST /ember/sleep/structure/run    → 结构维护（散事件归属 + cue 收紧
+  ⑤ POST /ember/sleep/structure/run    → 收尾维护（cue 收紧 + 向量补建
        + 观察提炼与合并，见下注）
   ⑥    app 判 dream / 沉淀（走 app 自己的工具与库）
        → app 真的存下一版新沉淀时：POST /ember/sleep/sediment/evidence
 ```
+
+> **归属与 entity summary 的生产线（10.17 重构）**：归属判定（extract/attach）与 entity summary 的写/改**全部在窗口判联当场完成**——窗口 AI 手里是一手材料，extract 立户当场写第一版描述（3-6 句名片式），attach 当场对照名下全部成员改写。glm 的散事件归属全库扫兜底与夜批 summary 重算**退役**（散事主题延续时召回自举，无需全库扫；verdict 的 entity 段新增 `summary` 字段，宽松校验：未输出/空 → 保旧值）。呈现层随之调整：entity summary 打头，成员事件的 summary 不再单独展示（数据层保留）。structure/run 报告里不再有 `strays_total` / `saved` / `rejected` / `summary` 字段。
 
 > **观察式记忆（10.16 定稿）**：`structure/run` 收尾内置两步——**观察提炼**（每个会话查游标，未被事件 span 覆盖的消息攒够 300 条才调第三方 LLM，产 0-N 条「信息点」：只收行为模式，不收个人档案/具体事件，不硬挖，0 条合法；上限单次 400 条切片）与**高相似合并**（观察向量 ≥0.90 聚组 → LLM 判定并写合并版，旧的标 superseded）。观察事件 `origin=observe`、无 cue、**自动召回走附加席**（每轮拿输入向量比对观察层 core 向量，宽松阈值 ≥0.35 命中至多 1 条，不占 3 席，渲染为「（印象浮现）」弱标注，记账 route=observe）；**判联判出 relation = 印证 → 自动转正**（`origin=affirmed`），判 neighbor/none 放着不动。观察落库即 fill turn_span，判联材料组装与翻原文零改动兼容。配置：`EMBER_OWNER_NAME`（用户称呼，注入提炼 prompt）、`executors.json` 的 `observe` / `observe_merge` 任务点。
 

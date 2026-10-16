@@ -368,6 +368,37 @@ class PrefixRenderTests(unittest.TestCase):
         self.assertNotIn("单线索", p)
         self.assertIn("多个线索同时指向", p)
 
+    def test_light_line_entity_member_uses_entity_name(self) -> None:
+        """成员事件的轻量行：entity summary 打头，member summary 退役。"""
+        estore = self.svc.entity_store
+        estore.upsert(Entity(entity_id="ent_x", name="漫画项目",
+                             summary="实体描述一句话。"))
+        estore.save()
+        _own(self.svc, "EVT-A", "ent_x")
+        p = self.svc._build_recall_prefix(
+            self.ctx, units=[{"kind": "event", "event_ids": ["EVT-A"],
+                              "light": True}])
+        self.assertIn("〈漫画项目〉名下的相关经历（EVT-A）", p)
+        self.assertNotIn("EVT-A 摘要", p)
+
+    def test_fallback_members_collapse_to_id_list(self) -> None:
+        """summary_fallback：成员收敛为 id 清单，entity summary 打头。"""
+        estore = self.svc.entity_store
+        estore.upsert(Entity(entity_id="ent_x", name="漫画项目",
+                             summary="实体描述一句话。"))
+        estore.save()
+        _own(self.svc, "EVT-A", "ent_x")
+        _own(self.svc, "EVT-B", "ent_x")
+        ctx = PresentationContext(
+            recalled_events=["EVT-A", "EVT-B"],
+            recall_trace=RecallTrace(input_text="x", anchors=[]))
+        p = self.svc._build_recall_prefix(
+            ctx, entity_hits=[_ehit("ent_x", "漫画项目")],
+            summary_fallback=True)
+        self.assertIn("关于〈漫画项目〉：实体描述一句话。", p)
+        self.assertIn("（名下经历：EVT-A、EVT-B）", p)
+        self.assertNotIn("EVT-A 摘要", p)
+
     def test_strong_dropped_hint(self) -> None:
         p = self.svc._build_recall_prefix(
             self.ctx, units=[{"kind": "event", "event_ids": ["EVT-A"]}],

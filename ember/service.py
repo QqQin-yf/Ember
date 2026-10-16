@@ -44,9 +44,7 @@ from .turn_span import TurnSpanStore, spans_from_quotes
 from . import source_client
 from . import executors
 from .cue_tighten import CueTightener
-from .prompts import (STRUCTURE_SYSTEM_PROMPT, build_structure_user_prompt,
-                      SUMMARY_SYSTEM_PROMPT, build_summary_user_prompt,
-                      OBSERVE_SYSTEM_PROMPT, build_observe_user_prompt,
+from .prompts import (OBSERVE_SYSTEM_PROMPT, build_observe_user_prompt,
                       OBSERVE_MERGE_PROMPT, build_observe_merge_user_prompt)
 from . import observe as observe_mod
 from .observe import ObserveCursor, verify_quotes
@@ -1033,9 +1031,25 @@ class EmberService:
                     continue
                 if (ent.summary or "").strip():
                     lines.append(f"关于〈{h.name}〉：{ent.summary.strip()}")
+            # 成员 summary 退役（2026-10-17 momo：entity summary 打头，
+            # 成员不单独抛头露面）——有归属且实体有描述的收敛为 id 清单
+            members = []
             for eid in ctx.recalled_events:
                 event = self.store.get_event(eid)
+                ent_ref = _event_entity_of(self.store, eid)
+                ent_summary = ""
+                if ent_ref:
+                    try:
+                        ent_summary = (self.entity_store.get(
+                            ent_ref).summary or "").strip()
+                    except KeyError:
+                        pass
+                if ent_ref and ent_summary:
+                    members.append(eid)
+                    continue
                 lines.append(f"- {event.summary}（{eid}）")
+            if members:
+                lines.append("（名下经历：" + "、".join(members) + "）")
             lines.append("如果对方想深入某一条，可以再具体问问——那时再展开原文，"
                          "或调用 read_memory_source(\"<event_id>\") 翻看。")
             lines.append("[记忆概览结束——自然地运用，不要机械复述本结构]")
@@ -1074,8 +1088,22 @@ class EmberService:
                 lines.append(f"  需要原话时可调用 read_memory_source(\"{eid}\")")
 
         def _light_line(eid: str) -> None:
-            """轻量续注一行（⑧ 在场去重）：2h 内已全量注入过，只报个到。"""
+            """轻量续注一行（⑧ 在场去重）：2h 内已全量注入过，只报个到。
+
+            实体成员不打 member summary（2026-10-17 momo：entity
+            summary 打头）——挂实体名；散事件维持自己的 summary。
+            """
             event = self.store.get_event(eid)
+            ent_ref = _event_entity_of(self.store, eid)
+            if ent_ref:
+                try:
+                    ent = self.entity_store.get(ent_ref)
+                except KeyError:
+                    ent = None
+                if ent is not None and (ent.summary or "").strip():
+                    lines.append(f"- （此前已浮现）〈{ent.name}〉名下的"
+                                 f"相关经历（{eid}）")
+                    return
             lines.append(f"- （此前已浮现）{event.summary}（{eid}）")
 
         if units is not None:
@@ -2372,15 +2400,18 @@ class EmberService:
 
     def _apply_entity_action(self, ent: dict, attach_event_ids: list[str],
                              prov: str) -> dict[str, Any]:
-        """归属动作落库（挂关系窗口判联与结构维护共用的 entity 段）。
+        """归属动作落库（2026-10-17 起归属全在窗口判联——glm structure
+        归属退役，momo：散事主题延续时召回自举，无需全库扫兜底）。
 
-        extract：开新户 + 散事件入户新实体；attach：事件单归属挂到
-        已有实体 + 收尾判定/起算点重置。校验由调用方完成，这里只做
-        幂等兜底（已归属的跳过不重挂）。
+        extract：开新户（当场带 summary）+ 散事件入户新实体；attach：
+        事件单归属挂到已有实体 + 当场改写实体 summary（窗口 AI 一手
+        材料）+ 收尾判定/起算点重置。校验由调用方完成，这里只做幂等
+        兜底（已归属的跳过不重挂）。summary 宽松：未输出/空 → 保旧值。
         """
         action = ent.get("action", "none")
         now = datetime.now(timezone.utc).astimezone().isoformat(
             timespec="seconds")
+        new_summary = (ent.get("summary") or "").strip()
         out: dict[str, Any] = {"entity_action": action}
         if action == "extract":
             e = Entity(
@@ -2388,6 +2419,8 @@ class EmberService:
                 name=(ent.get("name") or "").strip(),
                 aliases=[a.strip() for a in (ent.get("aliases") or [])
                          if a.strip()],
+                summary=new_summary,
+                summary_at=now if new_summary else "",
                 provenance_refs=[prov],
             )
             self.entity_store.upsert(e)
@@ -2399,8 +2432,6 @@ class EmberService:
             out["entity_action"] = (f"extract:{e.entity_id}({e.name})"
                                     f" x{len(patch)}")
             out["entity_id"] = e.entity_id
-            if patch:
-                self._summary_dirty_add(e.entity_id)
         elif action == "attach":
             target = ent.get("entity_id") or ""
             ids = [eid for eid in dict.fromkeys(attach_event_ids)
@@ -2408,7 +2439,6 @@ class EmberService:
             if ids:
                 self._patch_event_rows(
                     {eid: {"entity_refs": [target]} for eid in ids})
-                self._summary_dirty_add(target)
             out["entity_action"] = f"attach:{target}"
             out["members_patched"] = len(ids)
             # attach 顺带判目标实体收尾（momo 2026-10-09 裁决，照脚本）
@@ -2420,6 +2450,13 @@ class EmberService:
             except KeyError:
                 target_ent = None
             if target_ent is not None:
+                # attach 当场改写实体 summary（2026-10-17 momo：夜批重算退役）
+                if new_summary:
+                    target_ent.summary = new_summary
+                    target_ent.summary_at = now
+                    self.entity_store.upsert(target_ent)
+                    self.entity_store.save()
+                    out["summary_rewritten"] = True
                 if close:
                     if target_ent.status == "open":
                         target_ent.close(now)
@@ -2433,85 +2470,6 @@ class EmberService:
                     self.entity_store.save()
                     out["attach_reset_closed_at"] = target_ent.closed_at
         return out
-
-    def _apply_structure_assignments(self, verdict: dict,
-                                     stray_ids: set[str],
-                                     library_ids: set[str]) -> tuple[list,
-                                                                     list]:
-        """结构维护 verdict 逐条校验 + 落库（单条拒绝不炸整批）。
-
-        校验基于本次散事件清单（清单外 = 幻觉，拒绝该条）；实体目标
-        必须在清单里给过的实体库内；同批一个事件只允许被认领一次
-        （单归属铁律）。
-        """
-        saved: list[dict] = []
-        rejected: list[dict] = []
-        claimed: set[str] = set()
-        names_used: set[str] = set()
-        try:
-            existing_names = {e.name.strip().lower()
-                              for e in self.entity_store.all()}
-        except Exception:  # noqa: BLE001
-            existing_names = set()
-        assignments = verdict.get("assignments")
-        if not isinstance(assignments, list):
-            return saved, [{"action": "?",
-                            "errors": ["assignments 缺失或不是列表"]}]
-        for a in assignments:
-            if not isinstance(a, dict):
-                rejected.append({"action": "?",
-                                 "errors": ["assignment 不是对象"]})
-                continue
-            action = a.get("action")
-            if action == "extract":
-                errs: list[str] = []
-                name = (a.get("name") or "").strip()
-                members = list(dict.fromkeys(
-                    a.get("member_event_ids") or []))
-                if not name:
-                    errs.append("extract 缺 name")
-                elif (name.lower() in existing_names
-                      or name.lower() in names_used):
-                    errs.append(f"extract name 重复: {name}")
-                if len(members) < 3:
-                    errs.append(f"extract member 不足 3: {len(members)}")
-                for mid in members:
-                    if mid not in stray_ids:
-                        errs.append(f"member 不在本次散事件清单: {mid}")
-                    elif mid in claimed:
-                        errs.append(f"member 已被认领（单归属）: {mid}")
-                if errs:
-                    rejected.append({"action": action, "name": name,
-                                     "errors": errs})
-                    continue
-                names_used.add(name.lower())
-                claimed.update(members)
-                out = self._apply_entity_action(a, [], "sleep-structure")
-                saved.append({"action": action, "name": name, **out})
-            elif action == "attach":
-                errs = []
-                target = a.get("entity_id") or ""
-                ids = list(dict.fromkeys(a.get("event_ids") or []))
-                if target not in library_ids:
-                    errs.append(f"attach 目标不在实体库: {target}")
-                if not ids:
-                    errs.append("attach 缺 event_ids")
-                for eid in ids:
-                    if eid not in stray_ids:
-                        errs.append(f"event 不在本次散事件清单: {eid}")
-                    elif eid in claimed:
-                        errs.append(f"event 已被认领（单归属）: {eid}")
-                if errs:
-                    rejected.append({"action": action, "entity_id": target,
-                                     "errors": errs})
-                    continue
-                claimed.update(ids)
-                out = self._apply_entity_action(a, ids, "sleep-structure")
-                saved.append({"action": action, "entity_id": target, **out})
-            else:
-                rejected.append({"action": action,
-                                 "errors": [f"action 非法: {action}"]})
-        return saved, rejected
 
     def _observe_extra_hit(self, text: str,
                            exclude: set[str]) -> str | None:
@@ -2755,45 +2713,15 @@ class EmberService:
         return eid
 
     def run_structure_maintenance(self) -> dict[str, Any]:
-        """结构维护：散事件归属（第三方 LLM 判定）+ 旧 cue 收紧
-        + 实体 summary 夜批重算。
+        """睡眠收尾维护（2026-10-17 重构）：cue 收紧 + 向量补建
+        + 观察提炼与合并。
 
-        双 LLM 路线（momo 2026-10-14 拍板）：正主只判联，归属判定
-        外包第三方 LLM（task="structure"，engine 走 executors.json）。
-        summary 重算（task="summary"）：白天挂关系/结构维护里发生过
-        归属变更（extract/attach）的实体记入脏标记，收尾统一重算——
-        材料只含未被推翻的成员事件（superseded 的认知不进名片）。
-        app 编排在挂关系清完之后调用（顺序契约见 API.md）。
-        无散事件时跳过 LLM 只跑收紧与重算；幂等——已归属的自动出清单。
+        归属判定（extract/attach + entity summary 当场写改）已全部
+        收编窗口判联（momo：散事主题延续时召回自举，glm 全库扫兜底
+        退役；夜批 summary 重算与脏标记一并退役）。
+        app 编排在挂关系清完之后调用（顺序契约见 API.md）。幂等。
         """
-        strays = [ev for ev in self.store.all_events()
-                  if not _event_entity_of(self.store, ev.event_id)]
-        stray_mats = [{"event_id": ev.event_id, "core": ev.core or "",
-                       "summary": ev.summary or ""} for ev in strays]
-        report: dict[str, Any] = {"strays_total": len(stray_mats),
-                                  "saved": [], "rejected": [],
-                                  "cue_tighten": None}
-        touched: set[str] = self._summary_dirty_take()
-        if stray_mats:
-            ents = [{"entity_id": e.entity_id, "name": e.name,
-                     "status": e.status, "summary": e.summary or ""}
-                    for e in self.entity_store.all()]
-            user = build_structure_user_prompt(stray_mats, ents)
-            engine = executors.load_engine(
-                getattr(self.store, "root", ""), "structure")
-            text = executors.call_llm(STRUCTURE_SYSTEM_PROMPT, user, engine,
-                                      task="structure")
-            saved, rejected = self._apply_structure_assignments(
-                _parse_llm_json(text),
-                {m["event_id"] for m in stray_mats},
-                {e["entity_id"] for e in ents})
-            report["saved"] = saved
-            report["rejected"] = rejected
-            for s in saved:
-                eid = s.get("entity_id")
-                if eid:
-                    touched.add(eid)
-        report["summary"] = self._refresh_entity_summaries(touched)
+        report: dict[str, Any] = {"cue_tighten": None}
         report["vector_backfill"] = self._backfill_vectors()
         report["cue_tighten"] = CueTightener(
             self.store, self.recall_ledger,
@@ -2835,99 +2763,3 @@ class EmberService:
                 added["failed"] += 1
         return added
 
-    # ---------- 实体 summary 夜批（2026-10-15 momo 拍板：提炼式重算） ----------
-    #
-    # 生产方（此前一直空转）：Entity.summary 的消费方早就在（召回渲染
-    # 「关于〈X〉：」、briefing 实体行），summary 任务点配置也齐全，
-    # 缺的只是编排——归属变更打脏标记，structure/run 收尾夜批重算。
-
-    SUMMARY_DIRTY_FILE = "summary_dirty.jsonl"
-
-    def _summary_dirty_path(self) -> str:
-        return os.path.join(self.store.root, self.SUMMARY_DIRTY_FILE)
-
-    def _summary_dirty_add(self, entity_id: str) -> None:
-        with open(self._summary_dirty_path(), "a", encoding="utf-8") as f:
-            f.write(json.dumps({"entity_id": entity_id}) + "\n")
-
-    def _summary_dirty_take(self) -> set[str]:
-        """读出并清空脏标记（夜批消费；空文件/不存在 → 空集）。"""
-        p = self._summary_dirty_path()
-        if not os.path.exists(p):
-            return set()
-        out: set[str] = set()
-        with open(p, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    eid = json.loads(line).get("entity_id")
-                except json.JSONDecodeError:
-                    continue
-                if eid:
-                    out.add(eid)
-        if out:
-            os.remove(p)
-        return out
-
-    def _entity_active_member_cores(self, entity_id: str) -> list[str]:
-        """实体名下未被推翻成员事件的 core（summary 重算材料）。
-
-        superseded 的事件不进材料——被推翻的认知不进名片
-        （momo 2026-10-15：概括未被推翻的 event）。
-        """
-        cores: list[str] = []
-        for ev in self.store.all_events():
-            if _event_entity_of(self.store, ev.event_id) != entity_id:
-                continue
-            if self.sleep_state.status_of(ev.event_id) == "superseded":
-                continue
-            c = ev.core or ev.summary or ""
-            if c:
-                cores.append(c)
-        return cores
-
-    def _refresh_entity_summaries(self, touched: set[str]) -> dict[str, Any]:
-        """夜批重算触碰过的实体 summary（task="summary"）。
-
-        单实体失败不牵连整批（报告如实记 errors）；材料 = 名下全部
-        未被推翻成员的 core；无成员材料（如成员全被推翻）跳过。
-        """
-        if not touched:
-            return {"updated": [], "failed": []}
-        engine = executors.load_engine(
-            getattr(self.store, "root", ""), "summary")
-        now = datetime.now(timezone.utc).astimezone().isoformat(
-            timespec="seconds")
-        updated: list[dict] = []
-        failed: list[dict] = []
-        for eid in sorted(touched):
-            try:
-                ent = self.entity_store.get(eid)
-            except KeyError:
-                continue
-            cores = self._entity_active_member_cores(eid)
-            if not cores:
-                continue
-            user = build_summary_user_prompt(ent.name, ent.summary or "",
-                                             cores)
-            try:
-                text = executors.call_llm(
-                    SUMMARY_SYSTEM_PROMPT, user, engine, task="summary")
-                new_summary = (_parse_llm_json(text).get("summary")
-                               or "").strip()
-            except Exception as exc:  # noqa: BLE001 — 单实体失败不牵连
-                failed.append({"entity_id": eid, "error": str(exc)[:160]})
-                continue
-            if not new_summary:
-                failed.append({"entity_id": eid, "error": "空 summary"})
-                continue
-            ent.summary = new_summary
-            ent.summary_at = now
-            self.entity_store.upsert(ent)
-            updated.append({"entity_id": eid, "name": ent.name,
-                            "chars": len(new_summary)})
-        if updated:
-            self.entity_store.save()
-        return {"updated": updated, "failed": failed}

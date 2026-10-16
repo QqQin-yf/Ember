@@ -69,9 +69,9 @@
 - 这批事件（新+旧）围绕同一个对象/主题；
 - 其中尚无实体归属的散事件 ≥3 条；
 - 这个对象不是材料中任何已有实体的子题（若是，不提取，改用 attach）。
-输出：name（从事件原文提炼，必须是专名，不用普通词汇）、aliases（对话中真实出现过的其他称呼，照原文）、一句话说明、member_event_ids（只列尚无归属的散事件，已归属的不进）。
+输出：name（从事件原文提炼，必须是专名，不用普通词汇）、aliases（对话中真实出现过的其他称呼，照原文）、一句话说明、member_event_ids（只列尚无归属的散事件，已归属的不进）、summary（这个实体的第一版描述：三到六句，像一张名片——它是什么、包括哪些方面、目前状态；是提炼不是汇编，不按事件罗列、不写变化过程）。
 
-二、attach（归入已有实体）——新记忆讲的正是某条旧记忆所属实体的事时使用：输出该实体的 id。只有新记忆尚无归属时才可用。归入时顺带判断目标实体是否已经收尾（相关的事做完、结束或明确不再继续）：收尾了输出 "close": true 和一句话 close_reason；还活跃或拿不准就 "close": false。
+二、attach（归入已有实体）——新记忆讲的正是某条旧记忆所属实体的事时使用：输出该实体的 id。只有新记忆尚无归属时才可用。归入时当场改写实体描述：对照名下全部成员输出新的 summary（三到六句，同名片标准）；并顺带判断目标实体是否已经收尾（相关的事做完、结束或明确不再继续）：收尾了输出 "close": true 和一句话 close_reason；还活跃或拿不准就 "close": false。
 
 三、none（不做归属动作）——主题不聚焦，或只是跨主题的零星联系。不提取也不归入时什么都不输出，事件保持散着。
 
@@ -91,6 +91,7 @@
     "name": "仅 extract 时填",
     "aliases": ["仅 extract 时填"],
     "description": "仅 extract 时填，一句话",
+    "summary": "仅 extract/attach 时填：实体描述（立户首版 / 对照全部成员的改写版）",
     "member_event_ids": ["仅 extract 时填"],
     "entity_id": "仅 attach 时填，目标已有实体",
     "close": "仅 attach 时填：true / false",
@@ -116,11 +117,17 @@
 
 ### entity（整份材料一个对象，`action` 三选一）
 
+> **2026-10-17 起 entity summary 由窗口 AI 当场写改**（glm 结构维护
+> 归属与夜批重算退役）：`summary` 字段加入 verdict——extract 必填
+> （实体第一版描述，3-6 句，像名片、不写变化过程）、attach 必填
+> （对照名下全部成员的改写版）。宽松校验：未输出/空 → 实体保旧值，
+> 不拒整份。散事件主题延续时召回自举（同话题必然浮起），无需全库扫。
+
 | action | 必填 | 硬校验 |
 |---|---|---|
 | `none` | 无 | 不输出其他字段 |
-| `extract` | `name`、`aliases`、`description`、`member_event_ids` | `name` 不得与库中已有实体重名（大小写不敏感）；`member_event_ids` **≥3 条**且每条必须是**尚无归属的散事件**；名单不含已有归属的事件 |
-| `attach` | `entity_id`、`close`（`close=true` 时加 `close_reason`） | `entity_id` 必须是**材料内某条旧事件标注的 `entity_id`**；新事件已有归属则不能 attach（单归属铁律）；`close` 取 `true`/`false`（字符串 `"true"`/`"false"` 也收） |
+| `extract` | `name`、`aliases`、`description`、`summary`、`member_event_ids` | `name` 不得与库中已有实体重名（大小写不敏感）；`member_event_ids` **≥3 条**且每条必须是**尚无归属的散事件**；名单不含已有归属的事件 |
+| `attach` | `entity_id`、`summary`、`close`（`close=true` 时加 `close_reason`） | `entity_id` 必须是**材料内某条旧事件标注的 `entity_id`**；新事件已有归属则不能 attach（单归属铁律）；`close` 取 `true`/`false`（字符串 `"true"`/`"false"` 也收） |
 
 ### 常见拒绝原因速查
 

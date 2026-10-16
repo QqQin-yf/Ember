@@ -22,7 +22,6 @@ from ember import executors  # noqa: E402
 
 
 GLM_ALL = {"judge": "glm", "split": "glm", "mount": "glm",
-           "summary": "glm", "structure": "glm",
            "observe": "glm", "observe_merge": "glm"}
 
 
@@ -38,10 +37,9 @@ class TestLoadExecutors(unittest.TestCase):
 
     def test_normal_read(self):
         out = self._read(json.dumps({"judge": "qwen3", "split": "glm",
-                                     "mount": "qwen3", "summary": "glm"}))
+                                     "mount": "qwen3", "observe": "glm"}))
         self.assertEqual(out, {"judge": "qwen3", "split": "glm",
-                               "mount": "qwen3", "summary": "glm",
-                               "structure": "glm",
+                               "mount": "qwen3",
                                "observe": "glm", "observe_merge": "glm"})
 
     def test_missing_file_falls_back_to_glm(self):
@@ -58,7 +56,7 @@ class TestLoadExecutors(unittest.TestCase):
         self.assertEqual(out["judge"], "glm")   # 未知 engine → glm
         self.assertEqual(out["split"], "glm")   # 大小写敏感 → glm
         self.assertEqual(out["mount"], "qwen3") # 合法值保留
-        self.assertEqual(out["summary"], "glm") # 缺项 → glm
+        self.assertEqual(out["observe"], "glm") # 缺项 → glm
 
     def test_extra_tasks_ignored(self):
         out = self._read(json.dumps({"judge": "glm", "chat": "qwen3"}))
