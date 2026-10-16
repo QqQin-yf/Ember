@@ -1782,8 +1782,10 @@ class EmberService:
         """单份挂关系材料（sleep_v2.assemble_materials 的 service 版）。
 
         候选 = 该事件 turn_span 区间 ∩ 召回记账带出的旧事件；排除
-        superseded/outdated 与判过留痕 pair；无 span / 无 session /
-        无候选 → None（诚实跳过，不冒充不编造）。
+        superseded/outdated 与判过留痕 pair。候选空 ≠ 没活干（2026-10-16
+        方案 A，momo 拍板）：照出空材料（old_events=[]，窗口 AI 只做
+        归属动作）——否则空库冷启动/全新话题会卡死 pending。
+        仅数据异常（无 span / 无 session）→ None（诚实跳过）。
         """
         try:
             ev = self.store.get_event(eid)
@@ -1807,8 +1809,7 @@ class EmberService:
             if self.pair_seen.is_seen(eid, oid):
                 continue
             old_ids.append(oid)
-        if not old_ids:
-            return None
+        # 候选空照常出材料（方案 A）：pairs 给空，窗口 AI 只判归属
 
         def _ent_info(oid: str) -> tuple[str, str]:
             ref = _event_entity_of(self.store, oid)
@@ -1829,8 +1830,6 @@ class EmberService:
             olds.append({"event_id": oid, "entity_name": name,
                          "entity_id": ref, "core": oe.core or "",
                          "summary": oe.summary or ""})
-        if not olds:
-            return None
         ent_ref = _event_entity_of(self.store, eid)
         try:
             ent_name = (self.entity_store.get(ent_ref).name

@@ -65,6 +65,25 @@ class LinkRelationsTests(unittest.TestCase):
     def _batches(self) -> dict:
         return self.svc.sidecar_link_batches()
 
+    def test_empty_candidates_material_cold_start(self) -> None:
+        """空库冷启动（方案 A）：候选空 → 照出空材料；交卷后 pending 清。"""
+        _add(self.svc, "EVT-COLD", 5)
+        self.svc.turn_spans.fill("EVT-COLD", [(5, 5)], filled_by="test")
+        self.svc.link_pending_add("EVT-COLD")
+        out = self._batches()
+        mats = [m for b in out["batches"] for m in b["materials"]]
+        cold = next(m for m in mats if m["new_id"] == "EVT-COLD")
+        self.assertEqual(cold["old_events"], [])      # 没浮起记录 → 空候选
+        # 交卷：pairs 空数组 + entity none → 落库成功、pending 扣减
+        sub = self.svc.sidecar_link_submit({
+            "results": [{"material": cold,
+                         "verdict": {"pairs": [],
+                                     "entity": {"action": "none"}}}]})
+        self.assertEqual(len(sub["saved"]), 1)
+        self.assertEqual(sub["rejected"], [])
+        self.assertNotIn("EVT-COLD", sub["remaining_pending"])
+        self.assertIn("EVT-NEW", sub["remaining_pending"])  # 未交的还在
+
     def test_batches_material_shape(self) -> None:
         """接口 1：材料含新事件 + 候选旧事件（带实体位），pending 不扣。"""
         out = self._batches()
