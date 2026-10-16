@@ -222,39 +222,69 @@ def _parse_llm_json(text: str) -> dict:
 
 def select_recall_units(recalled_events: list[str], anchors: list,
                         entity_hits: list, resolved_brought: list,
-                        store, seats: int = 3):
-    """置信分组与名额（2026-10-14 定稿）——召回注入的选取器。
+                        store, seats: int = 3,
+                        now: datetime | None = None):
+    """多源共证与名额（2026-10-15 设计夜定稿）——召回注入的选取器。
 
-    组 1（确定性）：路①实体区域命中 / 路②lexical 字面命中
-    组 2（概率）：路③semantic 向量过阈命中
-    组内排序：命中路数 desc → 时间 desc（significance 数值化待定）
-    名额：组 1 优先填满 seats 席，组 2 只补空位；实体块整体占 1 席。
-    凑不满不强凑：过门槛剩几条注几条，一条没有就真的没有。
-    修正者继承被修正者的命中资格（B 因 A 而来）。
-
-    单元：{"kind": "entity_block"|"event", "entity_id", "event_ids",
-           "route_count", "group"}——实体块 = 概览 + 名下事件捆绑。
-    返回 (selected_units, dropped_by_seats)。
+    可及方式按「源」计数（momo：路按源数不按锚数）：cue（lexical/
+    semantic 同属 cue 源）/ entity（direction 并入实体路）。
+    主席资格（三选一）：
+      - 双源共证：route_count ≥ 2
+      - 修正者顶上：relation 路不受限（跟随命中即共证）
+      - 新生豁免：写入 48h 内（豁免新生在主席内限 2 席，超额落池）
+    单源 → 弱信号池：席位富余才补（补位标 weak=True），没补上的落选。
+    排序键 = (-源数, -cue数, -新旧)：锚数（去重 cue 文本数，修正者继承/
+    实体块取成员并集）只做排序优先级——弱池内多 cue 命中优先补位，
+    同源数的主席单元多 cue 者前；资格永远只看源数（momo 10-16 拍板）。
+    实体块块级资格（块内并集源数 ≥2），整块 1 席。
+    返回 (selected_units, stats)：
+      stats = {"dropped_by_seats": 总落选, "weak_pooled": 弱信号未补,
+               "strong_dropped": 共证却被挤出（≥2 源，驱动注入尾部提示）}
+    selected 里弱信号补位的 unit 带 weak=True。
     """
+    FRESH_HOURS = 48
+    FRESH_SEATS_MAX = 2
+
+    now = now or datetime.now(timezone.utc).astimezone()
     entity_hit_ids = {h.entity_id for h in entity_hits}
     hit_matchers: dict[str, set[str]] = {}
+    hit_cues: dict[str, set[str]] = {}
     for h in anchors:
         hit_matchers.setdefault(h.event_id, set()).add(h.matcher)
+        hit_cues.setdefault(h.event_id, set()).add(h.cue)
     resolved_src = dict(resolved_brought or [])  # 修正者 -> 被修正者
 
-    def _flags(eid: str) -> dict[str, bool]:
+    def _hits_union(eid: str) -> set[str]:
+        """命中该事件的 matcher 并集；修正者继承被修正者的命中。"""
         src = resolved_src.get(eid)
-        union = (hit_matchers.get(eid, set())
-                 | (hit_matchers.get(src, set()) if src else set()))
-        f = {"entity": False,
-             "lexical": "lexical" in union,
-             "semantic": "semantic" in union}
+        return (hit_matchers.get(eid, set())
+                | (hit_matchers.get(src, set()) if src else set()))
+
+    def _cues_of(eid: str) -> set[str]:
+        """命中该事件的 cue 文本集；修正者继承被修正者的 cue。"""
+        src = resolved_src.get(eid)
+        return (hit_cues.get(eid, set())
+                | (hit_cues.get(src, set()) if src else set()))
+
+    def _sources(eid: str) -> set[str]:
+        """点亮该事件的可及源（cue/entity，同源合并）。"""
+        s = set()
+        if _hits_union(eid):
+            s.add("cue")
         if _event_entity_of(store, eid) in entity_hit_ids:
-            f["entity"] = True
-        return f
+            s.add("entity")
+        return s
+
+    def _is_fresh(eid: str) -> bool:
+        ts = _event_ingest_ts(store, eid)
+        if not ts:
+            return False
+        return 0 <= (now.timestamp() - ts) / 3600.0 < FRESH_HOURS
 
     def _unit_key(u: dict):
-        return (-u["route_count"],
+        # 锚数（cue 文本数）只做排序优先级，永不影响资格（momo 10-16 拍板）：
+        # 资格看源数（防锚数灌水），排序看锚数（多 cue 共撞=更相关）
+        return (-u["route_count"], -u.get("cue_count", 0),
                 -max(_event_ingest_ts(store, e) for e in u["event_ids"]))
 
     units: list[dict] = []
@@ -270,25 +300,67 @@ def select_recall_units(recalled_events: list[str], anchors: list,
                 block_of_entity[ent] = blk
             blk["event_ids"].append(eid)
         else:
-            f = _flags(eid)
-            rc = sum((f["entity"], f["lexical"], f["semantic"]))
-            group = 1 if (f["entity"] or f["lexical"]) else 2
+            srcs = _sources(eid)
+            union = _hits_union(eid)
+            group = 1 if ("entity" in srcs
+                          or "lexical" in union) else 2
             units.append({"kind": "event", "event_ids": [eid],
-                          "route_count": rc, "group": group})
+                          "route_count": len(srcs), "group": group,
+                          "cue_count": len(_cues_of(eid)),
+                          "resolved": eid in resolved_src,
+                          "fresh": _is_fresh(eid)})
     for blk in units:
         if blk["kind"] != "entity_block":
             continue
-        sub = [_flags(e) for e in blk["event_ids"]]
-        blk["route_count"] = (1
-                              + (1 if any(f["lexical"] for f in sub) else 0)
-                              + (1 if any(f["semantic"] for f in sub) else 0))
+        all_srcs: set[str] = set()
+        all_cues: set[str] = set()
+        for e in blk["event_ids"]:
+            all_srcs |= _sources(e)
+            all_cues |= _cues_of(e)
+        blk["route_count"] = len(all_srcs)
+        blk["cue_count"] = len(all_cues)
+        blk["fresh"] = any(_is_fresh(e) for e in blk["event_ids"])
 
-    g1 = sorted((u for u in units if u["group"] == 1), key=_unit_key)
-    g2 = sorted((u for u in units if u["group"] == 2), key=_unit_key)
+    # ---- 资格判定与席位 ----
+    def _qualify(u: dict) -> str:
+        if u["kind"] == "event" and u.get("resolved"):
+            return "resolved"
+        if u["route_count"] >= 2:
+            return "multisource"
+        if u.get("fresh"):
+            return "fresh"
+        return "weak"
+
+    for u in units:
+        u["_why"] = _qualify(u)
+    qualified = [u for u in units if u["_why"] != "weak"]
+    weak = [u for u in units if u["_why"] == "weak"]
+    g1 = sorted((u for u in qualified if u["group"] == 1), key=_unit_key)
+    g2 = sorted((u for u in qualified if u["group"] == 2), key=_unit_key)
     selected = list(g1[:seats])
     selected += g2[:max(0, seats - len(selected))]
-    dropped = len(units) - len(selected)
-    return selected, dropped
+    weak = sorted(weak, key=_unit_key)
+
+    # 新生限额：主席内豁免新生超额的挪到弱信号池头部（优先回补）
+    fresh_sel = [u for u in selected if u["_why"] == "fresh"]
+    overflow = fresh_sel[FRESH_SEATS_MAX:]
+    if overflow:
+        selected = [u for u in selected if u not in overflow]
+        weak = overflow + weak
+
+    # 弱信号补位（席位富余才补）
+    still = seats - len(selected)
+    take, weak_pooled = weak[:still], weak[still:]
+    for u in take:
+        u["weak"] = True
+    selected += take
+
+    strong_dropped = len([u for u in qualified if u not in selected
+                          and (u["route_count"] >= 2 or u.get("resolved"))])
+    stats = {"dropped_by_seats": len(units) - len(selected),
+             "weak_pooled": len(weak_pooled),
+             "strong_dropped": strong_dropped}
+    return selected, stats
 
 
 class EmberService:
@@ -609,14 +681,29 @@ class EmberService:
                 if ev.raw_ref not in recalled_ctx.source_refs:
                     recalled_ctx.source_refs.append(ev.raw_ref)
 
-        # ---- 置信分组与名额（2026-10-14 定稿）----
-        # 组 1（确定性）：路①实体区域 / 路②lexical；组 2（概率）：路③semantic 过阈
-        # 组 1 优先填满 3 席，组 2 补位；实体块整体占 1 席；凑不满不强凑
-        selected_units, dropped_by_seats = select_recall_units(
+        # ---- 多源共证与名额（2026-10-15 设计夜定稿）----
+        # 主席=双源共证/修正者顶上/新生豁免（限 2）；单源落弱信号池
+        # （席位富余才补，浮出标注）；强落选驱动注入尾部检索提示
+        selected_units, gate_stats = select_recall_units(
             recalled_ctx.recalled_events, recalled_ctx.recall_trace.anchors,
             entity_hits, resolved_brought, self.store)
         recalled_ctx.recalled_events = [
             eid for u in selected_units for eid in u["event_ids"]]
+
+        # ---- 在场去重（⑧）：本会话 2h 内已全量注入过的 → 轻量续注 ----
+        for u in selected_units:
+            last = max((self.recall_ledger.last_injected.get(
+                            (session.session_id, e), "")
+                        for e in u["event_ids"]), default="")
+            if last:
+                try:
+                    age_h = (datetime.now(timezone.utc).astimezone()
+                             - datetime.fromisoformat(last).astimezone()
+                             ).total_seconds() / 3600.0
+                    if age_h < 2.0:
+                        u["light"] = True
+                except ValueError:
+                    pass
 
         # 召回记账（10-08 定稿 §3.2）：三段通路各记一行，供 Sleep 候选组装
         # 与旧 Cue 收紧消费。名额截断后记账——记的是真正注入前缀的 event。
@@ -631,7 +718,8 @@ class EmberService:
                 resolved_brought=resolved_brought,
                 summary_fallback=summary_fallback,
                 direction_focused=direction_focused,
-                units=selected_units)
+                units=selected_units,
+                strong_dropped=gate_stats["strong_dropped"])
 
         return {
             "prefix": prefix,
@@ -640,7 +728,9 @@ class EmberService:
             "entity_names": [h.name for h in entity_hits],
             "filtered_by_sleep": len(excluded),
             "filtered_by_window": len(window_excluded),
-            "dropped_by_seats": dropped_by_seats,
+            "dropped_by_seats": gate_stats["dropped_by_seats"],
+            "weak_pooled": gate_stats["weak_pooled"],
+            "strong_dropped": gate_stats["strong_dropped"],
             "resolved_brought": [dst for dst, _ in resolved_brought],
             "direction_focused": direction_focused,
             "direction_reason": direction_reason,
@@ -889,21 +979,22 @@ class EmberService:
                              resolved_brought: list[tuple[str, str]] | None = None,
                              summary_fallback: bool = False,
                              direction_focused: str | None = None,
-                             units: list[dict] | None = None) -> str:
+                             units: list[dict] | None = None,
+                             strong_dropped: int = 0) -> str:
         """结构化前缀块：被唤起的记忆挂在用户消息前面（momo 裁决格式）。
 
         指向强度分层（momo 2026-10-01 裁决：无 must/may，纯运行时聚合）：
         - Entity 明确指向 → 整个区域带出，标注"因提到〈实体名〉想起"
         - Direction 聚焦（10-05 通电）→ 标注从哪个方向进入
-        - 多触点共命中（multi_cue >= 2）→ 强指向
-        - 单触点 → 弱联想
+        - 多源共证（多路命中）→ 强指向；单线索补位 → 弱标注
         - Relation 带回（v1）→ 标注"旧观点已被新认知取代"
         summary_fallback（momo 10-04 裁决）：Direction 模糊/低分时不做
         全文注入，降级为 Entity 层 summary——事件摘要 + id，留主动检索入口。
 
-        置信分组呈现（2026-10-14 定稿）：units 非空时按名额选中后的
+        多源共证呈现（2026-10-15 设计夜定稿）：units 非空时按名额选中后的
         单元序列渲染——实体块（概览+名下事件捆绑）在前、独立事件在后；
-        units=None 时按旧平铺逻辑（兼容观察路径）。
+        弱信号补位标「单线索」；在场去重（⑧）轻量续注只出一行；
+        strong_dropped > 0 时尾部给检索提示。units=None 按旧平铺逻辑。
         """
         entity_names = [h.name for h in (entity_hits or [])]
         resolved_map = dict(resolved_brought or [])
@@ -962,9 +1053,15 @@ class EmberService:
             else:
                 lines.append(f"  需要原话时可调用 read_memory_source(\"{eid}\")")
 
+        def _light_line(eid: str) -> None:
+            """轻量续注一行（⑧ 在场去重）：2h 内已全量注入过，只报个到。"""
+            event = self.store.get_event(eid)
+            lines.append(f"- （此前已浮现）{event.summary}（{eid}）")
+
         if units is not None:
-            # 置信分组呈现（2026-10-14 定稿）：实体块捆绑在前，
-            # 独立事件随后；块 = 「关于〈X〉：概览」+ 名下事件行
+            # 多源共证呈现（2026-10-15 设计夜定稿）：实体块捆绑在前，
+            # 独立事件随后；块 = 「关于〈X〉：概览」+ 名下事件行；
+            # light unit（2h 内已注入）只出一行；weak 补位标「单线索」
             entity_by_id = {h.entity_id: h for h in (entity_hits or [])}
             lead_blocks = [u for u in units if u["kind"] == "entity_block"]
             if lead_blocks:
@@ -978,6 +1075,17 @@ class EmberService:
                     lead += f"（沿着「{line_label}」这条线）"
                 lines.append(lead + "：")
             for u in units:
+                if u.get("light"):
+                    # 在场去重：近期已全量注入，轻量续注防唠叨
+                    if u["kind"] == "entity_block":
+                        h = entity_by_id.get(u["entity_id"])
+                        if h is not None:
+                            lines.append(f"- （此前已浮现）〈{h.name}〉名下的 "
+                                         f"{len(u['event_ids'])} 条经历，"
+                                         "需要细节按 id 检索")
+                    else:
+                        _light_line(u["event_ids"][0])
+                    continue
                 if u["kind"] == "entity_block":
                     h = entity_by_id.get(u["entity_id"])
                     if h is not None:
@@ -991,10 +1099,17 @@ class EmberService:
                     for eid in u["event_ids"]:
                         _event_line(eid)
                 else:
+                    if u.get("weak") and u.get("cue_count", 0) <= 1:
+                        # 多 cue 弱补位不加此行：事件行的强度标注
+                        # （「多个线索同时指向」）已说明指向强度
+                        lines.append("- （单线索浮现，可能只是沾边）")
                     _event_line(u["event_ids"][0])
         else:
             for eid in ctx.recalled_events:
                 _event_line(eid)
+        if strong_dropped > 0:
+            lines.append(f"（另有 {strong_dropped} 条高度相关的记忆因名额"
+                         "未展示——需要时可用 search_memory 按话题取回）")
         lines.append("[记忆结束——自然地运用它们，不要机械复述本结构]")
         return "\n".join(lines) + "\n\n"
 

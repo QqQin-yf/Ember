@@ -58,6 +58,9 @@ class RecallLedger:
         # 最后提取时间（提取 = 召回 ∪ 检索，route 不限）——所有遗忘
         # 计时器（收紧闲置/faded 30 天/活跃门 72h）的唯一时钟
         self.last_extracted: dict[str, str] = {}
+        # 注入在场（⑧ 在场去重）：(session_id, event_id) -> 最后注入时刻
+        # ——记账行即注入事实（名额截断后记账），2h 内已注入不重复全文
+        self.last_injected: dict[tuple[str, str], str] = {}
         self._load()
 
     def _path(self) -> str:
@@ -84,11 +87,16 @@ class RecallLedger:
             return
         self.by_turn.setdefault(key, []).append(d)
         at = d.get("recorded_at") or ""
+        sid = key[0]
         for eid in d.get("event_ids", []):
             self.event_recall_count[eid] = self.event_recall_count.get(eid, 0) + 1
             prev = self.last_extracted.get(eid) or ""
             if at > prev:   # ISO 串字典序 = 时间序（同时区）
                 self.last_extracted[eid] = at
+            ikey = (sid, eid)
+            iprev = self.last_injected.get(ikey) or ""
+            if at > iprev:
+                self.last_injected[ikey] = at
         cue = d.get("cue")
         if d.get("route") == "cue" and cue:
             # 同一轮同一 cue 只算一次使用（多 event 共命中时该 cue 可能出现多行）

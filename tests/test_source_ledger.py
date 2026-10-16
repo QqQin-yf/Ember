@@ -78,7 +78,7 @@ def _sel_ids(units: list[dict]) -> list[str]:
 
 
 class RecallSeatTests(unittest.TestCase):
-    """置信分组与名额（2026-10-14 定稿）：组 1 优先、组 2 补位、上限 3。"""
+    """多源共证与名额（2026-10-15 定稿）：排序/组序/块捆绑/不硬凑。"""
 
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -113,11 +113,11 @@ class RecallSeatTests(unittest.TestCase):
         return row
 
     def test_deterministic_beats_semantic(self) -> None:
-        # 组 1（lexical）优先填满：A 组 1、B/C 组 2 → 全进但 A 第一
+        # 组 1（lexical）先于组 2（semantic）：A/B/C 均单源弱补位，A 居首
         self._add("EVT-A")
         self._add("EVT-B")
         self._add("EVT-C")
-        units, dropped = select_recall_units(
+        units, stats = select_recall_units(
             ["EVT-A", "EVT-B", "EVT-C"],
             [_hit("EVT-A", "lexical"), _hit("EVT-B", "semantic"),
              _hit("EVT-C", "semantic")],
@@ -125,46 +125,51 @@ class RecallSeatTests(unittest.TestCase):
         ids = _sel_ids(units)
         self.assertEqual(ids[0], "EVT-A")
         self.assertEqual(len(ids), 3)
-        self.assertEqual(dropped, 0)
+        self.assertEqual(stats["dropped_by_seats"], 0)
         self.assertEqual([u["group"] for u in units], [1, 2, 2])
+        self.assertTrue(all(u.get("weak") for u in units))  # 全单源=弱
 
     def test_seat_limit_drops_overflow(self) -> None:
-        # 4 条确定性命中 → 3 席，dropped=1
+        # 4 条单源命中 → 3 席弱补位，1 条落选
         for eid in ("EVT-1", "EVT-2", "EVT-3", "EVT-4"):
             self._add(eid)
-        units, dropped = select_recall_units(
+        units, stats = select_recall_units(
             ["EVT-1", "EVT-2", "EVT-3", "EVT-4"],
             [_hit("EVT-1", "lexical"), _hit("EVT-2", "lexical"),
              _hit("EVT-3", "lexical"), _hit("EVT-4", "lexical")],
             [], [], self.store)
         self.assertEqual(len(_sel_ids(units)), 3)
-        self.assertEqual(dropped, 1)
+        self.assertEqual(stats["dropped_by_seats"], 1)
+        self.assertEqual(stats["weak_pooled"], 1)
 
     def test_few_no_padding(self) -> None:
         # 门槛哲学：只有 1 条真相关 → 只注 1 条，不强凑
         self._add("EVT-1")
-        units, dropped = select_recall_units(
+        units, stats = select_recall_units(
             ["EVT-1"], [_hit("EVT-1", "lexical")], [], [], self.store)
         self.assertEqual(len(_sel_ids(units)), 1)
-        self.assertEqual(dropped, 0)
+        self.assertEqual(stats["dropped_by_seats"], 0)
 
     def test_route_count_ordering(self) -> None:
-        # 组 1 内：双路命中（entity+lexical）排在单路（lexical）前
-        self._add("EVT-X", entity_id="ENT-1")
+        # 双源（entity+lexical）共证进主席，单源弱补位排后
+        self._add("EVT-X")
         self._add("EVT-Y")
         self._ev_row("EVT-X", "ENT-1")
-        units, dropped = select_recall_units(
+        self._register([])
+        units, stats = select_recall_units(
             ["EVT-X", "EVT-Y"],
             [_hit("EVT-X", "lexical"), _hit("EVT-Y", "lexical")],
             [_ehit("ENT-1", "某实体")], [], self.store)
-        self.assertEqual(dropped, 0)
-        # X 双路（entity+lexical）route_count=2 > Y 单路 1
+        self.assertEqual(stats["dropped_by_seats"], 0)
         self.assertEqual(units[0]["event_ids"], ["EVT-X"])
+        self.assertEqual(units[0]["route_count"], 2)
         self.assertEqual(units[1]["event_ids"], ["EVT-Y"])
+        self.assertTrue(units[1].get("weak"))
 
     def test_entity_block_bundling(self) -> None:
         # 实体块捆绑：块内 2 事件整体占 1 席；独立事件各占 1 席。
-        # 4 单元（块+S1+S2+S3）> 3 席 → S3 落选；块整体入选（含 2 事件）。
+        # B1 有 cue 撞中 → 块凭 cue+entity 双源进主席；S1-S3 单源弱补位。
+        # 4 单元竞争 3 席 → S3 落选；块整体入选（含 2 事件）。
         self._add("EVT-B1")
         self._add("EVT-B2")
         self._add("EVT-S1")
@@ -173,45 +178,64 @@ class RecallSeatTests(unittest.TestCase):
         self._ev_row("EVT-B1", "ENT-1")
         self._ev_row("EVT-B2", "ENT-1")
         self._register([])  # 注册表读 jsonl 侧 entity_refs（_event_entity_of 依赖）
-        units, dropped = select_recall_units(
+        units, stats = select_recall_units(
             ["EVT-B1", "EVT-B2", "EVT-S1", "EVT-S2", "EVT-S3"],
-            [_hit("EVT-S1", "lexical"), _hit("EVT-S2", "lexical"),
-             _hit("EVT-S3", "lexical")],
+            [_hit("EVT-B1", "捆绑"), _hit("EVT-S1", "lexical"),
+             _hit("EVT-S2", "lexical"), _hit("EVT-S3", "lexical")],
             [_ehit("ENT-1", "某实体")], [], self.store)
         blocks = [u for u in units if u["kind"] == "entity_block"]
         self.assertEqual(len(blocks), 1)
         self.assertEqual(blocks[0]["event_ids"], ["EVT-B1", "EVT-B2"])
-        self.assertEqual(blocks[0]["route_count"], 1)  # 纯实体路，无 cue 撞中
-        # 4 单元竞争 3 席：块 1 席 + S1/S2 两席；S3（时间同分最后序）落选
-        self.assertEqual(dropped, 1)
+        self.assertEqual(blocks[0]["route_count"], 2)  # cue + entity 双源
+        self.assertFalse(blocks[0].get("weak"))
+        self.assertEqual(stats["dropped_by_seats"], 1)
         sel_ids = _sel_ids(units)
         self.assertEqual(len(sel_ids), 4)  # 块贡献 2 事件 + 2 独立
         self.assertIn("EVT-B1", sel_ids)
         self.assertIn("EVT-B2", sel_ids)
         self.assertNotIn("EVT-S3", sel_ids)
 
+    def test_pure_entity_block_sinks_in_weak_pool(self) -> None:
+        # 纯实体块（无成员 cue）= 单源弱信号且 0 锚 → 沉到 cue 命中之下
+        self._add("EVT-B1")
+        self._add("EVT-B2")
+        self._add("EVT-S1")
+        self._ev_row("EVT-B1", "ENT-1")
+        self._ev_row("EVT-B2", "ENT-1")
+        self._register([])
+        units, stats = select_recall_units(
+            ["EVT-B1", "EVT-B2", "EVT-S1"],
+            [_hit("EVT-S1", "lexical")],
+            [_ehit("ENT-1", "某实体")], [], self.store, seats=1)
+        # 两者皆单源：S1 锚数 1 > 块锚数 0 → S1 补位，块落池
+        self.assertEqual(_sel_ids(units), ["EVT-S1"])
+        self.assertEqual(stats["weak_pooled"], 1)
+
     def test_resolved_inheritance(self) -> None:
         # 修正者继承被修正者的命中资格：A lexical 命中后被 superseded
-        # 排除，B（修正者）凭继承进组 1
+        # 排除，B（修正者）凭继承进组 1（relation 路不受门槛限制）
         self._add("EVT-B")
-        units, dropped = select_recall_units(
+        units, stats = select_recall_units(
             ["EVT-B"],
             [_hit("EVT-A", "lexical")],  # A 的命中（A 已被过滤不在候选）
             [], [("EVT-B", "EVT-A")], self.store)
-        self.assertEqual(dropped, 0)
+        self.assertEqual(stats["dropped_by_seats"], 0)
         self.assertEqual(units[0]["group"], 1)
         self.assertEqual(units[0]["route_count"], 1)
+        self.assertTrue(units[0].get("resolved"))
+        self.assertFalse(units[0].get("weak"))   # 修正者不算弱信号
 
     def test_semantic_only_no_group1(self) -> None:
-        # 只有 semantic 命中 → 组 1 空，组 2 补位（全部注入）
+        # 只有 semantic 命中 → 组 1 空，组 2 弱补位（全部注入）
         self._add("EVT-S1")
         self._add("EVT-S2")
-        units, dropped = select_recall_units(
+        units, stats = select_recall_units(
             ["EVT-S1", "EVT-S2"],
             [_hit("EVT-S1", "semantic"), _hit("EVT-S2", "semantic")],
             [], [], self.store)
         self.assertEqual(len(_sel_ids(units)), 2)
         self.assertEqual({u["group"] for u in units}, {2})
+        self.assertEqual(stats["dropped_by_seats"], 0)
 
 
 def _write_event_with_span(svc: EmberService, session, turn: int,
