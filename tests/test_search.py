@@ -69,7 +69,7 @@ class SearchMemoryTests(unittest.TestCase):
 
         self._p = mock.patch("ember.service.embed_text",
                              side_effect=fake_embed)
-        self._p.start()
+        self._mock = self._p.start()
         # 预填向量库（模拟离线重建）
         for eid, vec in (("EVT-001", VEC_A), ("EVT-002", VEC_A),
                          ("EVT-003", VEC_FAR)):
