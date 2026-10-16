@@ -376,7 +376,7 @@ def build_search_tool_spec() -> list[dict[str, Any]]:
                     },
                     "k": {
                         "type": "integer",
-                        "description": "可选，返回条数上限（默认 5，最大 20）",
+                        "description": "可选，返回条数上限（默认 3，最大 5）——检索是定位器，超出说明 query 太泛",
                     },
                 },
                 "required": ["query"],

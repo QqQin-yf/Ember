@@ -93,7 +93,8 @@ class SearchMemoryTests(unittest.TestCase):
 
     def test_k_clamped(self) -> None:
         out = self.svc.sidecar_search_memory({"query": "漫剧", "k": 99})
-        self.assertIn("上限 20", out["note"])
+        self.assertEqual(len(out["items"]), 2)   # 库里只有 2 条相关，5 上限不触
+        self.assertIn("上限 5", out["note"])
         out2 = self.svc.sidecar_search_memory({"query": "漫剧", "k": 1})
         self.assertEqual(len(out2["items"]), 1)
         self.assertIn("仅显示", out2["note"])
@@ -112,6 +113,18 @@ class SearchMemoryTests(unittest.TestCase):
     def test_query_required(self) -> None:
         out = self.svc.sidecar_search_memory({})
         self.assertEqual(out["status"], "failed")
+
+    def test_like_fallback_with_multi_keywords(self) -> None:
+        """embed 挂了 → LIKE 兜底：拆词并集，多词命中排前，note 告知。"""
+        self._p.stop()   # 让 embed_text 真抛（未配 key → RuntimeError）
+        out = self.svc.sidecar_search_memory({"query": "漫剧 无关词"})
+        self.assertEqual(out["status"], "ok")
+        self.assertIn("降级", out["note"])
+        self.assertEqual(out["relation"], "cluster")
+        ids = [it["event_id"] for it in out["items"]]
+        self.assertIn("EVT-001", ids)      #「漫剧」命中
+        self.assertNotIn("EVT-003", ids)   #「无关词」不沾
+        self._p.start()   # 恢复给 tearDown
 
     def test_search_records_extraction(self) -> None:
         """检索即提取：命中入账（route=search），last_extracted 刷新。"""

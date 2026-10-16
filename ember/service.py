@@ -1935,19 +1935,20 @@ class EmberService:
     # 检索即提取：命中即记账（route="search"），刷新一切计时器，
     # 并即时解除该事件的 cue 收紧（重新被想起=重新获得浮现能力）。
 
-    SEARCH_K_DEFAULT = 5
-    SEARCH_K_MAX = 20
+    SEARCH_K_DEFAULT = 3
+    SEARCH_K_MAX = 5
     FADED_DAYS = 30.0   # 收紧后满 30 天未提取 → 淡忘（baseline）
 
     @staticmethod
     def _clamp_k(raw: Any) -> tuple[int, str | None]:
-        """k 钳制（旧版 R6 纪律）：缺省 5，超上限 20 钳到 20＋告知。"""
+        """k 钳制（2026-10-15 momo 拍板 3/5）：search 是定位器不是资料
+        阅读器，超限说明 query 太泛——guidance 会教缩小范围。"""
         try:
             k = int(raw)
         except (TypeError, ValueError):
             return EmberService.SEARCH_K_DEFAULT, None
         if k > EmberService.SEARCH_K_MAX:
-            return EmberService.SEARCH_K_MAX, f"k={k} 已按上限 20 返回"
+            return EmberService.SEARCH_K_MAX, f"k={k} 已按上限 5 返回"
         return (k, None) if k > 0 else (EmberService.SEARCH_K_DEFAULT, None)
 
     @staticmethod
@@ -2075,11 +2076,19 @@ class EmberService:
             scored.sort(key=lambda x: x[1], reverse=True)
             pool = scored
         else:
-            needle = query.lower()
-            pool = [(eid, 0.0) for eid, ev in events.items()
-                    if needle in (ev.core or "").lower()
-                    or needle in (ev.summary or "").lower()]
-            notes.append("向量服务不可达，已降级关键词检索")
+            # LIKE 兜底：query 拆词（空格/逗号），任一词命中即算，
+            # 按命中词数排序——降级模式下多关键词是排序信号
+            terms = [t for t in re.split(r"[，,、\s]+", query)
+                     if len(t.strip()) >= 2] or [query.lower()]
+            scored_pool: list[tuple[str, int]] = []
+            for eid, ev in events.items():
+                blob = f"{ev.core or ''}\n{ev.summary or ''}".lower()
+                hits = sum(1 for t in terms if t.lower() in blob)
+                if hits:
+                    scored_pool.append((eid, hits))
+            scored_pool.sort(key=lambda x: (-x[1], x[0]))
+            pool = scored_pool
+            notes.append("向量服务不可达，已降级关键词检索（多关键词取并集）")
 
         # ---- 时间过滤（ingest_time 落区间）----
         if tr is not None:
