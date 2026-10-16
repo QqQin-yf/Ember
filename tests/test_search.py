@@ -116,15 +116,16 @@ class SearchMemoryTests(unittest.TestCase):
 
     def test_like_fallback_with_multi_keywords(self) -> None:
         """embed 挂了 → LIKE 兜底：拆词并集，多词命中排前，note 告知。"""
-        self._p.stop()   # 让 embed_text 真抛（未配 key → RuntimeError）
+        orig = self._mock.side_effect
+        self._mock.side_effect = RuntimeError("embed down")
         out = self.svc.sidecar_search_memory({"query": "漫剧 无关词"})
+        self._mock.side_effect = orig
         self.assertEqual(out["status"], "ok")
         self.assertIn("降级", out["note"])
         self.assertEqual(out["relation"], "cluster")
         ids = [it["event_id"] for it in out["items"]]
         self.assertIn("EVT-001", ids)      #「漫剧」命中
         self.assertNotIn("EVT-003", ids)   #「无关词」不沾
-        self._p.start()   # 恢复给 tearDown
 
     def test_search_records_extraction(self) -> None:
         """检索即提取：命中入账（route=search），last_extracted 刷新。"""
