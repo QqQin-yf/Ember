@@ -60,7 +60,7 @@ def write_args(user_quote: str | None = None,
             "outcome": "架构定型",
             "state": "设计文档已更新",
             "affect": "踏实",
-            "significance": "影响后续所有记忆链路设计",
+            "significance": "8：影响后续所有记忆链路设计",
             "details": ["细节一"],
             "key_quotes": quotes,
         },
@@ -186,9 +186,10 @@ def main():
 
         print("== S10 工具清单与代理形态同源 ==")
         names = {s["function"]["name"] for s in service2.sidecar_tool_specs()}
-        check("三件工具齐全（含 revise）",
+        check("六件工具齐全（检索/修正/钉住）",
               names == {"create_memory_event", "read_memory_source",
-                        "revise_memory_event"},
+                        "revise_memory_event", "search_memory",
+                        "pin_memory", "unpin_memory"},
               str(names))
 
         print("== S11 代理形态回归：chat 流程仍走同一召回/写入实现 ==")

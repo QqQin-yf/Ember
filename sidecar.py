@@ -10,6 +10,13 @@ proxy 退役。本进程不再位于对话主路径：
                                  read_memory_source（schema 与代理形态同源，
                                  见 ember/writer.py build_tools_spec）
 
+多实例（2026-10-17，一颗心一套记忆库）：本进程持实例注册表
+（ember/instances.py），每个实例独立的 EmberStore + EmberService，
+记忆库目录挂在对应 heart 实例的数据目录下。路由与 heart 同款：
+请求头 X-Heart-Instance（或 ?inst= 查询参数），未带 = "default"，
+清单外实例 404。单实例部署完全无感——不带路由头的所有请求都落在
+default 上。
+
 降级哲学（与前端 heart 钩子同款）：任何一环失败都不影响主对话——
 召回无命中返回 injected_text=null；工具失败回 failed 回执，前端照常
 续跑。前端只对可见结果负责注入与展示。
@@ -19,15 +26,19 @@ proxy 退役。本进程不再位于对话主路径：
 
 依赖：pip install "mcp>=1.8"（MCP 官方 Python SDK，自带 starlette/uvicorn）。
 鉴权：设置 EMBER_TOKEN 后所有端点要求 Authorization: Bearer <token>。
-配置：EMBER_HOST（默认 127.0.0.1）、EMBER_SIDECAR_PORT（默认 8767）、
-EMBER_DATA_DIR（与 proxy 共用同一记忆库）。
+配置：EMBER_DATA_ROOT（heart 的 data/ 根目录，记忆库挂在各实例目录下，
+     详见 ember/instances.py）、EMBER_INSTANCES（实例清单，缺省
+     "default"）、EMBER_HOST（默认 127.0.0.1）、EMBER_SIDECAR_PORT
+     （默认 8767）。
 """
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import json
 import os
 import sys
+from urllib.parse import parse_qs
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -36,12 +47,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ember.env import load_env
 load_env(os.path.dirname(os.path.abspath(__file__)))
 
-from ember.llm import MockLLMClient
-from ember.service import EmberService
-from ember.store import EmberStore
+from ember.instances import InstanceRegistry, parse_instances, resolve_root
 from ember.writer import (READ_SOURCE_TOOL_NAME, REVISE_TOOL_NAME,
                           SEARCH_TOOL_NAME, TOOL_NAME,
-                          UNPIN_TOOL_NAME, PIN_TOOL_NAME)
+                          build_pin_tool_specs, build_revise_tool_spec,
+                          build_search_tool_spec, build_tools_spec)
 
 import mcp.types as types
 from mcp.server.lowlevel import Server
@@ -53,14 +63,54 @@ from starlette.routing import Mount, Route
 import uvicorn
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.environ.get("EMBER_DATA_DIR", os.path.join(HERE, "data"))
 HOST = os.environ.get("EMBER_HOST", "127.0.0.1")
 PORT = int(os.environ.get("EMBER_SIDECAR_PORT", "8767"))
 TOKEN = os.environ.get("EMBER_TOKEN", "")
 
-# 旁路形态不调用任何 LLM：召回是本地毫秒级、写入是确定性校验+落盘。
-# EmberService 构造器要求的 client 传 Mock——永远轮不到它说话。
-SERVICE = EmberService(EmberStore(DATA_DIR), MockLLMClient(), model="sidecar")
+# 实例注册表：清单外的名字一律 404（宁拒启不裸奔——实例名非法当场炸出）
+try:
+    REGISTRY = InstanceRegistry(
+        resolve_root(),
+        parse_instances(os.environ.get("EMBER_INSTANCES", "default")),
+    )
+except ValueError as exc:
+    raise SystemExit(f"[ember-sidecar] 拒绝启动：{exc}")
+
+# MCP 层的实例上下文：HTTP 层解析实例名 → set → 工具执行体取用
+# （MCP SDK 的工具回调拿不到 HTTP 请求，用 contextvar 穿协议层）
+CURRENT_SERVICE: contextvars.ContextVar = contextvars.ContextVar(
+    "ember_current_service", default=None)
+
+# ---------- 实例路由（与 heart 同款：头优先，?inst= 兜底，缺省 default）
+
+
+def _instance_from_scope(scope) -> str:
+    """原始 ASGI scope 版实例名解析（MCP 路径用，拿不到 Request）。"""
+
+    headers = {k.decode("latin-1").lower(): v.decode("latin-1")
+               for k, v in scope.get("headers") or []}
+    name = (headers.get("x-heart-instance") or "").strip()
+    if not name:
+        qs = parse_qs(scope.get("query_string", b"").decode("latin-1"))
+        name = (qs.get("inst") or [""])[0].strip()
+    return name or "default"
+
+
+def _instance_name(request: Request) -> str:
+    name = (request.headers.get("x-heart-instance") or "").strip()
+    if not name:
+        name = (request.query_params.get("inst") or "").strip()
+    return name or "default"
+
+
+def _service_or_404(request: Request):
+    """当前请求应落到的实例 service；清单外返回 404 响应（由调用方直发）。"""
+
+    svc = REGISTRY.service(_instance_name(request))
+    if svc is None:
+        return JSONResponse({"error": "unknown instance"}, status_code=404)
+    return svc
+
 
 # ---------- MCP 层：协议翻译，不掺业务 ----------
 
@@ -69,8 +119,12 @@ mcp_server = Server("memory")
 
 @mcp_server.list_tools()
 async def _list_tools() -> list[types.Tool]:
+    # 工具清单全实例同源（纯函数构建，不触任何实例的数据）；
+    # 组成必须与 EmberService.sidecar_tool_specs 保持一致
+    specs = (build_tools_spec() + [build_revise_tool_spec()[0]]
+             + build_search_tool_spec() + build_pin_tool_specs())
     out: list[types.Tool] = []
-    for spec in SERVICE.sidecar_tool_specs():
+    for spec in specs:
         fn = spec["function"]
         out.append(types.Tool(name=fn["name"], description=fn["description"],
                               inputSchema=fn["parameters"]))
@@ -79,19 +133,18 @@ async def _list_tools() -> list[types.Tool]:
 
 @mcp_server.call_tool()
 async def _call_tool(name: str, arguments: dict) -> list[types.TextContent]:
-    if name == TOOL_NAME:
-        result = SERVICE.sidecar_create_memory_event(arguments or {})
+    svc = CURRENT_SERVICE.get()
+    if svc is None:
+        result = {"status": "failed", "error": "实例上下文丢失（无进行中的路由）"}
+    elif name == TOOL_NAME:
+        result = svc.sidecar_create_memory_event(arguments or {})
     elif name == REVISE_TOOL_NAME:
-        result = SERVICE.sidecar_revise_memory_event(arguments or {})
+        result = svc.sidecar_revise_memory_event(arguments or {})
     elif name == READ_SOURCE_TOOL_NAME:
-        result = SERVICE.sidecar_read_memory_source(
+        result = svc.sidecar_read_memory_source(
             (arguments or {}).get("event_id") or "")
     elif name == SEARCH_TOOL_NAME:
-        result = SERVICE.sidecar_search_memory(arguments or {})
-    elif name == PIN_TOOL_NAME:
-        result = SERVICE.sidecar_pin_memory(arguments or {})
-    elif name == UNPIN_TOOL_NAME:
-        result = SERVICE.sidecar_unpin_memory(arguments or {})
+        result = svc.sidecar_search_memory(arguments or {})
     else:
         result = {"status": "failed", "error": f"未知工具: {name}"}
     return [types.TextContent(type="text",
@@ -103,7 +156,16 @@ session_manager = StreamableHTTPSessionManager(
 
 
 async def _handle_mcp(scope, receive, send) -> None:
-    await session_manager.handle_request(scope, receive, send)
+    svc = REGISTRY.service(_instance_from_scope(scope))
+    if svc is None:
+        await JSONResponse({"error": "unknown instance"},
+                           status_code=404)(scope, receive, send)
+        return
+    token = CURRENT_SERVICE.set(svc)
+    try:
+        await session_manager.handle_request(scope, receive, send)
+    finally:
+        CURRENT_SERVICE.reset(token)
 
 
 @contextlib.asynccontextmanager
@@ -128,6 +190,9 @@ def _opt_int(body: dict, key: str) -> int | None:
 
 
 async def _hook_turn_start(request: Request) -> JSONResponse:
+    svc = _service_or_404(request)
+    if isinstance(svc, JSONResponse):
+        return svc
     try:
         body = await request.json()
     except Exception:
@@ -136,13 +201,16 @@ async def _hook_turn_start(request: Request) -> JSONResponse:
     if not message.strip():
         return JSONResponse({"injected": False, "injected_text": None,
                              "reason": "empty message"})
-    return JSONResponse(SERVICE.hook_turn_start(
+    return JSONResponse(svc.hook_turn_start(
         body.get("session_id"), message, body.get("heart_turn_id"),
         user_message_id=_opt_int(body, "user_message_id"),
         context_start_id=_opt_int(body, "context_start_id")))
 
 
 async def _hook_turn_end(request: Request) -> JSONResponse:
+    svc = _service_or_404(request)
+    if isinstance(svc, JSONResponse):
+        return svc
     try:
         body = await request.json()
     except Exception:
@@ -152,7 +220,7 @@ async def _hook_turn_end(request: Request) -> JSONResponse:
         turn = int(raw_turn) if raw_turn is not None else None
     except (TypeError, ValueError):
         turn = None
-    return JSONResponse(SERVICE.hook_turn_end(
+    return JSONResponse(svc.hook_turn_end(
         body.get("session_id"), str(body.get("assistant_reply") or ""),
         turn, assistant_message_id=_opt_int(body, "assistant_message_id")))
 
@@ -161,21 +229,30 @@ async def _hook_turn_end(request: Request) -> JSONResponse:
 
 async def _sleep_link_batches(request: Request) -> JSONResponse:
     """接口 1：材料出队——app 贴进窗口末尾给正主 AI 判联。"""
-    return JSONResponse(SERVICE.sidecar_link_batches())
+    svc = _service_or_404(request)
+    if isinstance(svc, JSONResponse):
+        return svc
+    return JSONResponse(svc.sidecar_link_batches())
 
 
 async def _sleep_link_submit(request: Request) -> JSONResponse:
     """接口 2：交卷——app 转交窗口 AI 的 link_relations 结果。"""
+    svc = _service_or_404(request)
+    if isinstance(svc, JSONResponse):
+        return svc
     try:
         body = await request.json()
     except Exception:
         body = {}
-    return JSONResponse(SERVICE.sidecar_link_submit(body))
+    return JSONResponse(svc.sidecar_link_submit(body))
 
 
 async def _sleep_link_progress(request: Request) -> JSONResponse:
     """接口 3：进度——断线恢复时 app 问跑到哪了。"""
-    return JSONResponse(SERVICE.sidecar_link_progress())
+    svc = _service_or_404(request)
+    if isinstance(svc, JSONResponse):
+        return svc
+    return JSONResponse(svc.sidecar_link_progress())
 
 
 async def _sleep_structure_run(request: Request) -> JSONResponse:
@@ -184,7 +261,10 @@ async def _sleep_structure_run(request: Request) -> JSONResponse:
     编排顺序：挂在 link/submit 清完之后——挂完关系不等于没活儿，
     还有这一步（契约见 API.md「编排顺序」）。
     """
-    return JSONResponse(SERVICE.run_structure_maintenance())
+    svc = _service_or_404(request)
+    if isinstance(svc, JSONResponse):
+        return svc
+    return JSONResponse(svc.run_structure_maintenance())
 
 
 async def _sleep_sediment_evidence(request: Request) -> JSONResponse:
@@ -192,45 +272,14 @@ async def _sleep_sediment_evidence(request: Request) -> JSONResponse:
 
     只做追加——证据为空 app 不调本接口（契约见 API.md §6）。
     """
+    svc = _service_or_404(request)
+    if isinstance(svc, JSONResponse):
+        return svc
     try:
         body = await request.json()
     except Exception:
         body = {}
-    return JSONResponse(SERVICE.sidecar_sediment_evidence(body))
-
-
-# ---------- 简报（2026-10-17 设计夜：截断驱动，拼装式零 LLM） ----------
-
-async def _briefing_refresh(request: Request) -> JSONResponse:
-    """截断时刷新简报：丢头留尾，新简报自包含（契约见 BRIEFING_SPEC.md）。"""
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    return JSONResponse(SERVICE.sidecar_briefing_refresh(body))
-
-
-async def _briefing_get(request: Request) -> JSONResponse:
-    """取当前简报（断线重进/新会话开场；无则 empty）。"""
-    return JSONResponse(SERVICE.sidecar_briefing_get())
-
-
-async def _memory_pin(request: Request) -> JSONResponse:
-    """钉住一条记忆（幂等）：简报必带 + 自动召回不再浮现。"""
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    return JSONResponse(SERVICE.sidecar_pin_memory(body))
-
-
-async def _memory_unpin(request: Request) -> JSONResponse:
-    """取消钉住（幂等）。"""
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    return JSONResponse(SERVICE.sidecar_unpin_memory(body))
+    return JSONResponse(svc.sidecar_sediment_evidence(body))
 
 
 class BearerAuthMiddleware:
@@ -264,10 +313,6 @@ app = BearerAuthMiddleware(Starlette(
               methods=["POST"]),
         Route("/ember/sleep/sediment/evidence", _sleep_sediment_evidence,
               methods=["POST"]),
-        Route("/ember/briefing/refresh", _briefing_refresh, methods=["POST"]),
-        Route("/ember/briefing", _briefing_get, methods=["GET"]),
-        Route("/ember/memory/pin", _memory_pin, methods=["POST"]),
-        Route("/ember/memory/unpin", _memory_unpin, methods=["POST"]),
         Mount("/mcp", app=_handle_mcp),
     ],
     lifespan=_lifespan,
@@ -285,7 +330,9 @@ def main() -> None:
     print(f"[ember-sidecar] listening on http://{HOST}:{PORT}")
     print(f"[ember-sidecar] mcp:   http://{HOST}:{PORT}/mcp")
     print("[ember-sidecar] hooks: POST /ember/hooks/turn_start | /ember/hooks/turn_end")
-    print(f"[ember-sidecar] store: {DATA_DIR}")
+    print(f"[ember-sidecar] root: {REGISTRY.root}")
+    for name in REGISTRY.names:
+        print(f"[ember-sidecar] store[{name}]: {REGISTRY.dir_of(name)}")
     print(f"[ember-sidecar] auth:  {'Bearer EMBER_TOKEN' if TOKEN else '未启用（本机自用）'}")
     uvicorn.run(app, host=HOST, port=PORT, log_level="info")
 

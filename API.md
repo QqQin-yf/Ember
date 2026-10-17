@@ -10,6 +10,7 @@
 - 协议：HTTP/1.1 + JSON
 - 默认地址：`127.0.0.1:8767`（sidecar 形态）
 - 鉴权：配置 `EMBER_TOKEN` 后所有端点要求 `Authorization: Bearer <token>` 精确匹配（MCP 与钩子一视同仁）；未配置放行
+- 实例路由（2026-10-17，一颗心一套记忆库）：所有端点按 `X-Heart-Instance` 头（或 `?inst=` 查询参数）路由到对应实例，与 heart 同款——未带 = `default`，清单外实例 404。每个实例独立的记忆库，目录挂在该实例的 heart 数据目录下（见 §10 EMBER_DATA_ROOT）
 - 接入形态：旁路（2026-10-12 拍板）——前端拥有对话循环，ember 只被钩子调用与 MCP 工具调用
 
 ## 2. 通用约定
@@ -357,7 +358,9 @@ GET {EMBER_SOURCE_URL}/api/source?session_id={sid}&from={int}&to={int}
 | 变量 | 说明 |
 |---|---|
 | EMBER_HOST / EMBER_SIDECAR_PORT / EMBER_TOKEN | 监听与鉴权（跨机部署 EMBER_TOKEN 必设，不设 = 不拦） |
-| EMBER_DATA_DIR | 记忆库目录（默认 data/） |
+| EMBER_DATA_ROOT | 记忆库根目录 = heart 的 `data/`：default 实例库住 `<root>/ember`，其余住 `<root>/instances/<名>/ember`（旧扁平库有 events.jsonl 时 default 原样沿用，零迁移） |
+| EMBER_INSTANCES | 实例清单，逗号分隔（缺省 `default`）；清单外实例 404 |
+| EMBER_DATA_DIR | （旧变量）未设 EMBER_DATA_ROOT 时作为根目录回落；默认 `<项目>/data/` |
 | EMBER_SOURCE_URL / EMBER_SOURCE_TOKEN / EMBER_SOURCE_TIMEOUT | 原文提供接口（heart-chat `/api/source`，将来 Deliz 同 schema 接管——契约见 §7.1） |
 | EMBER_EMBED_BASE_URL / EMBER_EMBED_API_KEY / EMBER_EMBED_MODEL | 向量服务 |
 | ZHIPU_API_KEY / EMBER_SLEEP_MODEL | 观察提炼/合并等任务的 LLM |
