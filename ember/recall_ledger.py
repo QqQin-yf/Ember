@@ -88,8 +88,16 @@ class RecallLedger:
         self.by_turn.setdefault(key, []).append(d)
         at = d.get("recorded_at") or ""
         sid = key[0]
+        # 被召回计数只数真召回/检索（cue/entity/relation/search/observe）
+        # ——briefing 的在场记账不是召回（2026-10-17 修：简报自记曾把
+        # 进过简报的事件越刷越高，挤掉真被召回最多的事件占据简报的
+        # recalled_top 席位）。last_extracted / last_injected 照旧不限
+        # route：提取时钟与在场去重按原设计，简报在场也算一次提取。
+        is_recall = d.get("route") != "briefing"
         for eid in d.get("event_ids", []):
-            self.event_recall_count[eid] = self.event_recall_count.get(eid, 0) + 1
+            if is_recall:
+                self.event_recall_count[eid] = (
+                    self.event_recall_count.get(eid, 0) + 1)
             prev = self.last_extracted.get(eid) or ""
             if at > prev:   # ISO 串字典序 = 时间序（同时区）
                 self.last_extracted[eid] = at

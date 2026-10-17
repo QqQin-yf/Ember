@@ -229,6 +229,23 @@ class BriefingTests(unittest.TestCase):
         # 同会话、经历区间（50）真在窗口内 → 仍然排除（EVT-STAGE）
         self.assertNotIn("EVT-STAGE", out["text"])
 
+    def test_briefing_presence_not_counted_as_recall(self) -> None:
+        """简报在场记账（route=briefing）不算被召回（2026-10-17 修）。
+
+        反复 refresh 不得把进过简报的事件顶上 recalled_top——
+        真被召回两次的 EVT-R1 必须守住席位。
+        """
+        for _ in range(3):
+            self._refresh()
+        # 进过简报的事件没有被召回计数
+        self.assertFalse(self.svc.recall_ledger.event_recall_count.get("EVT-C9"))
+        # 在场去重账照记（2h 轻量联动的依据，不受本修复影响）
+        self.assertIn(("s1", "EVT-C9"),
+                      self.svc.recall_ledger.last_injected)
+        # recalled_top 仍是真召回最多的 EVT-R1，不被刷上去的挤掉
+        out = self._refresh()
+        self.assertEqual(out["stats"]["recalled_top"], "EVT-R1")
+
     def test_budget_cuts_low_layers_first(self) -> None:
         self.svc.BRIEFING_BUDGET = 120   # 原文层就超——可砍层全砍，pin/10 保留
         out = self._refresh()
