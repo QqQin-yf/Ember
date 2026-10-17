@@ -2758,16 +2758,6 @@ class EmberService:
         m = re.match(r"\s*(10|[1-9])\s*[：:]", significance or "")
         return int(m.group(1)) if m else 5
 
-    @staticmethod
-    def _event_max_turn(ev: Any) -> int:
-        """事件覆盖的最大轮次（现场判定用）。"""
-        out = 0
-        for ref in (ev.turn_refs or []):
-            m = re.match(r"turn-(\d+)$", str(ref))
-            if m:
-                out = max(out, int(m.group(1)))
-        return out
-
     def _briefing_source_block(self, ev: Any) -> str:
         """原文层条目：core + ±3 轮原文（复用 read_source_event）。
 
@@ -2815,10 +2805,23 @@ class EmberService:
         horizon = (now - timedelta(hours=72)).isoformat(timespec="seconds")
 
         def onstage(ev: Any) -> bool:
-            # keep_from=0（缺省/换算不到）= 不做现场排除——原实现
-            # max_turn >= 0 恒真会把全部事件当现场排除，简报清空，
-            # 与文档「传 0 = 不排除」相悖，测试踩中后修。
-            return keep_from > 0 and self._event_max_turn(ev) >= keep_from
+            # 现场判定（2026-10-17 修，momo 实测踩中）：用**经历区间**
+            # （turn_spans，写入时 quote_spans 逐字定位的内容真实所在
+            # 轮次），不用 turn_refs——那是出生图章，turn_span.py 的
+            # 2026-10-12 裁决明言不作为时间坐标：记忆可以在很新的轮次
+            # 里写下很旧的事（截断后补写的记忆出生在保留窗口内、经历
+            # 却在已截掉的旧轮），拿出生图章判现场会把它们误挡在简报
+            # 外。两条附带规则：跨会话的事件原文不在本会话上下文里，
+            # 一律不算现场；区间未回填 = 未知出处 → 不算现场（保守
+            # 进简报，宁可多带不漏）。keep_from=0（缺省/换算不到）
+            # 同样不做现场排除。
+            if keep_from <= 0:
+                return False
+            src = str(getattr(ev, "source_ref", "") or "")
+            if src != f"conversation/session-{session_id}":
+                return False
+            return any(e >= keep_from
+                       for _s, e in self.turn_spans.span_of_event(ev))
 
         def eligible(ev: Any) -> bool:
             return (self.sleep_state.recall_allowed(ev.event_id)

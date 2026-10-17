@@ -197,6 +197,38 @@ class BriefingTests(unittest.TestCase):
             {"session_id": "s1", "keep_from_message_id": 99999})
         self.assertIn("EVT-STAGE", out["text"])
 
+    def test_onstage_uses_span_not_birth_stamp(self) -> None:
+        """现场判定用经历区间（turn_spans），不用出生图章（turn_refs）。
+
+        turn_span.py 2026-10-12 裁决：出生时刻不冒充经历时刻——
+        截断后补写的记忆出生在保留窗口内、经历却在已截掉的旧轮，
+        必须进简报（momo 实测踩中的 bug）。跨会话的事件原文不在
+        本会话上下文里，同样不算现场。
+        """
+        # 出生在 turn 45（保留窗口内），经历在 turn 5-6（已截掉）
+        self._add("EVT-LATE", 45, "9：截断后补写的旧事", _iso(NOW))
+        self.svc.turn_spans.fill("EVT-LATE", [(5, 6)], filled_by="test")
+        # 别的会话写的事件，span 伸进本会话保留窗口也不算现场
+        from ember.models import Event
+        self.svc.store.write_event(Event(
+            event_id="EVT-OTHER", version_id="EVT-OTHER-v1",
+            source_ref="conversation/session-s2",
+            raw_ref="conversation/session-s2/turn-50",
+            event_time=_iso(NOW), ingest_time=_iso(NOW),
+            turn_refs=["turn-50"],
+            summary="别会话的摘要", core="别会话的完整叙述",
+            significance="7：别的会话",
+            key_quotes=[{"speaker": "user", "text": "别会话的原话"}],
+        ))
+        self.svc.turn_spans.fill("EVT-OTHER", [(50, 50)], filled_by="test")
+        out = self._refresh()   # keep_from_message_id=800 → turn 40
+        # 出生图章在窗口内、经历在旧轮 → 进（core 层，sig 9）
+        self.assertIn("EVT-LATE 的完整叙述", out["text"])
+        # 跨会话 → 不参与现场排除，进（summary 层）
+        self.assertIn("别会话的摘要", out["text"])
+        # 同会话、经历区间（50）真在窗口内 → 仍然排除（EVT-STAGE）
+        self.assertNotIn("EVT-STAGE", out["text"])
+
     def test_budget_cuts_low_layers_first(self) -> None:
         self.svc.BRIEFING_BUDGET = 120   # 原文层就超——可砍层全砍，pin/10 保留
         out = self._refresh()
