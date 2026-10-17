@@ -9,7 +9,7 @@
 
 - 协议：HTTP/1.1 + JSON
 - 默认地址：`127.0.0.1:8767`（sidecar 形态）
-- 鉴权：配置 `EMBER_TOKEN` 后所有端点要求 `Authorization: Bearer <token>` 精确匹配（MCP 与钩子一视同仁）；未配置放行
+- 鉴权：配置 `EMBER_TOKEN` 后所有端点要求 `Authorization: Bearer <token>` 精确匹配（MCP 与钩子一视同仁）；未配置放行。令牌**全局不分实例**（一扇门多颗心），所有实例共用同一值
 - 实例路由（2026-10-17，一颗心一套记忆库）：所有端点按 `X-Heart-Instance` 头（或 `?inst=` 查询参数）路由到对应实例，与 heart 同款——未带 = `default`，清单外实例 404。每个实例独立的记忆库，目录挂在该实例的 heart 数据目录下（见 §10 EMBER_DATA_ROOT）
 - 接入形态：旁路（2026-10-12 拍板）——前端拥有对话循环，ember 只被钩子调用与 MCP 工具调用
 
@@ -88,7 +88,9 @@
 
 ## 5. MCP 工具组（消费方：模型的工具循环，经 app 转发）
 
-端点：`POST /mcp`（MCP Streamable HTTP）。工具清单 `tools/list` 返回六件；以下为语义契约。
+端点：`POST /mcp/`（MCP Streamable HTTP；建议带尾斜杠，`/mcp` 会被 307 重定向一次）。工具清单 `tools/list` 返回六件；以下为语义契约。
+
+- 实例路由对 MCP 同样生效，且 `X-Heart-Instance` 头要带在**每个** MCP 请求上（initialize / tools/list / tools/call——路由逐请求解析，不是握手时定死）
 
 ### 5.1 create_memory_event
 
@@ -192,7 +194,7 @@
         "entity_name": "",
         "old_events": [
           {"event_id": "EVT-…", "entity_name": "…", "entity_id": "ent_…",
-           "core": "…", "summary": "…"}
+           "entity_summary": "…", "core": "…", "summary": "…"}
         ]}
     ]}
   ],
@@ -201,7 +203,7 @@
 }
 ```
 
-- `old_events` 的实体标注（entity_name/entity_id）是 attach 校验的依据，判联材料必读
+- `old_events` 的实体标注（entity_name/entity_id）是 attach 校验的依据，`entity_summary` 是该实体当前的名片描述（attach 当场改写 summary 的底稿），判联材料必读
 - **出队幂等**：不扣 pending——只有交卷成功才扣；断线重进材料照旧
 - 无活儿：`batches: []` 且 `materials_total: 0`（诚实返回，不凑数）
 
@@ -248,24 +250,23 @@
 
 ### 6.4 POST /ember/sleep/structure/run
 
-结构维护（无请求体）。ember 自己发第三方 LLM：收集全库尚无实体归属的散事件，判定 extract（立新户，≥3 条散事件）/ attach（归入实体库已有实体）；随后对闲置旧 cue 跑收紧（cue_tighten）。
+收尾维护（无请求体，幂等）。**2026-10-17 重构后四步全在 ember 本地**：向量补建（新事件/新实体的 core 向量）→ cue 收紧（闲置旧 cue）→ 观察提炼（逐会话查游标，未覆盖消息攒够门槛才调第三方 LLM，产 0-N 条观察）→ 观察合并（高相似观察聚类判重写）。归属判定（extract/attach）**不在本步**——已收编窗口判联（见 §6 开头注记）。
 
 响应 200：
 
 ```json
-{"strays_total": 5,
- "saved": [
-   {"action": "extract", "name": "…", "entity_id": "ent_…",
-    "entity_action": "extract:ent_…(名) x3"},
-   {"action": "attach", "entity_id": "ent_…", "members_patched": 2,
-    "entity_action": "attach:ent_…"}],
- "rejected": [{"action": "extract", "name": "…", "errors": ["extract member 不足 3: 2"]}],
- "cue_tighten": {"checked_events": 10, "retired": [], "skipped": []}}
+{"vector_backfill": {"events": 3, "entities": 1, "failed": 0},
+ "cue_tighten": {"checked_events": 10, "retired": [], "skipped": [],
+                  "kept": [], "kept_zero_use_event": []},
+ "observe": {"status": "ok", "created": 2,
+              "sessions": [{"session": "main", "status": "ok",
+                             "uncovered": 320, "processed": 300,
+                             "created": 2, "event_ids": ["EVT-…"]}]},
+ "observe_merge": {"candidates": 4, "groups": 1, "merged": 1}}
 ```
 
-- 校验逐条进行：member/event 必须在本次散事件清单内（清单外=幻觉，拒绝该条）；同一事件只认领一次（单归属）；extract 名字不与已有实体重复
-- **幂等可重试**：已归属的自动出清单；LLM 调用/解析失败会 5xx，直接重试即可
-- 无散事件时跳过 LLM，只跑 cue 收紧
+- `observe.status`：`ok` / `unconfigured`（未配 `EMBER_SOURCE_URL`，此时无 `sessions` 字段）；单会话失败不牵连整批（session 级 `failed` / `unavailable` 如实上报）
+- 观察提炼的第三方 LLM 调用/解析失败会 5xx，直接重试即可（幂等：已提炼会话的游标已推进，不重复产观察）
 
 ### 6.5 POST /ember/sleep/sediment/evidence
 
@@ -314,7 +315,7 @@
 GET {EMBER_SOURCE_URL}/api/source?session_id={sid}&from={int}&to={int}
 ```
 
-- `from` / `to`：**message_id 整数区间（含两端）**——对外契约只有 message_id 一套（见 §8）
+- `from` / `to`：**message_id 整数区间（含两端）**——对外契约只有 message_id 一套（见 §9）
 
 响应 200：
 
@@ -364,4 +365,5 @@ GET {EMBER_SOURCE_URL}/api/source?session_id={sid}&from={int}&to={int}
 | EMBER_SOURCE_URL / EMBER_SOURCE_TOKEN / EMBER_SOURCE_TIMEOUT | 原文提供接口（heart-chat `/api/source`，将来 Deliz 同 schema 接管——契约见 §7.1） |
 | EMBER_EMBED_BASE_URL / EMBER_EMBED_API_KEY / EMBER_EMBED_MODEL | 向量服务 |
 | ZHIPU_API_KEY / EMBER_SLEEP_MODEL | 观察提炼/合并等任务的 LLM |
+| EMBER_OWNER_NAME | 观察提炼注入 prompt 的用户称呼（不配写 "user"，见 §6 观察式记忆） |
 | EMBER_BRIEFING_BUDGET | 简报字符硬顶（缺省 6000，见 §8） |
