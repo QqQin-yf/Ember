@@ -74,7 +74,8 @@ GOOD_WRITER_ARGS = {
         "participants": ["ai", "用户"], "objects": [],
         "context": "测试会话",
         "core": "我们定稿了测试协议。",
-        "outcome": "定稿", "state": "", "affect": "", "significance": "",
+        "outcome": "定稿", "state": "", "affect": "",
+        "significance": "8：定稿了测试协议",
         "details": [],
         "key_quotes": [
             {"speaker": "user", "text": "就按这个方案定稿吧。"},

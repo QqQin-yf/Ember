@@ -15,7 +15,10 @@
   存档∪内存，见 service._quote_corpus；原设计的「Sleep 调用①全窗口
   回填」移除——不建第二真相源；turn_refs 锚点代答同裁决移除——出生
   时刻不冒充经历时刻）。定位失败的句对整对拒绝写入（双盲）；半有效
-  取保证边界。span_of 查询未回填 → []，调用方按"未知出处"处理
+  取就近边界（2026-10-17 momo 改定：单端定位往后/往前 10 条消息，
+  首尾同句 ±3 轮——不再拉到会话尽头，过宽的保证边界会把半有效事件
+  整段判进简报现场）。span_of 查询未回填 → []，调用方按"未知出处"
+  处理
   （梦选材跳过、翻原文 not_archived，均有现成路径）。
 - 本层提供定位（spans_from_quotes）+ 写入口（fill）+ 查询接口。
 - 回填产物落旁路文件 turn_spans.jsonl（append-only，可重建），
@@ -48,58 +51,96 @@ SPAN_FILE = "turn_spans.jsonl"
 # 起尾句定位（quote → turn 序数；写入时 AI 附 quote_spans，此处确定性定位）
 # ---------------------------------------------------------------------------
 
+# 半有效句对的就近边界（2026-10-17 momo 改定）：缺失端不再拉到会话
+# 尽头（过宽的保证边界会把半有效事件整段判进简报现场），改为从已
+# 定位端往后/往前数这么多条消息（不足有多少取多少）。
+FALLBACK_SPAN_MESSAGES = 10
+# 首尾同一句时的就近上下文：±3 轮（与 read_memory_source 的单句
+# 扩展同口径，前后不足就有多少取多少）。
+SAME_QUOTE_CONTEXT_TURNS = 3
+
+
+def _conversation(messages: list[dict]) -> list[dict]:
+    """定位语料：user/assistant 且带合法 turn 序数的消息，保持原顺序。"""
+
+    return [m for m in messages
+            if m.get("role") in ("user", "assistant")
+            and isinstance(m.get("turn"), int)]
+
+
+def _locate_index(quote: str, corpus: list[dict]) -> int | None:
+    """quote 在语料中的消息下标。
+
+    匹配策略：先精确子串；失败则空白归一后再找（换行/多空格容错，
+    仍是逐字内容匹配）。找不到返回 None（调用方按未定位处理）。
+    """
+    import re
+    if not quote.strip():
+        return None
+    for i, m in enumerate(corpus):
+        if quote in (m.get("content") or ""):
+            return i
+    norm = re.sub(r"\s+", "", quote)
+    if len(norm) < 4:
+        return None
+    for i, m in enumerate(corpus):
+        content = m.get("content") or ""
+        if norm and norm in re.sub(r"\s+", "", content):
+            return i
+    return None
+
+
 def locate_turn(quote: str, messages: list[dict]) -> int | None:
     """在对话窗口原文里逐字找 quote，返回它所在消息的 turn 序数。
 
     匹配策略：先精确子串；失败则空白归一后再找（换行/多空格容错，
     仍是逐字内容匹配）。找不到返回 None（调用方降级粗锚点）。
     """
-    import re
-    if not quote.strip():
-        return None
-    for m in messages:
-        if m.get("role") not in ("user", "assistant"):
-            continue
-        content = m.get("content") or ""
-        if quote in content:
-            return m.get("turn")
-    norm = re.sub(r"\s+", "", quote)
-    if len(norm) < 4:
-        return None
-    for m in messages:
-        if m.get("role") not in ("user", "assistant"):
-            continue
-        content = m.get("content") or ""
-        if norm and norm in re.sub(r"\s+", "", content):
-            return m.get("turn")
-    return None
+
+    corpus = _conversation(messages)
+    idx = _locate_index(quote, corpus)
+    return corpus[idx]["turn"] if idx is not None else None
 
 
 def spans_from_quotes(quote_spans: list[dict],
                       messages: list[dict]) -> list[tuple[int, int]]:
     """一组 (start_quote, end_quote) → 归并后的 turn 区间列表。
 
-    起尾都定位 → 精确区间；只有一端定位 → 缺失端取保证边界
-    （起点未知=会话最早轮，终点未知=最新轮——真实跨度必被该区间包含，
-    2026-10-12 裁决：半有效优于粗锚点，宽覆盖不编造）；两端都定位不到
-    → 整对放弃（无任何真实坐标）。空返回 = 全部放弃（调用方降级粗锚点）。
+    定位与边界（2026-10-17 momo 改定）：
+    - 首尾都定位 → 精确区间；落在同一句 → 就近上下文 ±3 轮
+      （与 read_memory_source 单句扩展同口径，不足有多少取多少）；
+    - 只有首句 → 从首句所在消息往后数 10 条消息（不足到语料末尾）；
+    - 只有尾句 → 从尾句所在消息往前数 10 条消息（不足到语料开头）；
+    - 两端都定位不到 → 整对放弃（无任何真实坐标）。
+    半有效仍是包含真实跨度的宽区间，只是从「拉到会话尽头」收窄为
+    「就近 10 条消息」。空返回 = 全部放弃（调用方降级粗锚点）。
     """
-    turns = [m.get("turn") for m in messages
-             if isinstance(m.get("turn"), int)]
-    if not turns:
+    corpus = _conversation(messages)
+    if not corpus:
         return []
-    lo, hi = min(turns), max(turns)
+    turns = [m["turn"] for m in corpus]
+    lo_turn, hi_turn = min(turns), max(turns)
+
     pairs: list[tuple[int, int]] = []
     for qs in quote_spans or []:
-        s = locate_turn(qs.get("start_quote", ""), messages)
-        e = locate_turn(qs.get("end_quote", ""), messages)
-        if s is None and e is None:
+        s_idx = _locate_index(qs.get("start_quote", ""), corpus)
+        e_idx = _locate_index(qs.get("end_quote", ""), corpus)
+        if s_idx is None and e_idx is None:
             continue
-        if s is None:
-            s = lo
-        if e is None:
-            e = hi
-        pairs.append((min(s, e), max(s, e)))
+        if s_idx is None:
+            # 只有尾句：往前数 10 条消息（不足到语料开头）
+            s_idx = max(0, e_idx - FALLBACK_SPAN_MESSAGES)
+        elif e_idx is None:
+            # 只有首句：往后数 10 条消息（不足到语料末尾）
+            e_idx = min(len(corpus) - 1, s_idx + FALLBACK_SPAN_MESSAGES)
+        if s_idx == e_idx:
+            # 首尾同一句 → ±3 轮就近上下文（不足有多少取多少）
+            t = turns[s_idx]
+            pairs.append((max(lo_turn, t - SAME_QUOTE_CONTEXT_TURNS),
+                          min(hi_turn, t + SAME_QUOTE_CONTEXT_TURNS)))
+        else:
+            pairs.append((min(turns[s_idx], turns[e_idx]),
+                          max(turns[s_idx], turns[e_idx])))
     if not pairs:
         return []
     pairs.sort()

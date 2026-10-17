@@ -101,8 +101,10 @@ def test_file_format_v2():
 
 
 def test_spans_from_quotes_half_valid():
-    # 2026-10-12 裁决：半有效句对 → 缺失端取保证边界，区间必含真实跨度；
-    # 双盲 → 整对放弃。语料=持久存档∪内存（见 service._quote_corpus）。
+    # 2026-10-12 裁决：半有效句对 → 缺失端取就近边界（2026-10-17 momo
+    # 改定：单端定位 ±10 条消息，不再拉到会话尽头）；双盲 → 整对放弃。
+    # 语料=持久存档∪内存（见 service._quote_corpus）。本用例语料只有
+    # 3 条消息，就近边界与旧保证边界结果相同（都到语料边缘）。
     from ember.turn_span import spans_from_quotes
     msgs = [
         {"role": "user", "turn": 1,
@@ -110,11 +112,11 @@ def test_spans_from_quotes_half_valid():
         {"role": "assistant", "turn": 2, "content": "好的，记下了。"},
         {"role": "user", "turn": 3, "content": "那梦通道也一起对一下吧。"},
     ]
-    # 起句有效、尾句编造 → 终点取最新轮（保证边界）
+    # 起句有效、尾句编造 → 从首句往后 10 条消息（不足到末尾）
     r = spans_from_quotes(
         [{"start_quote": "今天我们决定把", "end_quote": "这句话不存在"}], msgs)
     assert r == [(1, 3)], r
-    # 起句编造、尾句有效 → 起点取最早轮
+    # 起句编造、尾句有效 → 从尾句往前 10 条消息（不足到开头）
     r = spans_from_quotes(
         [{"start_quote": "这句话不存在", "end_quote": "梦通道"}], msgs)
     assert r == [(1, 3)], r
@@ -129,6 +131,37 @@ def test_spans_from_quotes_half_valid():
     print("ok  test_spans_from_quotes_half_valid")
 
 
+def test_spans_from_quotes_nearby_boundaries():
+    # 2026-10-17 momo 改定：单端定位 → 就近 10 条消息（不再是会话
+    # 尽头的保证边界）；首尾同一句 → ±3 轮（与 read_source 同口径）。
+    from ember.turn_span import spans_from_quotes
+    msgs = [{"role": "user" if i % 2 == 0 else "assistant", "turn": i + 1,
+             "content": f"消息{i}的内容"}
+            for i in range(24)]   # 24 条消息，turn 1..24
+
+    # 只有首句（turn 5）→ 往后 10 条消息 → turn 15
+    r = spans_from_quotes(
+        [{"start_quote": "消息4的内容", "end_quote": "不存在"}], msgs)
+    assert r == [(5, 15)], r
+    # 只有尾句（turn 20）→ 往前 10 条消息 → turn 10
+    r = spans_from_quotes(
+        [{"start_quote": "不存在", "end_quote": "消息19的内容"}], msgs)
+    assert r == [(10, 20)], r
+    # 只有首句且尾部不足 10 条（turn 22）→ 到语料末尾 turn 24
+    r = spans_from_quotes(
+        [{"start_quote": "消息21的内容", "end_quote": "不存在"}], msgs)
+    assert r == [(22, 24)], r
+    # 首尾同一句（turn 8）→ ±3 轮（5..11）
+    r = spans_from_quotes(
+        [{"start_quote": "消息7的内容", "end_quote": "消息7的内容"}], msgs)
+    assert r == [(5, 11)], r
+    # 同一句贴开头（turn 1）→ 不足有多少取多少（1..4）
+    r = spans_from_quotes(
+        [{"start_quote": "消息0的内容", "end_quote": "消息0的内容"}], msgs)
+    assert r == [(1, 4)], r
+    print("ok  test_spans_from_quotes_nearby_boundaries")
+
+
 if __name__ == "__main__":
     test_fill_and_reload()
     test_norm()
@@ -137,4 +170,5 @@ if __name__ == "__main__":
     test_covers()
     test_file_format_v2()
     test_spans_from_quotes_half_valid()
+    test_spans_from_quotes_nearby_boundaries()
     print("turn_span tests: all passed")
