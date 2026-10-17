@@ -6,6 +6,8 @@ proxy 退役。本进程不再位于对话主路径：
 
 - POST /ember/hooks/turn_start   轮前：开轮 + 本地召回，返回注入文本
 - POST /ember/hooks/turn_end     轮后：原文存档 + 收轮
+- POST /ember/briefing/refresh · GET /ember/briefing   简报（截断刷新/取用）
+- POST /ember/memory/pin · /ember/memory/unpin         钉住/取消（幂等）
 - POST /mcp                      MCP Streamable HTTP：create_memory_event /
                                  read_memory_source（schema 与代理形态同源，
                                  见 ember/writer.py build_tools_spec）
@@ -282,6 +284,52 @@ async def _sleep_sediment_evidence(request: Request) -> JSONResponse:
     return JSONResponse(svc.sidecar_sediment_evidence(body))
 
 
+# ---------- 简报与钉住（2026-10-17 设计夜；HTTP 接线随本次补齐） ----------
+
+async def _briefing_refresh(request: Request) -> JSONResponse:
+    """截断时刷新简报（app 编排：丢头留尾截断的同步动作）。"""
+    svc = _service_or_404(request)
+    if isinstance(svc, JSONResponse):
+        return svc
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    return JSONResponse(svc.sidecar_briefing_refresh(body))
+
+
+async def _briefing_get(request: Request) -> JSONResponse:
+    """取当前简报（断线重进/新会话开场注入）。"""
+    svc = _service_or_404(request)
+    if isinstance(svc, JSONResponse):
+        return svc
+    return JSONResponse(svc.sidecar_briefing_get())
+
+
+async def _pin_memory(request: Request) -> JSONResponse:
+    """钉住（幂等；与 pin_memory 工具共用同一执行体）。"""
+    svc = _service_or_404(request)
+    if isinstance(svc, JSONResponse):
+        return svc
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    return JSONResponse(svc.sidecar_pin_memory(body))
+
+
+async def _unpin_memory(request: Request) -> JSONResponse:
+    """取消钉住（幂等）。"""
+    svc = _service_or_404(request)
+    if isinstance(svc, JSONResponse):
+        return svc
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    return JSONResponse(svc.sidecar_unpin_memory(body))
+
+
 class BearerAuthMiddleware:
     """最小 Bearer 鉴权（EMBER_TOKEN 设置时生效），MCP 与钩子一视同仁。"""
 
@@ -313,6 +361,11 @@ app = BearerAuthMiddleware(Starlette(
               methods=["POST"]),
         Route("/ember/sleep/sediment/evidence", _sleep_sediment_evidence,
               methods=["POST"]),
+        Route("/ember/briefing/refresh", _briefing_refresh,
+              methods=["POST"]),
+        Route("/ember/briefing", _briefing_get, methods=["GET"]),
+        Route("/ember/memory/pin", _pin_memory, methods=["POST"]),
+        Route("/ember/memory/unpin", _unpin_memory, methods=["POST"]),
         Mount("/mcp", app=_handle_mcp),
     ],
     lifespan=_lifespan,

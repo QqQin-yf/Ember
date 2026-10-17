@@ -116,7 +116,10 @@ class BriefingTests(unittest.TestCase):
         s.recall_ledger.record("s1", 21, "cue", ["EVT-R1"], cue="a")
         s.recall_ledger.record("s1", 22, "cue", ["EVT-R1"], cue="a")
         s.recall_ledger.record("s1", 23, "cue", ["EVT-R2"], cue="b")
-        self.args = {"session_id": "s1", "keep_from_turn": 40}
+        # 账本铺垫：turn 40 的 user 行 id = 800（keep_from_message_id
+        # 经 turn_ledger 换算成起点轮，app 不接触内部 turn 坐标）
+        s.turn_ledger.record("s1", 40, None, user_message_id=800)
+        self.args = {"session_id": "s1", "keep_from_message_id": 800}
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
@@ -171,6 +174,28 @@ class BriefingTests(unittest.TestCase):
         # 持久化 + get
         again = self.svc.sidecar_briefing_get()
         self.assertEqual(again["text"], text)
+
+    def test_keep_from_message_id_via_ledger(self) -> None:
+        """现场起点收 message_id：账本换算三态（精确/空隙/换算不到）。"""
+        s = self.svc
+        s.turn_ledger.record("s1", 30, None, user_message_id=600)
+        s.turn_ledger.record_reply("s1", 30, assistant_message_id=640)
+        s.turn_ledger.record_reply("s1", 40, assistant_message_id=840)
+        s.turn_ledger.record("s1", 50, None, user_message_id=1000)
+        s.turn_ledger.record_reply("s1", 50, assistant_message_id=1040)
+        # 精确归属：800 → turn 40，现场（50）不进
+        out = s.sidecar_briefing_refresh(
+            {"session_id": "s1", "keep_from_message_id": 800})
+        self.assertEqual(out["status"], "ok")
+        self.assertNotIn("EVT-STAGE", out["text"])
+        # 两轮之间的空隙：650 → 其后最早一轮（40）
+        out = s.sidecar_briefing_refresh(
+            {"session_id": "s1", "keep_from_message_id": 650})
+        self.assertNotIn("EVT-STAGE", out["text"])
+        # 换算不到（消息没进过账本）→ 0 = 不排除现场，保守多带
+        out = s.sidecar_briefing_refresh(
+            {"session_id": "s1", "keep_from_message_id": 99999})
+        self.assertIn("EVT-STAGE", out["text"])
 
     def test_budget_cuts_low_layers_first(self) -> None:
         self.svc.BRIEFING_BUDGET = 120   # 原文层就超——可砍层全砍，pin/10 保留

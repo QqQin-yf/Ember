@@ -2739,7 +2739,7 @@ class EmberService:
     #                                 预算不够从低往高砍（pin/10 永不砍）
     #   召回过的旧记忆                 只放最相关一条（被召回次数最多，
     #                                 平局取最近被召回）→ core 层
-    #   现场尾部（keep_from_turn 起）  不进——原文还在上下文里
+    #   现场尾部（keep_from 起）        不进——原文还在上下文里
     # 去重：类间同一事件只出现一次取最高层；简报注入记一次在场
     # （ledger route="briefing"）→ 2h 内召回对同会话走轻量行；钉住
     # 永久不自动浮现（召回管线过滤，search 不受影响）。观察事件不进
@@ -2789,20 +2789,36 @@ class EmberService:
         return head + ("\n" + "\n".join(quotes) if quotes else "")
 
     def sidecar_briefing_refresh(self, args: dict[str, Any]) -> dict[str, Any]:
-        """截断时刷新简报（app 调用；自包含重写）。"""
+        """截断时刷新简报（app 调用；自包含重写）。
+
+        keep_from_message_id（2026-10-17 与 Deliz 对齐）：现场起点的
+        后端消息行 id——对外契约只有 message_id 一套（API.md §9），
+        原 keep_from_turn 是设计疏漏漏出的内部坐标，接口未上线直接
+        废弃不留兼容。经 turn_ledger.turn_at_or_after 换算成起点轮
+        （与召回窗口过滤 context_start_id 同一条路）；换算不到
+        （消息没进过账本，如从未传 message_id 的部署）→ 0 =
+        不排除现场，保守多带（宁可重复不漏，与 §2.3 同姿态）。
+        """
         args = args or {}
         session_id = str(args.get("session_id") or "")
         if not session_id:
             return {"status": "failed", "error": "缺少 session_id"}
+        keep_from = 0
         try:
-            keep_from = int(args.get("keep_from_turn") or 0)
+            mid = int(args.get("keep_from_message_id") or 0)
         except (TypeError, ValueError):
-            keep_from = 0
+            mid = 0
+        if mid > 0:
+            keep_from = (self.turn_ledger.turn_at_or_after(session_id, mid)
+                         or 0)
         now = datetime.now(timezone.utc).astimezone()
         horizon = (now - timedelta(hours=72)).isoformat(timespec="seconds")
 
         def onstage(ev: Any) -> bool:
-            return self._event_max_turn(ev) >= keep_from
+            # keep_from=0（缺省/换算不到）= 不做现场排除——原实现
+            # max_turn >= 0 恒真会把全部事件当现场排除，简报清空，
+            # 与文档「传 0 = 不排除」相悖，测试踩中后修。
+            return keep_from > 0 and self._event_max_turn(ev) >= keep_from
 
         def eligible(ev: Any) -> bool:
             return (self.sleep_state.recall_allowed(ev.event_id)

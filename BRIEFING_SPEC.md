@@ -16,11 +16,11 @@
 请求体：
 
 ```json
-{"session_id": "main", "keep_from_turn": 458}
+{"session_id": "main", "keep_from_message_id": 1024}
 ```
 
 - `session_id`：必填。
-- `keep_from_turn`：**现场起点轮**——截断后留在上下文里的最早一轮。现场区间的记忆一律不进简报（原文就在上下文里，带了就是复读）。传 0 或缺省 = 不做现场排除。
+- `keep_from_message_id`：**现场起点的后端消息行 id**——截断后留在上下文里的最早那条消息的 seq。现场区间的记忆一律不进简报（原文就在上下文里，带了就是复读）。ember 经 turn_ledger 换算成起点轮（app 不接触内部 turn 坐标，与 API.md §9「对外只有 message_id 一套」一致）；换算不到（该消息没进过账本）→ 缺省同 0 = 不做现场排除（保守多带）。
 
 响应 200（`text` 就是注入文本，直接贴上下文开头）：
 
@@ -49,7 +49,7 @@
 | pin + significance 10 | 必进（现场除外） | **原文**：core + ±3 轮原文（事件是真区间则按区间；单句扩 ±3 轮，不足有多少拉多少；原文不可达退 key_quotes） |
 | 72h 新增（现场外） | 都要 | significance 8-9 → **core**；1-7 → **summary 一句** |
 | 召回过的旧记忆 | **只放最相关一条**（被召回次数最多，平局取最近） | core |
-| 现场尾部（≥ keep_from_turn） | **不进** | —— |
+| 现场尾部（≥ 起点轮，由 keep_from_message_id 换算） | **不进** | —— |
 | 观察事件（origin=observe） | **不进** | ——（习惯不是「正在进行」） |
 
 - 层次依据 = 写入时前端 AI 标的 `significance`（**2026-10-17 起格式为 `"N：一句话理由"`，N∈1-10**，写入端硬校验）。旧事件无数字前缀按 5 计。
@@ -63,7 +63,7 @@
 
 ## 5. app 侧要做的
 
-1. 截断动作处：先算出留尾的起始轮 → 调 `POST /ember/briefing/refresh` → 把 `text` 注入留下上下文的开头（标注来源「近况简报」即可）。
+1. 截断动作处：取留尾的起始消息 seq（`keep_from_message_id`）→ 调 `POST /ember/briefing/refresh` → 把 `text` 注入留下上下文的开头（标注来源「近况简报」即可）。
 2. 新会话/断线重进：调 `GET /ember/briefing`，非 empty 就注入。
 3. 用户在 UI 钉/取消钉记忆（如果做 UI 的话）：调 pin/unpin 端点。
 4. 前端 AI 的写入行为有变：`significance` 必须是 `"N：理由"` 格式（写入端会拒），participants 别漏 ai。
