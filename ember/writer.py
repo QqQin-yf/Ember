@@ -13,6 +13,7 @@ EMBEDDED_WRITER_PROMPT 保留为空常量兼容既有导入；service._with_embe
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 # 2026-10-11 退役（无感化拍板）：写作规则已全部内嵌工具描述与字段说明，
@@ -68,7 +69,11 @@ def build_tools_spec() -> list[dict[str, Any]]:
                             },
                             "participants": {
                                 "type": "array",
-                                "description": "这段经历的参与者；ai 一方写 \"ai\"",
+                                "description": (
+                                    "这段经历的参与者。这轮对话的双方都在场时"
+                                    "双方都算——ai 说过话或被涉及就带上 "
+                                    "\"ai\"，不要只写 user"
+                                ),
                                 "items": {"type": "string"},
                             },
                             "objects": {
@@ -98,7 +103,15 @@ def build_tools_spec() -> list[dict[str, Any]]:
                             },
                             "significance": {
                                 "type": "string",
-                                "description": "为什么这件事值得长期记住",
+                                "description": (
+                                    "重要度打分：1-10 的整数 + 冒号 + 一句话"
+                                    "理由（如「8：Deliz 开发线的转折」）。"
+                                    "10=重大项目转折或确定永远要记住的事；"
+                                    "8-9=对进行中事务有实质影响的进展、发现、"
+                                    "决定；5-7=有内容但偏背景；1-4=琐碎——"
+                                    "1-4 的事不要调用本工具（随口带过的偏好、"
+                                    "习惯、单点琐事不写成长期记忆）"
+                                ),
                             },
                             "details": {
                                 "type": "array",
@@ -232,6 +245,10 @@ def validate_writer_arguments(args: dict[str, Any]) -> tuple[dict[str, Any] | No
     for k in ["context", "outcome", "state", "affect", "significance"]:
         if not isinstance(event[k], str):
             return None, f"event.{k} 必须是字符串"
+    # significance 数字化（2026-10-17 momo：简报分层依据，格式必须可靠）
+    if not re.match(r"\s*(10|[1-9])\s*[：:]", event["significance"]):
+        return None, ("significance 必须以 1-10 的数字开头，后跟冒号和"
+                      "一句话理由（如「8：Deliz 开发线的转折」）")
 
     # key_quotes（r4 第 3 项）：数组、元素 speaker∈{user,ai} + 非空 text；
     # 上限 3 条（baseline），超出整条拒绝
@@ -383,6 +400,48 @@ def build_search_tool_spec() -> list[dict[str, Any]]:
             },
         },
     }]
+
+
+# ---------- pin_memory / unpin_memory（2026-10-17 设计夜：钉住联动） ----------
+
+PIN_TOOL_NAME = "pin_memory"
+UNPIN_TOOL_NAME = "unpin_memory"
+
+PIN_TOOL_DESCRIPTION = (
+    "把一条记忆钉住：它会常驻每次开场简报（给原文层），并且不再自动"
+    "浮现在召回中（已常驻在场，再浮是复读；主动检索不受影响）。"
+    "只在用户明确要求「钉住」「记住这事别忘」时调用，取消钉住用 "
+    "unpin_memory。"
+)
+
+UNPIN_TOOL_DESCRIPTION = (
+    "取消一条记忆的钉住。钉住状态可通过 search_memory 的状态标注确认。"
+)
+
+
+def build_pin_tool_specs() -> list[dict[str, Any]]:
+    """钉住/取消钉住的 MCP 工具 schema（旁路专用，代理循环不挂）。"""
+    def _spec(name: str, desc: str) -> dict[str, Any]:
+        return {
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": desc,
+                "strict": False,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "event_id": {
+                            "type": "string",
+                            "description": "要操作的记忆 id",
+                        },
+                    },
+                    "required": ["event_id"],
+                },
+            },
+        }
+    return [_spec(PIN_TOOL_NAME, PIN_TOOL_DESCRIPTION),
+            _spec(UNPIN_TOOL_NAME, UNPIN_TOOL_DESCRIPTION)]
 
 
 def parse_tool_call(message: dict[str, Any]) -> dict[str, Any] | None:

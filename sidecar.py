@@ -40,7 +40,8 @@ from ember.llm import MockLLMClient
 from ember.service import EmberService
 from ember.store import EmberStore
 from ember.writer import (READ_SOURCE_TOOL_NAME, REVISE_TOOL_NAME,
-                          SEARCH_TOOL_NAME, TOOL_NAME)
+                          SEARCH_TOOL_NAME, TOOL_NAME,
+                          UNPIN_TOOL_NAME, PIN_TOOL_NAME)
 
 import mcp.types as types
 from mcp.server.lowlevel import Server
@@ -87,6 +88,10 @@ async def _call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             (arguments or {}).get("event_id") or "")
     elif name == SEARCH_TOOL_NAME:
         result = SERVICE.sidecar_search_memory(arguments or {})
+    elif name == PIN_TOOL_NAME:
+        result = SERVICE.sidecar_pin_memory(arguments or {})
+    elif name == UNPIN_TOOL_NAME:
+        result = SERVICE.sidecar_unpin_memory(arguments or {})
     else:
         result = {"status": "failed", "error": f"未知工具: {name}"}
     return [types.TextContent(type="text",
@@ -194,6 +199,40 @@ async def _sleep_sediment_evidence(request: Request) -> JSONResponse:
     return JSONResponse(SERVICE.sidecar_sediment_evidence(body))
 
 
+# ---------- 简报（2026-10-17 设计夜：截断驱动，拼装式零 LLM） ----------
+
+async def _briefing_refresh(request: Request) -> JSONResponse:
+    """截断时刷新简报：丢头留尾，新简报自包含（契约见 BRIEFING_SPEC.md）。"""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    return JSONResponse(SERVICE.sidecar_briefing_refresh(body))
+
+
+async def _briefing_get(request: Request) -> JSONResponse:
+    """取当前简报（断线重进/新会话开场；无则 empty）。"""
+    return JSONResponse(SERVICE.sidecar_briefing_get())
+
+
+async def _memory_pin(request: Request) -> JSONResponse:
+    """钉住一条记忆（幂等）：简报必带 + 自动召回不再浮现。"""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    return JSONResponse(SERVICE.sidecar_pin_memory(body))
+
+
+async def _memory_unpin(request: Request) -> JSONResponse:
+    """取消钉住（幂等）。"""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    return JSONResponse(SERVICE.sidecar_unpin_memory(body))
+
+
 class BearerAuthMiddleware:
     """最小 Bearer 鉴权（EMBER_TOKEN 设置时生效），MCP 与钩子一视同仁。"""
 
@@ -225,6 +264,10 @@ app = BearerAuthMiddleware(Starlette(
               methods=["POST"]),
         Route("/ember/sleep/sediment/evidence", _sleep_sediment_evidence,
               methods=["POST"]),
+        Route("/ember/briefing/refresh", _briefing_refresh, methods=["POST"]),
+        Route("/ember/briefing", _briefing_get, methods=["GET"]),
+        Route("/ember/memory/pin", _memory_pin, methods=["POST"]),
+        Route("/ember/memory/unpin", _memory_unpin, methods=["POST"]),
         Mount("/mcp", app=_handle_mcp),
     ],
     lifespan=_lifespan,

@@ -87,13 +87,18 @@
 
 ## 5. MCP 工具组（消费方：模型的工具循环，经 app 转发）
 
-端点：`POST /mcp`（MCP Streamable HTTP）。工具清单 `tools/list` 返回三件；以下为语义契约。
+端点：`POST /mcp`（MCP Streamable HTTP）。工具清单 `tools/list` 返回六件；以下为语义契约。
 
 ### 5.1 create_memory_event
 
 记录一条经历。**只在出现具体的、值得留存的经历时调用**；同一条经历只调一次（重复调用会产生重复记忆）。
 
 必填参数：`event`（对象：summary/participants/objects/context/core/outcome/state/affect/significance/details/key_quotes）、`recall_routes`（召回线索）、`quote_spans`（出处句对：起尾句逐字摘自原文）。
+
+**2026-10-17 起两个格式纪律（写入端硬校验）**：
+
+- `significance` = `"N：一句话理由"`（N∈1-10：10=重大转折/永远要记；8-9=有实质影响的进展发现决定；5-7=有内容偏背景；1-4=琐碎，**不要调用本工具**——随口带过的偏好、习惯、单点琐事不写成长期记忆）。该分数是简报分层的依据
+- `participants`：对话双方在场时双方都算——ai 说过话或被涉及就带上 `"ai"`，不要只写 user
 
 校验与回执：
 
@@ -107,7 +112,7 @@
 
 翻一条记忆对应的对话原文（只读）。只在需要核对原话细节时调用。语料 = 内存会话 ∪ 向后端原文接口按需拉取（用完即弃，本地不落盘）。
 
-- 成功：`{"status": "ok", "event_id", "turns", "transcript", "truncated"}`
+- 成功：`{"status": "ok", "event_id", "turns", "context_expanded", "transcript", "truncated"}`——**原文上下文扩展（10-17）**：事件覆盖单轮时自动扩 ±3 轮（前后不足就有多少拉多少，`context_expanded=true`）；真区间按区间
 - 不可得：`{"status": "not_archived", "reason": …}`（原文接口未配置/区间拉不到）；id 未知 → `not_found`
 - superseded（被修正）的事件也可读——显式翻看不是自动召回
 
@@ -136,6 +141,14 @@
 - **relation + guidance**：命中形态 single / cluster / chain（chain = 共享同一实体）与对应行动建议；没有找到如实说记不清
 - **检索即提取**：命中入提取账（与召回同权）——刷新遗忘计时器，淡忘中的条目即时解除收紧（note 会告知「已唤醒 N 条」）
 - 向量服务不可达时自动降级关键词检索（note 告知）；`SEARCH_HIT_FLOOR=0.30` 为 baseline 待标定
+
+### 5.5 pin_memory / unpin_memory（钉住，2026-10-17）
+
+把一条记忆钉住/取消钉住（幂等）。**只在用户明确要求「钉住」「记住这事别忘」时调用**。
+
+联动：钉住的**必进简报（原文层）**且**自动召回不再浮现**（已常驻在场，再浮是复读；search 主动检索不受影响）。HTTP 等价端点：`POST /ember/memory/pin` / `POST /ember/memory/unpin`。
+
+回执：`{"status": "ok", "event_id", "pinned": true/false [, "already"|"was_pinned"]}`
 
 ## 6. Sleep 夜间维护（消费方：app 编排）
 
@@ -324,13 +337,22 @@ GET {EMBER_SOURCE_URL}/api/source?session_id={sid}&from={int}&to={int}
 - **绝不重试轰炸**：一次拉取失败就降级，下次需要时再试
 - 提供方鉴权与 heart-chat 现行一致（Bearer，可选）
 
-## 8. 坐标系说明
+## 8. 简报（briefing，消费方：app 截断编排）
+
+**2026-10-17 设计夜定稿。截断驱动、拼装式零 LLM**：上下文丢头留尾式截断，每次截断时 app 调 refresh 刷新简报并注入留下上下文的开头；旧简报随头部丢弃，新简报自包含。断线重进/新会话用 GET 取。
+
+- `POST /ember/briefing/refresh`：体 `{"session_id", "keep_from_turn"}`（现场起点轮——现场区间记忆不进，原文已在上下文）。返回 `{"status": "ok", "text", "chars", "stats": {…}}`，`text` 即注入文本
+- `GET /ember/briefing`：取当前简报；从未刷新 → `{"status": "empty"}`
+- 入选/分层/预算/去重全规则见 **BRIEFING_SPEC.md**（要点：pin 与 significance=10 必进给原文层；72h 新增 8-9 给 core、1-7 给 summary 一句；召回过的旧记忆只放最相关一条；现场与观察事件不进；预算 6000 字从低层砍，pin/10 永不砍；简报注入计一次在场——2h 内召回走轻量行）
+- 钉住端点：`POST /ember/memory/pin` / `POST /ember/memory/unpin`（体 `{"event_id"}`，幂等；联动见 §5.5）
+
+## 9. 坐标系说明
 
 对外契约**只有 message_id 一套**（后端消息树行 id）：钩子请求携带、事件出处经账本换算回指。
 
 内部坐标（app 无需关心）：ember 的 `turn-N`（会话内序数）与 heart 的 `t-XXXXXX` 各自独立发号、经 `turn_ledger.jsonl` 旁路账本互相映射并指向 message_id——换算是 ember 内部事务，Event 本体不存这些映射（旁路文件，可重建）。
 
-## 9. 配置清单（.env，启动时自动加载）
+## 10. 配置清单（.env，启动时自动加载）
 
 | 变量 | 说明 |
 |---|---|
@@ -338,5 +360,5 @@ GET {EMBER_SOURCE_URL}/api/source?session_id={sid}&from={int}&to={int}
 | EMBER_DATA_DIR | 记忆库目录（默认 data/） |
 | EMBER_SOURCE_URL / EMBER_SOURCE_TOKEN / EMBER_SOURCE_TIMEOUT | 原文提供接口（heart-chat `/api/source`，将来 Deliz 同 schema 接管——契约见 §7.1） |
 | EMBER_EMBED_BASE_URL / EMBER_EMBED_API_KEY / EMBER_EMBED_MODEL | 向量服务 |
-| ZHIPU_API_KEY / EMBER_SLEEP_MODEL | Sleep 管线的 LLM |
-| EMBER_STRUCTURE_MODEL | 结构维护归属判定模型（缺省回落 EMBER_SLEEP_MODEL） |
+| ZHIPU_API_KEY / EMBER_SLEEP_MODEL | 观察提炼/合并等任务的 LLM |
+| EMBER_BRIEFING_BUDGET | 简报字符硬顶（缺省 6000，见 §8） |

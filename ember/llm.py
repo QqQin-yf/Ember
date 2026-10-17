@@ -129,7 +129,7 @@ class MockLLMClient:
                 "outcome": "形成了明确结论",
                 "state": "进入下一阶段",
                 "affect": "平静",
-                "significance": "mock 测试用 Event",
+                "significance": "8：mock 测试用 Event",
                 "details": ["本 Event 由 Mock Memory Writer 生成"],
                 "key_quotes": [],
             },

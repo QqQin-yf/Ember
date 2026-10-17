@@ -44,6 +44,7 @@ from .turn_span import TurnSpanStore, spans_from_quotes
 from . import source_client
 from . import executors
 from .cue_tighten import CueTightener
+from .pin_store import PinStore
 from .prompts import (OBSERVE_SYSTEM_PROMPT, build_observe_user_prompt,
                       OBSERVE_MERGE_PROMPT, build_observe_merge_user_prompt)
 from . import observe as observe_mod
@@ -54,6 +55,7 @@ from .writer import (
     TOOL_NAME,
     READ_SOURCE_TOOL_NAME,
     build_revise_tool_spec,
+    build_pin_tool_specs,
     EMBEDDED_WRITER_PROMPT,
     build_tools_spec,
     validate_writer_arguments,
@@ -412,6 +414,8 @@ class EmberService:
         self.recall_ledger = RecallLedger(getattr(store, "root", ""))
         # 观察游标（2026-10-16 ④observe）：每会话已检查到的后端 seq
         self.observe_cursor = ObserveCursor(getattr(store, "root", ""))
+        # 钉住登记（2026-10-17 设计夜：briefing 必带 + 自动召回不再浮现）
+        self.pin_store = PinStore(getattr(store, "root", ""))
         # 会话原文存档已退役（2026-10-14 去原文化）：原文只存后端消息树
         # 一份，ember 经 source_client 按 message_id 按需拉取（用完即弃）；
         # 轮次持久账 = turn_ledger（无条件记账，重启恢复计数用）
@@ -628,9 +632,12 @@ class EmberService:
 
         # Sleep 过滤（momo 10-04 裁决）：superseded/outdated 不参与自动召回。
         # 两路命中合并前统一过滤；被排除的不进前缀块，计数照常上报。
+        # 钉住的同样排除（2026-10-17 裁决：简报必带常驻在场，召回再浮
+        # 就是复读）；search 主动检索不受影响。
         excluded = [eid for eid in set(recalled_ctx.recalled_events)
                     | set(entity_event_ids)
-                    if not self.sleep_state.recall_allowed(eid)]
+                    if not self.sleep_state.recall_allowed(eid)
+                    or self.pin_store.is_pinned(eid)]
         if excluded:
             recalled_ctx.recalled_events = [
                 eid for eid in recalled_ctx.recalled_events
@@ -923,6 +930,13 @@ class EmberService:
                               "（写入早于定位功能或出处未回填）"}
         sid = sess.group(1)
         turns = [t for s, e in spans for t in range(s, e + 1)]
+        # 原文上下文（2026-10-17 momo 拍板）：真区间按区间；单句扩
+        # ±3 轮（前后不足 3 轮就有多少拉多少）——读的体验不再孤零零一句
+        context_expanded = False
+        if len(set(turns)) == 1:
+            c = turns[0]
+            turns = list(range(max(1, c - 3), c + 4))
+            context_expanded = True
         want = set(turns)
         rows = [m for m in self.sessions.get(sid).messages
                 if m.get("turn") in want] if sid in self.sessions else []
@@ -945,6 +959,7 @@ class EmberService:
             "status": "ok",
             "event_id": resolved,
             "turns": turns,
+            "context_expanded": context_expanded,
             "transcript": transcript,
             "truncated": truncated,
         }
@@ -1574,9 +1589,9 @@ class EmberService:
                 "turn": live["turn"]}
 
     def sidecar_tool_specs(self) -> list[dict[str, Any]]:
-        """MCP tools/list 工具清单（含冷静期修正工具与主动检索）。"""
+        """MCP tools/list 工具清单（含修正、检索与钉住）。"""
         return (build_tools_spec() + [build_revise_tool_spec()[0]]
-                + build_search_tool_spec())
+                + build_search_tool_spec() + build_pin_tool_specs())
 
     def sidecar_create_memory_event(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """MCP 工具 create_memory_event 执行体：进行中的一轮 + 参数 → 落库。
@@ -2485,6 +2500,7 @@ class EmberService:
                  if (getattr(ev, "origin", "") or "") in ("observe",
                                                           "affirmed")
                  and self.sleep_state.recall_allowed(ev.event_id)
+                 and not self.pin_store.is_pinned(ev.event_id)
                  and ev.event_id not in exclude]
         if not cands:
             return None
@@ -2713,6 +2729,227 @@ class EmberService:
         except Exception:  # noqa: BLE001
             pass
         return eid
+
+    # ---------- 简报（2026-10-17 设计夜定稿：截断驱动，拼装式零 LLM） ----------
+    #
+    # 丢头留尾式截断：app 每次截断时调 briefing/refresh——旧简报随头部
+    # 丢弃，新简报必须自包含。候选池与层次（momo 逐项拍板）：
+    #   pin + significance 10         必进，原文层（read_source ±3 轮）
+    #   72h 新增（截掉区间里写的）     都要；8-9 → core，1-7 → summary；
+    #                                 预算不够从低往高砍（pin/10 永不砍）
+    #   召回过的旧记忆                 只放最相关一条（被召回次数最多，
+    #                                 平局取最近被召回）→ core 层
+    #   现场尾部（keep_from_turn 起）  不进——原文还在上下文里
+    # 去重：类间同一事件只出现一次取最高层；简报注入记一次在场
+    # （ledger route="briefing"）→ 2h 内召回对同会话走轻量行；钉住
+    # 永久不自动浮现（召回管线过滤，search 不受影响）。观察事件不进
+    # （习惯不是「正在进行」）。层次依据 significance = 写入时前端 AI
+    # 标的 "N：理由"（1-10）；无数字前缀的旧事件按 5 计（summary 层）。
+
+    BRIEFING_FILE = "briefing_latest.json"
+    BRIEFING_BUDGET = 6000   # 字符硬顶（首版估值，实测后调）
+
+    def _briefing_path(self) -> str:
+        return os.path.join(self.store.root, self.BRIEFING_FILE)
+
+    @staticmethod
+    def _sig_level(significance: str) -> int:
+        """significance 文本 → 重要度分（无数字前缀的旧事件按 5 计）。"""
+        m = re.match(r"\s*(10|[1-9])\s*[：:]", significance or "")
+        return int(m.group(1)) if m else 5
+
+    @staticmethod
+    def _event_max_turn(ev: Any) -> int:
+        """事件覆盖的最大轮次（现场判定用）。"""
+        out = 0
+        for ref in (ev.turn_refs or []):
+            m = re.match(r"turn-(\d+)$", str(ref))
+            if m:
+                out = max(out, int(m.group(1)))
+        return out
+
+    def _briefing_source_block(self, ev: Any) -> str:
+        """原文层条目：core + ±3 轮原文（复用 read_source_event）。
+
+        原文不可达时退到写入时逐字核对过的 key_quotes——简报不被
+        source 接口卡死。
+        """
+        head = f"◆ {ev.core.strip()}"
+        try:
+            src = self.read_source_event(ev.event_id)
+        except Exception:  # noqa: BLE001 — 拉不到原文不挡简报
+            src = {"status": "failed"}
+        transcript = str(src.get("transcript") or "").strip()
+        if src.get("status") == "ok" and transcript:
+            lines = [f"  {ln}" for ln in transcript.splitlines()]
+            return head + "\n  【原文】\n" + "\n".join(lines)
+        quotes = [f"  「{q.get('text', '')}」"
+                  for q in (ev.key_quotes or [])
+                  if isinstance(q, dict) and q.get("text")]
+        return head + ("\n" + "\n".join(quotes) if quotes else "")
+
+    def sidecar_briefing_refresh(self, args: dict[str, Any]) -> dict[str, Any]:
+        """截断时刷新简报（app 调用；自包含重写）。"""
+        args = args or {}
+        session_id = str(args.get("session_id") or "")
+        if not session_id:
+            return {"status": "failed", "error": "缺少 session_id"}
+        try:
+            keep_from = int(args.get("keep_from_turn") or 0)
+        except (TypeError, ValueError):
+            keep_from = 0
+        now = datetime.now(timezone.utc).astimezone()
+        horizon = (now - timedelta(hours=72)).isoformat(timespec="seconds")
+
+        def onstage(ev: Any) -> bool:
+            return self._event_max_turn(ev) >= keep_from
+
+        def eligible(ev: Any) -> bool:
+            return (self.sleep_state.recall_allowed(ev.event_id)
+                    and (getattr(ev, "origin", "") or "") != "observe")
+
+        def in_new72(ev: Any) -> bool:
+            return bool(ev.ingest_time) and ev.ingest_time >= horizon
+
+        # —— 候选池 ——
+        pinned: list[Any] = []
+        for eid in self.pin_store.all():
+            try:
+                ev = self.store.get_event(eid)
+            except KeyError:
+                continue
+            if eligible(ev) and not onstage(ev):
+                pinned.append(ev)
+        pinned_set = {ev.event_id for ev in pinned}
+
+        sig10: list[Any] = []
+        new72: list[Any] = []
+        for ev in self.store.all_events():
+            if not eligible(ev) or onstage(ev) or ev.event_id in pinned_set:
+                continue
+            if self._sig_level(ev.significance) == 10:
+                sig10.append(ev)
+            elif in_new72(ev):
+                new72.append(ev)
+        sig10_set = {ev.event_id for ev in sig10}
+
+        # 召回过的旧记忆：最相关一条 = 被召回次数最多，平局取最近被召回
+        top_id, top_key = None, (-1, "")
+        for eid, cnt in self.recall_ledger.event_recall_count.items():
+            if cnt <= 0:
+                continue
+            try:
+                ev = self.store.get_event(eid)
+            except KeyError:
+                continue
+            if (not eligible(ev) or onstage(ev)
+                    or eid in pinned_set or eid in sig10_set):
+                continue
+            key = (cnt, self.recall_ledger.last_extracted.get(eid) or "")
+            if key > top_key:
+                top_id, top_key = eid, key
+        recalled_top = [self.store.get_event(top_id)] if top_id else []
+
+        # —— 分层拼装（预算从低层砍；pin/10 永不砍）——
+        budget = int(os.environ.get("EMBER_BRIEFING_BUDGET",
+                                    str(self.BRIEFING_BUDGET)))
+        src_blocks: list[str] = []
+        src_ids: list[str] = []
+        for ev in sorted(pinned + sig10,
+                         key=lambda e: -self._sig_level(e.significance)):
+            src_blocks.append(self._briefing_source_block(ev))
+            src_ids.append(ev.event_id)
+
+        core_items = sorted(
+            [ev for ev in new72 if self._sig_level(ev.significance) >= 8]
+            + recalled_top,
+            key=lambda e: -self._sig_level(e.significance))
+        summary_items = sorted(
+            [ev for ev in new72 if self._sig_level(ev.significance) < 8],
+            key=lambda e: -self._sig_level(e.significance))
+
+        kept_ids = list(src_ids)
+        used = len("【近况】\n") + sum(len(b) + 1 for b in src_blocks)
+        kept_core: list[str] = []
+        dropped = {"core": 0, "summary": 0}
+        for ev in core_items:
+            if ev.event_id in kept_ids:
+                continue
+            line = f"• {ev.core.strip()}"
+            if used + len(line) + 1 > budget:
+                dropped["core"] += 1
+                continue
+            kept_core.append(line)
+            kept_ids.append(ev.event_id)
+            used += len(line) + 1
+        kept_summary: list[str] = []
+        for ev in summary_items:
+            if ev.event_id in kept_ids:
+                continue
+            line = f"• {ev.summary.strip()}"
+            if used + len(line) + 1 > budget:
+                dropped["summary"] += 1
+                continue
+            kept_summary.append(line)
+            kept_ids.append(ev.event_id)
+            used += len(line) + 1
+
+        parts = ["【近况】"]
+        if src_blocks:
+            parts.append("\n".join(src_blocks))
+        if kept_core:
+            parts.append("\n".join(kept_core))
+        if kept_summary:
+            parts.append("\n".join(kept_summary))
+        text = "\n".join(parts)
+
+        # 简报注入记一次在场：2h 内召回对同会话走轻量行（⑧ 机制顺延）
+        if kept_ids:
+            self.recall_ledger.record(session_id, 0, "briefing",
+                                      list(dict.fromkeys(kept_ids)))
+
+        report = {"status": "ok", "text": text, "chars": len(text),
+                  "session_id": session_id,
+                  "stats": {"pinned": len(pinned), "sig10": len(sig10),
+                            "new72": len(new72),
+                            "recalled_top": top_id,
+                            "dropped": dropped}}
+        with open(self._briefing_path(), "w", encoding="utf-8") as f:
+            json.dump(report, f, ensure_ascii=False)
+        return report
+
+    def sidecar_briefing_get(self) -> dict[str, Any]:
+        """取当前简报（断线重进/新会话开场；无则如实 empty）。"""
+        p = self._briefing_path()
+        if not os.path.exists(p):
+            return {"status": "empty"}
+        try:
+            with open(p, encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return {"status": "empty"}
+
+    def sidecar_pin_memory(self, args: dict[str, Any]) -> dict[str, Any]:
+        """钉住（pin_memory 工具 / HTTP 端点共用）：幂等。"""
+        eid = str((args or {}).get("event_id") or "").strip()
+        if not eid:
+            return {"status": "failed", "error": "缺少 event_id"}
+        try:
+            self.store.get_event(eid)
+        except KeyError:
+            return {"status": "failed", "error": f"找不到记忆 {eid}"}
+        added = self.pin_store.add(eid)
+        return {"status": "ok", "event_id": eid, "pinned": True,
+                "already": not added}
+
+    def sidecar_unpin_memory(self, args: dict[str, Any]) -> dict[str, Any]:
+        """取消钉住（幂等）。"""
+        eid = str((args or {}).get("event_id") or "").strip()
+        if not eid:
+            return {"status": "failed", "error": "缺少 event_id"}
+        removed = self.pin_store.remove(eid)
+        return {"status": "ok", "event_id": eid, "pinned": False,
+                "was_pinned": removed}
 
     def run_structure_maintenance(self) -> dict[str, Any]:
         """睡眠收尾维护（2026-10-17 重构）：cue 收紧 + 向量补建
