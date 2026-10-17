@@ -182,6 +182,10 @@ class LinkRelationsTests(unittest.TestCase):
         self.svc.turn_spans.fill("EVT-N4", [(11, 11)], filled_by="test")
         self.svc.link_pending_add("EVT-N4")
         second = mats()
+        # 材料带实体当前名片（Claude 提议：attach 改写在旧名片基础上修订）
+        self.assertEqual(
+            second["EVT-N4"]["old_events"][0]["entity_summary"],
+            "用户习惯先对齐方案再动手。")
         verdict2 = {"pairs": [],
                     "entity": {"action": "attach", "entity_id": ent_id,
                                "close": False,

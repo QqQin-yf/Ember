@@ -1839,14 +1839,15 @@ class EmberService:
             old_ids.append(oid)
         # 候选空照常出材料（方案 A）：pairs 给空，窗口 AI 只判归属
 
-        def _ent_info(oid: str) -> tuple[str, str]:
+        def _ent_info(oid: str) -> tuple[str, str, str]:
             ref = _event_entity_of(self.store, oid)
             if not ref:
-                return "", ""
+                return "", "", ""
             try:
-                return self.entity_store.get(ref).name, ref
+                ent = self.entity_store.get(ref)
+                return ent.name, ref, (ent.summary or "").strip()
             except KeyError:
-                return "", ref
+                return "", ref, ""
 
         olds = []
         for oid in old_ids:
@@ -1854,9 +1855,10 @@ class EmberService:
                 oe = self.store.get_event(oid)
             except KeyError:
                 continue
-            name, ref = _ent_info(oid)
+            name, ref, ent_summary = _ent_info(oid)
             olds.append({"event_id": oid, "entity_name": name,
-                         "entity_id": ref, "core": oe.core or "",
+                         "entity_id": ref, "entity_summary": ent_summary,
+                         "core": oe.core or "",
                          "summary": oe.summary or ""})
         ent_ref = _event_entity_of(self.store, eid)
         try:

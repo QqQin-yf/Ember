@@ -24,12 +24,14 @@
  "entity_name": "（新事件所属实体名，可能为空串）",
  "old_events": [
    {"event_id": "EVT-003-xyz987", "entity_name": "子夜阁项目", "entity_id": "ent_ziye",
+    "entity_summary": "（该实体当前的名片描述，可能为空串）",
     "core": "旧事件完整叙述", "summary": "旧事件摘要"}
  ]}
 ```
 
 - `old_events` 可能多条，也可能只有一条；每条是"该新事件写入时被召回带出的旧事件"
 - `entity_name` / `entity_id` 标注是 attach 分支的合法性依据（attach 只能指向材料里出现过的实体）
+- `entity_summary`（2026-10-17 Claude 提议）是该实体**当前的名片**：attach 改写 summary 时**在旧名片基础上修订**，不要从零重写——材料只含这次召回浮起的少数成员，照眼前几条从头写会把旧名片积累的内容冲掉
 
 ## 2. 判联 prompt（原样全文）
 
