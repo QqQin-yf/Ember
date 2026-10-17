@@ -159,13 +159,16 @@ class TurnLedger:
         """message_id -> 所属 ember turn（精确归属 [user, reply] 区间）。
 
         拉取的后端原文行标回 ember turn 坐标用（语料同形，定位逻辑
-        零改动）；归属不明 → None（该行不进语料）。
+        零改动）；归属不明 → None（该行不进语料）。在飞轮（user 已
+        记、reply 未记）只认它自己的 user 行——缺 reply 的轮**不得**
+        当作无上界区间（2026-10-17 修，见 turn_at_or_after）。
         """
         for (sid, et), um in self.user_msg.items():
             if sid != ember_session:
                 continue
             rm = self.reply_msg.get((sid, et))
-            if um <= message_id and (rm is None or message_id <= rm):
+            if message_id == um or (rm is not None
+                                    and um <= message_id <= rm):
                 return et
         return None
 
@@ -175,9 +178,16 @@ class TurnLedger:
 
         判定顺序：
         1. 精确归属：起点落在某轮 [user_msg, reply_msg] 区间内 → 该轮；
+           在飞轮（user 已记、reply 未记）只认它自己的 user 行；
         2. 起点比账本覆盖还老（< 最小 user_msg）→ None——无法判定，
            调用方按「无过滤」保守全召回；
         3. 起点落在两轮之间的空隙 → 其后的最早一轮。
+
+        2026-10-17 修：缺 reply 的轮（chat 失败/turn_end 被拒收）
+        此前被当作 [user_msg, ∞) 无上界区间——晚期消息 id（截断
+        起点）会被吞进最早一个开口轮，keep_from 换算到古老轮，
+        生产实测全部记忆被误判现场。开口必须封死：无 reply 的轮
+        只认自己的 user 行。
         """
         users = {et: um for (sid, et), um in self.user_msg.items()
                  if sid == ember_session}
@@ -185,7 +195,9 @@ class TurnLedger:
             return None
         for et, um in sorted(users.items()):
             rm = self.reply_msg.get((ember_session, et))
-            if um <= message_id and (rm is None or message_id <= rm):
+            if rm is not None and um <= message_id <= rm:
+                return et
+            if rm is None and message_id == um:
                 return et
         if message_id < min(users.values()):
             return None

@@ -246,6 +246,30 @@ class BriefingTests(unittest.TestCase):
         out = self._refresh()
         self.assertEqual(out["stats"]["recalled_top"], "EVT-R1")
 
+    def test_keep_from_not_swallowed_by_reply_less_turn(self) -> None:
+        """缺 reply 的轮不得当无上界区间（2026-10-17 修）。
+
+        生产实测：早期轮 chat 失败没记 reply → 区间成 [um, ∞) 开口，
+        晚期消息 id（截断起点）被吞进古老轮，keep_from 换算到 turn
+        5-12，全部记忆被误判现场。
+        """
+        s = self.svc
+        # turn 6：user=45 已记、reply 缺（chat 失败/turn_end 被拒收）
+        s.turn_ledger.record("s1", 6, None, user_message_id=45)
+        # turn 41：正常轮 [100, 101]
+        s.turn_ledger.record("s1", 41, None, user_message_id=100)
+        s.turn_ledger.record_reply("s1", 41, assistant_message_id=101)
+        # 晚期起点 100/101 → 落 turn 41，不被 turn 6 的开口吞掉
+        self.assertEqual(s.turn_ledger.turn_at_or_after("s1", 100), 41)
+        self.assertEqual(s.turn_ledger.turn_at_or_after("s1", 101), 41)
+        # 在飞轮自己的 user 行仍认（45 → turn 6）
+        self.assertEqual(s.turn_ledger.turn_at_or_after("s1", 45), 6)
+        self.assertEqual(s.turn_ledger.turn_of_message("s1", 45), 6)
+        # 开口区间内的归属不明 id：起点走空隙规则（其后最早一轮），
+        # 精确归属如实 None
+        self.assertEqual(s.turn_ledger.turn_at_or_after("s1", 60), 40)
+        self.assertIsNone(s.turn_ledger.turn_of_message("s1", 60))
+
     def test_budget_cuts_low_layers_first(self) -> None:
         self.svc.BRIEFING_BUDGET = 120   # 原文层就超——可砍层全砍，pin/10 保留
         out = self._refresh()
