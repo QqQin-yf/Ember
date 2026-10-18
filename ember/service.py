@@ -2936,14 +2936,11 @@ class EmberService:
             kept_ids.append(ev.event_id)
             used += len(line) + 1
 
-        parts = ["【近况】"]
-        if src_blocks:
-            parts.append("\n".join(src_blocks))
-        if kept_core:
-            parts.append("\n".join(kept_core))
-        if kept_summary:
-            parts.append("\n".join(kept_summary))
-        text = "\n".join(parts)
+        # 无标题行（2026-10-18 momo 拍板）：text 是纯条目列表，标题
+        # （如「近况」）由 app 注入时自己加——ember 不替 app 定文案。
+        parts = (src_blocks + [("\n".join(kept_core)) if kept_core else ""]
+                 + [("\n".join(kept_summary)) if kept_summary else ""])
+        text = "\n".join(p for p in parts if p)
 
         # 简报注入记一次在场：2h 内召回对同会话走轻量行（⑧ 机制顺延）
         if kept_ids:

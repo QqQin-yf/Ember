@@ -149,7 +149,9 @@ class BriefingTests(unittest.TestCase):
         out = self._refresh()
         self.assertEqual(out["status"], "ok")
         text = out["text"]
-        # 原文层：钉住 + 10 分，带 core 与原文
+        # 无标题行（2026-10-18 momo 拍板）：text 是纯条目列表，
+        # 标题由 app 注入时自己加
+        self.assertFalse(text.startswith("【"), text[:20])
         self.assertIn("EVT-PIN 的完整叙述", text)
         self.assertIn("【原文】", text)
         self.assertIn("原文1", text)
