@@ -2760,13 +2760,30 @@ class EmberService:
         m = re.match(r"\s*(10|[1-9])\s*[：:]", significance or "")
         return int(m.group(1)) if m else 5
 
+    @staticmethod
+    def _briefing_when(ev: Any) -> str:
+        """条目时间标注（2026-10-18 momo 拍板，给 app 的 AI 看）：
+        绝对时间，经历时间 event_time 渲染为 MM-DD（跨年带年份）。
+        解析失败/缺失 → 空串（条目无前缀，不硬编造时间）。
+        """
+        raw = str(getattr(ev, "event_time", "") or "")
+        try:
+            dt = datetime.fromisoformat(raw)
+        except ValueError:
+            return ""
+        now = datetime.now(timezone.utc).astimezone()
+        fmt = "%m-%d" if dt.year == now.year else "%Y-%m-%d"
+        return dt.strftime(fmt)
+
     def _briefing_source_block(self, ev: Any) -> str:
         """原文层条目：core + ±3 轮原文（复用 read_source_event）。
 
         原文不可达时退到写入时逐字核对过的 key_quotes——简报不被
         source 接口卡死。
         """
-        head = f"◆ {ev.core.strip()}"
+        when = self._briefing_when(ev)
+        head = (f"◆ [{when}] {ev.core.strip()}" if when
+                else f"◆ {ev.core.strip()}")
         try:
             src = self.read_source_event(ev.event_id)
         except Exception:  # noqa: BLE001 — 拉不到原文不挡简报
@@ -2896,7 +2913,9 @@ class EmberService:
         for ev in core_items:
             if ev.event_id in kept_ids:
                 continue
-            line = f"• {ev.core.strip()}"
+            when = self._briefing_when(ev)
+            line = (f"• [{when}] {ev.core.strip()}" if when
+                    else f"• {ev.core.strip()}")
             if used + len(line) + 1 > budget:
                 dropped["core"] += 1
                 continue
@@ -2907,7 +2926,9 @@ class EmberService:
         for ev in summary_items:
             if ev.event_id in kept_ids:
                 continue
-            line = f"• {ev.summary.strip()}"
+            when = self._briefing_when(ev)
+            line = (f"• [{when}] {ev.summary.strip()}" if when
+                    else f"• {ev.summary.strip()}")
             if used + len(line) + 1 > budget:
                 dropped["summary"] += 1
                 continue

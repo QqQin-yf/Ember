@@ -270,6 +270,36 @@ class BriefingTests(unittest.TestCase):
         self.assertEqual(s.turn_ledger.turn_at_or_after("s1", 60), 40)
         self.assertIsNone(s.turn_ledger.turn_of_message("s1", 60))
 
+    def test_entries_carry_absolute_when(self) -> None:
+        """条目带绝对时间标注（2026-10-18，给 app 的 AI 看）。
+
+        event_time 渲染为 [MM-DD] 前缀（跨年带年份）；缺失 → 无前缀。
+        """
+        from datetime import date
+        out = self._refresh()
+        today = date.today()
+        # 原文层与 core/summary 层条目均带 [MM-DD]（regex 断言，
+        # 跨月/跨年边界由日期串自证，不写死天数）
+        self.assertRegex(out["text"], r"◆ \[\d{2}-\d{2}\]")
+        self.assertRegex(out["text"], r"• \[\d{2}-\d{2}\]")
+        # 跨年事件带完整年份（OLD 是 NOW-10 天，构造跨年场景）
+        from ember.models import Event
+        last_year = (NOW - timedelta(days=400)).isoformat(timespec="seconds")
+        self.svc.store.write_event(Event(
+            event_id="EVT-YEAR", version_id="EVT-YEAR-v1",
+            source_ref="conversation/session-s1",
+            raw_ref="conversation/session-s1/turn-20",
+            event_time=last_year, ingest_time=_iso(NOW),
+            turn_refs=["turn-20"],
+            summary="去年的事", core="去年的完整叙述",
+            significance="9：去年的重要事",
+            key_quotes=[{"speaker": "user", "text": "去年的原话"}],
+        ))
+        self.svc.turn_spans.fill("EVT-YEAR", [(20, 20)], filled_by="test")
+        out = self._refresh()
+        # 跨年 → [YYYY-MM-DD]；无 event_time 的事件 → 无前缀
+        self.assertRegex(out["text"], r"• \[\d{4}-\d{2}-\d{2}\] 去年的完整叙述")
+
     def test_budget_cuts_low_layers_first(self) -> None:
         self.svc.BRIEFING_BUDGET = 120   # 原文层就超——可砍层全砍，pin/10 保留
         out = self._refresh()

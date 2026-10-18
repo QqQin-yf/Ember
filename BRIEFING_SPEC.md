@@ -27,11 +27,13 @@
 
 ```json
 {"status": "ok",
- "text": "【近况】\n◆ ……",
+ "text": "【近况】\n◆ [10-15] ……",
  "chars": 2381, "session_id": "main",
  "stats": {"pinned": 1, "sig10": 1, "new72": 8, "recalled_top": "EVT-014-ab12cd",
             "dropped": {"core": 0, "summary": 2}}}
 ```
+
+- 每条条目带**绝对时间标注** `[MM-DD]`（跨年 `[YYYY-MM-DD]`）：取经历时间 `event_time`（2026-10-18 momo 拍板，给 app 的 AI 看）；event_time 缺失/解析失败的条目无标注，不硬编造。
 
 ### 2.2 GET /ember/briefing（取当前简报）
 

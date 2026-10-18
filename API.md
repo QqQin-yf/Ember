@@ -345,7 +345,7 @@ GET {EMBER_SOURCE_URL}/api/source?session_id={sid}&from={int}&to={int}
 
 - `POST /ember/briefing/refresh`：体 `{"session_id", "keep_from_message_id"}`（现场起点的后端消息行 id——现场区间记忆不进，原文已在上下文；ember 经账本换算，app 不接触内部轮号）。返回 `{"status": "ok", "text", "chars", "stats": {…}}`，`text` 即注入文本
 - `GET /ember/briefing`：取当前简报；从未刷新 → `{"status": "empty"}`
-- 入选/分层/预算/去重全规则见 **BRIEFING_SPEC.md**（要点：pin 与 significance=10 必进给原文层；72h 新增 8-9 给 core、1-7 给 summary 一句；召回过的旧记忆只放最相关一条；现场与观察事件不进；预算 6000 字从低层砍，pin/10 永不砍；简报注入计一次在场——2h 内召回走轻量行）
+- 入选/分层/预算/去重全规则见 **BRIEFING_SPEC.md**（要点：pin 与 significance=10 必进给原文层；72h 新增 8-9 给 core、1-7 给 summary 一句；召回过的旧记忆只放最相关一条；现场与观察事件不进；预算 6000 字从低层砍，pin/10 永不砍；简报注入计一次在场——2h 内召回走轻量行）。每条条目带绝对时间标注 `[MM-DD]`（跨年 `[YYYY-MM-DD]`，取经历时间 event_time；缺失则无标注）
 - 钉住端点：`POST /ember/memory/pin` / `POST /ember/memory/unpin`（体 `{"event_id"}`，幂等；联动见 §5.5）
 
 ## 9. 坐标系说明
