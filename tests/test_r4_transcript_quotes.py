@@ -303,6 +303,78 @@ def test_presentation_lines():
         check("summary_fallback 不带原话", "原话：" not in prefix2)
 
 
+def test_inline_source_high_match():
+    """高匹配内联【当时对话】（2026-10-18 momo 定稿：三条件合取，要罕见）。
+
+    sig 8-9 + 本轮 ≥2 独立线索 + 语义锚点在（过值即锚点）→ 内联
+    span 区间（±3 轮扩展）的当时对话；任一条件缺失 → 原话行照旧。
+    """
+    from ember.models import PresentationContext, RecallTrace, RouteHit
+
+    def _hit(cue, matcher="lexical", eid="EVT-097"):
+        return RouteHit(route_id=f"rt-{cue}-{matcher}", event_id=eid,
+                        cue=cue, matcher=matcher, cue_type="lexical")
+
+    def _mk(svc, eid="EVT-097"):
+        """标准高匹配事件：sig 9、span (5,5)、内存铺 turn 2-8 原文。"""
+        svc.get_or_create_session("s").messages = [
+            {"role": "user" if t % 2 else "assistant", "turn": t,
+             "content": f"轮{t}的原话"}
+            for t in range(2, 9)]
+        svc.store.write_event(Event(
+            event_id=eid, version_id="v",
+            source_ref="conversation/session-s",
+            raw_ref="conversation/session-s/turn-5",
+            event_time=_now_iso(), ingest_time=_now_iso(),
+            summary="重要发现的摘要", core="重要发现的完整叙述。",
+            significance="9：影响后续功能设计",
+            key_quotes=[{"speaker": "user", "text": "轮5的原话"}]))
+        svc.turn_spans.fill(eid, [(5, 5)], filled_by="test")
+
+    def _prefix(svc, anchors):
+        ctx = PresentationContext(
+            recalled_events=["EVT-097"],
+            recall_trace=RecallTrace(input_text="x", anchors=anchors))
+        return svc._build_recall_prefix(ctx)
+
+    with tempfile.TemporaryDirectory() as root:
+        svc = EmberService(EmberStore(root), FakeClient(), model="mock")
+        _mk(svc)
+        # 正例：双线索（其一语义）+ sig 9 → 内联当时对话（±3 轮扩展）
+        p = _prefix(svc, [_hit("追剧"), _hit("更新", "semantic")])
+        check("三条件全满足 → 内联【当时对话】", "【当时对话】" in p, p[:300])
+        check("内联含 span 原文（±3 轮扩展）",
+              "[turn 4] assistant: 轮4的原话" in p, p[:300])
+        check("内联后不再出原话行", "原话：" not in p, p[:300])
+        check("内联后无深挖提示", "需要原话时" not in p, p[:300])
+
+        # 反例 1：sig 6（低于 8）
+        svc2 = EmberService(EmberStore(root), FakeClient(), model="mock")
+        _mk(svc2, "EVT-098")
+        ev = svc2.store.get_event("EVT-098")
+        ev.significance = "6：背景级"
+        svc2.store.write_event(ev)
+        svc2.turn_spans.fill("EVT-098", [(5, 5)], filled_by="test")
+        ctx = PresentationContext(
+            recalled_events=["EVT-098"],
+            recall_trace=RecallTrace(input_text="x", anchors=[
+                _hit("追剧", eid="EVT-098"),
+                _hit("更新", "semantic", eid="EVT-098")]))
+        p2 = svc2._build_recall_prefix(ctx)
+        check("sig 6 → 不内联，走原话行",
+              "【当时对话】" not in p2 and "原话：" in p2, p2[:300])
+
+        # 反例 2：单线索（语义 lone hit）
+        p3 = _prefix(svc, [_hit("追剧", "semantic")])
+        check("单线索 → 不内联",
+              "【当时对话】" not in p3 and "原话：" in p3, p3[:300])
+
+        # 反例 3：双线索但全是词面（无语义锚点）
+        p4 = _prefix(svc, [_hit("追剧"), _hit("更新")])
+        check("无语义锚点 → 不内联",
+              "【当时对话】" not in p4 and "原话：" in p4, p4[:300])
+
+
 def main():
     test_chat_archives_and_failure()
     test_restart_resume_counter()
@@ -310,7 +382,8 @@ def main():
     test_verify_and_presentation()
     test_read_memory_source()
     test_presentation_lines()
-    total = 26
+    test_inline_source_high_match()
+    total = 35
     if failures:
         print(f"\n{total - len(failures)}/{total} checks passed，失败：{failures}")
         sys.exit(1)

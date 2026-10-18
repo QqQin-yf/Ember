@@ -1073,7 +1073,17 @@ class EmberService:
             return "\n".join(lines) + "\n\n"
 
         def _event_line(eid: str) -> None:
-            """单条事件行：修正承接 / 强度标注 / 原话 / 深挖指引。"""
+            """单条事件行：修正承接 / 强度标注 / 原话 / 深挖指引。
+
+            高匹配内联当时对话（2026-10-18 momo 定稿：要罕见——上下文
+            撑不住）。三条件**合取**：
+            - significance 8-9（有实质影响的进展发现；10 分走简报原文
+              层常驻，不在这里重复占上下文）
+            - 本轮 ≥2 条独立线索共证（多 Cue 共命中，强度涌现口径）
+            - 语义路径过值：本轮锚点含 semantic matcher——低于语义
+              门槛的命中根本不会成为锚点，在即过值
+            任一不满足 → 原话行（key_quotes）+ 工具指引，照旧。
+            """
             event = self.store.get_event(eid)
             hits = [h for h in ctx.recall_trace.anchors if h.event_id == eid]
             distinct_cues = sorted({h.cue for h in hits})
@@ -1095,13 +1105,21 @@ class EmberService:
                 strength = "隐约联想"
             why = "、".join(f"「{c}」" for c in distinct_cues)
             lines.append(f"- （{strength}）{core}")
-            quotes_line = self._format_key_quotes(event)
-            if quotes_line:
-                lines.append(f"  {quotes_line}")
+            # 高匹配（三条件合取）→ 内联当时对话；失败静默降级
+            semantic_hit = any(h.matcher == "semantic" for h in hits)
+            high_match = (len(distinct_cues) >= 2 and semantic_hit
+                          and self._sig_level(event.significance) in (8, 9))
+            inlined = (high_match
+                       and self._inline_source_lines(eid, lines))
+            if not inlined:
+                quotes_line = self._format_key_quotes(event)
+                if quotes_line:
+                    lines.append(f"  {quotes_line}")
             if why:
-                lines.append(f"  触点：{why}；需要原话时可调用 "
-                             f"read_memory_source(\"{eid}\")")
-            else:
+                hint = "" if inlined else (
+                    f"；需要原话时可调用 read_memory_source(\"{eid}\")")
+                lines.append(f"  触点：{why}{hint}")
+            elif not inlined:
                 lines.append(f"  需要原话时可调用 read_memory_source(\"{eid}\")")
 
         def _light_line(eid: str) -> None:
@@ -1184,6 +1202,35 @@ class EmberService:
                          "未展示——需要时可用 search_memory 按话题取回）")
         lines.append("[记忆结束——自然地运用它们，不要机械复述本结构]")
         return "\n".join(lines) + "\n\n"
+
+    # 召回内联【当时对话】的单条上限（三席合计 ~3600 字，baseline 可调）
+    _INLINE_SOURCE_MAX_CHARS = 1200
+
+    def _inline_source_lines(self, eid: str, lines: list[str]) -> bool:
+        """高匹配事件内联【当时对话】（2026-10-18 momo 定稿）。
+
+        调用方负责三条件判定（sig 8-9 + 多线索共证 + 语义过值，
+        要罕见——上下文撑不住）。本方法只管取材与降级：复用
+        read_source_event（内存会话优先，缺的轮次按需拉后端，±3 轮
+        场景扩展与工具读同源）；超长截断并留深挖提示。拉不到
+        （未配置 source / 轮次缺失 / 无 span）→ 返回 False，调用方
+        静默降级为原话行——内联是增强不是依赖，绝不挡召回。
+        """
+        try:
+            src = self.read_source_event(eid)
+        except Exception:  # noqa: BLE001 — 内联失败不挡召回注入
+            return False
+        transcript = str(src.get("transcript") or "").strip()
+        if src.get("status") != "ok" or not transcript:
+            return False
+        more = ""
+        if len(transcript) > self._INLINE_SOURCE_MAX_CHARS:
+            transcript = transcript[:self._INLINE_SOURCE_MAX_CHARS]
+            more = "\n  ……（更长原文可调用 read_memory_source）"
+        lines.append("  【当时对话】")
+        lines.append("\n".join("  " + ln
+                               for ln in transcript.splitlines()) + more)
+        return True
 
     @staticmethod
     def _format_key_quotes(event: Event) -> str:
