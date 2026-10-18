@@ -96,7 +96,7 @@
 
 记录一条经历。**只在出现具体的、值得留存的经历时调用**；同一条经历只调一次（重复调用会产生重复记忆）。
 
-必填参数：`event`（对象：summary/participants/objects/context/core/outcome/state/affect/significance/details/key_quotes）、`recall_routes`（召回线索）、`quote_spans`（出处句对：起尾句逐字摘自原文）。
+必填参数：`event`（对象：summary/participants/objects/context/core/outcome/state/affect/significance/details/key_quotes）、`recall_routes`（召回线索）、`quote_spans`（出处句对：起尾句逐字摘自原文；**span 要还原整个场景**——从对话里刚谈到这个话题起，到话题结束止，不只圈提供信息量的那句话）。
 
 **2026-10-17 起两个格式纪律（写入端硬校验）**：
 
