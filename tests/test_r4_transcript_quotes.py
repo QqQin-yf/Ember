@@ -342,8 +342,8 @@ def test_inline_source_high_match():
     with tempfile.TemporaryDirectory() as root:
         svc = EmberService(EmberStore(root), FakeClient(), model="mock")
         _mk(svc)
-        # 正例：双线索（其一语义 0.85 ≥ 0.80 门槛）+ sig 9 → 内联当时对话
-        p = _prefix(svc, [_hit("追剧"), _hit("更新", "semantic", score=0.85)])
+        # 正例：双线索（其一语义 0.65 ≥ 0.62 门槛）+ sig 9 → 内联当时对话
+        p = _prefix(svc, [_hit("追剧"), _hit("更新", "semantic", score=0.65)])
         check("三条件全满足 → 内联【当时对话】", "【当时对话】" in p, p[:300])
         check("内联含 span 原文（±3 轮扩展）",
               "[turn 4] assistant: 轮4的原话" in p, p[:300])
@@ -361,13 +361,13 @@ def test_inline_source_high_match():
             recalled_events=["EVT-098"],
             recall_trace=RecallTrace(input_text="x", anchors=[
                 _hit("追剧", eid="EVT-098"),
-                _hit("更新", "semantic", eid="EVT-098", score=0.85)]))
+                _hit("更新", "semantic", eid="EVT-098", score=0.65)]))
         p2 = svc2._build_recall_prefix(ctx)
         check("sig 6 → 不内联，走原话行",
               "【当时对话】" not in p2 and "原话：" in p2, p2[:300])
 
         # 反例 2：单线索（语义 lone hit）
-        p3 = _prefix(svc, [_hit("追剧", "semantic", score=0.85)])
+        p3 = _prefix(svc, [_hit("追剧", "semantic", score=0.65)])
         check("单线索 → 不内联",
               "【当时对话】" not in p3 and "原话：" in p3, p3[:300])
 
@@ -376,9 +376,9 @@ def test_inline_source_high_match():
         check("无语义锚点 → 不内联",
               "【当时对话】" not in p4 and "原话：" in p4, p4[:300])
 
-        # 反例 4：语义锚点在但分数低于内联门槛（0.75 < 0.80）
+        # 反例 4：语义锚点在但分数低于内联门槛（0.58 < 0.62，半相关带）
         p5 = _prefix(svc, [_hit("追剧"),
-                           _hit("更新", "semantic", score=0.75)])
+                           _hit("更新", "semantic", score=0.58)])
         check("语义分低于内联门槛 → 不内联",
               "【当时对话】" not in p5 and "原话：" in p5, p5[:300])
 
