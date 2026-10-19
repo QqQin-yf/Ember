@@ -114,9 +114,13 @@ def test_semantic_hits_unit():
         hits, reason = semantic_hits(
             "她办喜事那次", [R("rt_hit"), R("rt_miss")], vs,
             floor=0.99, embed_fn=lambda t: _vec_of("办喜事"))
+        # 2026-10-19 透传：hits 元素是 (route, sim) 二元组
         check("semantic_hits 命中/不命中分判",
-              reason == "ok" and [r.route_id for r in hits] == ["rt_hit"],
-              f"reason={reason} hits={[r.route_id for r in hits]}")
+              reason == "ok" and [r.route_id for r, _ in hits] == ["rt_hit"],
+              f"reason={reason} hits={[r.route_id for r, _ in hits]}")
+        check("semantic_hits 透传相似度分数",
+              hits and isinstance(hits[0][1], float) and hits[0][1] >= 0.99,
+              f"hits={hits}")
         # 无任何向量库 → no_vectors
         empty = CueVectorStore(tempfile.mkdtemp())
         hits2, reason2 = semantic_hits(
@@ -256,7 +260,7 @@ def main():
     test_direct_recall_integration()
     test_degradation()
     test_ledger_compatibility()
-    total = 13
+    total = 14
     if failures:
         print(f"\n{total - len(failures)}/{total} checks passed，失败：{failures}")
         sys.exit(1)

@@ -262,17 +262,18 @@ class DirectRecall:
             if r.status == "active" and r.matcher == "lexical"
             and r.route_id not in lexical_hit_ids]
         if sem_candidates:
-            sem_routes, reason = semantic_hits(
+            sem_pairs, reason = semantic_hits(
                 input_text, sem_candidates, self.cue_vectors,
                 embed_fn=self.embed_fn)
             self.last_semantic_reason = reason
-            for route in sem_routes:
+            for route, sim in sem_pairs:
                 hits.append(RouteHit(
                     route_id=route.route_id,
                     event_id=route.event_id,
                     cue=route.cue,
                     matcher="semantic",
                     cue_type=route.cue_type,
+                    score=sim,
                 ))
 
         # 运行时聚合（momo 裁决）：触发点相同的命中相邻，

@@ -306,14 +306,16 @@ def test_presentation_lines():
 def test_inline_source_high_match():
     """高匹配内联【当时对话】（2026-10-18 momo 定稿：三条件合取，要罕见）。
 
-    sig 8-9 + 本轮 ≥2 独立线索 + 语义锚点在（过值即锚点）→ 内联
-    span 区间（±3 轮扩展）的当时对话；任一条件缺失 → 原话行照旧。
+    sig 8-9 + 本轮 ≥2 独立线索 + 语义锚点且分数 ≥ INLINE_SEMANTIC_FLOOR
+    （2026-10-19 透传真分数）→ 内联 span 区间（±3 轮扩展）的当时
+    对话；任一条件缺失 → 原话行照旧。
     """
     from ember.models import PresentationContext, RecallTrace, RouteHit
 
-    def _hit(cue, matcher="lexical", eid="EVT-097"):
+    def _hit(cue, matcher="lexical", eid="EVT-097", score=None):
         return RouteHit(route_id=f"rt-{cue}-{matcher}", event_id=eid,
-                        cue=cue, matcher=matcher, cue_type="lexical")
+                        cue=cue, matcher=matcher, cue_type="lexical",
+                        score=score)
 
     def _mk(svc, eid="EVT-097"):
         """标准高匹配事件：sig 9、span (5,5)、内存铺 turn 2-8 原文。"""
@@ -340,8 +342,8 @@ def test_inline_source_high_match():
     with tempfile.TemporaryDirectory() as root:
         svc = EmberService(EmberStore(root), FakeClient(), model="mock")
         _mk(svc)
-        # 正例：双线索（其一语义）+ sig 9 → 内联当时对话（±3 轮扩展）
-        p = _prefix(svc, [_hit("追剧"), _hit("更新", "semantic")])
+        # 正例：双线索（其一语义 0.85 ≥ 0.80 门槛）+ sig 9 → 内联当时对话
+        p = _prefix(svc, [_hit("追剧"), _hit("更新", "semantic", score=0.85)])
         check("三条件全满足 → 内联【当时对话】", "【当时对话】" in p, p[:300])
         check("内联含 span 原文（±3 轮扩展）",
               "[turn 4] assistant: 轮4的原话" in p, p[:300])
@@ -359,13 +361,13 @@ def test_inline_source_high_match():
             recalled_events=["EVT-098"],
             recall_trace=RecallTrace(input_text="x", anchors=[
                 _hit("追剧", eid="EVT-098"),
-                _hit("更新", "semantic", eid="EVT-098")]))
+                _hit("更新", "semantic", eid="EVT-098", score=0.85)]))
         p2 = svc2._build_recall_prefix(ctx)
         check("sig 6 → 不内联，走原话行",
               "【当时对话】" not in p2 and "原话：" in p2, p2[:300])
 
         # 反例 2：单线索（语义 lone hit）
-        p3 = _prefix(svc, [_hit("追剧", "semantic")])
+        p3 = _prefix(svc, [_hit("追剧", "semantic", score=0.85)])
         check("单线索 → 不内联",
               "【当时对话】" not in p3 and "原话：" in p3, p3[:300])
 
@@ -373,6 +375,12 @@ def test_inline_source_high_match():
         p4 = _prefix(svc, [_hit("追剧"), _hit("更新")])
         check("无语义锚点 → 不内联",
               "【当时对话】" not in p4 and "原话：" in p4, p4[:300])
+
+        # 反例 4：语义锚点在但分数低于内联门槛（0.75 < 0.80）
+        p5 = _prefix(svc, [_hit("追剧"),
+                           _hit("更新", "semantic", score=0.75)])
+        check("语义分低于内联门槛 → 不内联",
+              "【当时对话】" not in p5 and "原话：" in p5, p5[:300])
 
 
 def main():
@@ -383,7 +391,7 @@ def main():
     test_read_memory_source()
     test_presentation_lines()
     test_inline_source_high_match()
-    total = 35
+    total = 36
     if failures:
         print(f"\n{total - len(failures)}/{total} checks passed，失败：{failures}")
         sys.exit(1)

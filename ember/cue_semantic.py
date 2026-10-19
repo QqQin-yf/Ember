@@ -99,11 +99,12 @@ def semantic_hits(input_text: str,
       floor        语义命中阈值（baseline 占位，见文件头铁律）
       embed_fn     向量函数（缺省 direction.embed_text；测试注入 mock）
 
-    返回 (命中 route 列表, reason)：
+    返回 (命中列表, reason)：
+      命中列表的元素是 (route, sim) 二元组——sim 是输入向量与该 cue
+      向量的 cosine 相似度（2026-10-19 透传：判定层要真分数）
       reason = ok           正常产出（含空命中）
       reason = no_vectors   库里没有任何 cue 向量（未重建过），跳过语义段
       reason = embed_failed embedding 失败，本轮降级纯词面
-    命中的 route 原样返回（调用方自行构造 RouteHit，matcher 记 semantic）。
     """
     candidates = [r for r in routes if vector_store.has(r.route_id)]
     if not candidates:
@@ -118,5 +119,5 @@ def semantic_hits(input_text: str,
         stored = vector_store.get(r.route_id)
         sim = cosine(q_vec, stored["vector"])
         if sim >= floor:
-            hits.append(r)
+            hits.append((r, sim))
     return hits, "ok"

@@ -1080,8 +1080,9 @@ class EmberService:
             - significance 8-9（有实质影响的进展发现；10 分走简报原文
               层常驻，不在这里重复占上下文）
             - 本轮 ≥2 条独立线索共证（多 Cue 共命中，强度涌现口径）
-            - 语义路径过值：本轮锚点含 semantic matcher——低于语义
-              门槛的命中根本不会成为锚点，在即过值
+            - 语义路径过值：本轮该事件有语义锚点且 cosine 相似度 ≥
+              INLINE_SEMANTIC_FLOOR（2026-10-19 分数透传后启用真分数，
+              不再是「语义锚点存在即过值」）
             任一不满足 → 原话行（key_quotes）+ 工具指引，照旧。
             """
             event = self.store.get_event(eid)
@@ -1106,7 +1107,9 @@ class EmberService:
             why = "、".join(f"「{c}」" for c in distinct_cues)
             lines.append(f"- （{strength}）{core}")
             # 高匹配（三条件合取）→ 内联当时对话；失败静默降级
-            semantic_hit = any(h.matcher == "semantic" for h in hits)
+            semantic_hit = any(
+                h.matcher == "semantic" and (h.score or 0.0) >=
+                self.INLINE_SEMANTIC_FLOOR for h in hits)
             high_match = (len(distinct_cues) >= 2 and semantic_hit
                           and self._sig_level(event.significance) in (8, 9))
             inlined = (high_match
@@ -1205,6 +1208,13 @@ class EmberService:
 
     # 召回内联【当时对话】的单条上限（三席合计 ~3600 字，baseline 可调）
     _INLINE_SOURCE_MAX_CHARS = 1200
+
+    # 内联判定的语义分数门槛（2026-10-19 透传后启用真分数）。召回层
+    # 的 CUE_SEMANTIC_FLOOR=0.70 是「成为锚点」的门槛（同义带 0.76~
+    # 0.89，无关带 ≤0.61）；本门槛是「值得内联原文」的更高一档——
+    # 0.80 取同义带上半区，与 sig 8-9 + 双线索合取共同保证「罕见」。
+    # baseline 占位，样本大了值得重标（纪律同 CUE_SEMANTIC_FLOOR）。
+    INLINE_SEMANTIC_FLOOR = 0.80
 
     def _inline_source_lines(self, eid: str, lines: list[str]) -> bool:
         """高匹配事件内联【当时对话】（2026-10-18 momo 定稿）。

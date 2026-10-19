@@ -35,6 +35,7 @@ default 上。
 """
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import contextvars
 import json
@@ -258,15 +259,24 @@ async def _sleep_link_progress(request: Request) -> JSONResponse:
 
 
 async def _sleep_structure_run(request: Request) -> JSONResponse:
-    """结构维护：散事件归属（第三方 LLM）+ 旧 cue 收紧。
+    """结构维护：向量补建 + cue 收紧 + 观察提炼/合并。
 
     编排顺序：挂在 link/submit 清完之后——挂完关系不等于没活儿，
     还有这一步（契约见 API.md「编排顺序」）。
+
+    挪线程（2026-10-19）：这步是几十秒的重活（embedding 补建 +
+    两次 LLM），在事件循环上直跑会把**整个进程**卡住——其他实例
+    的钩子全部排队。asyncio.to_thread 挪到工作线程，事件循环继续
+    接待；app 的本请求仍然等到跑完才返回（sleep 是顺序编排，下一
+    步 sediment 依赖本步完成——等待是契约，排队不是）。
+
+    错误处理契约不变：失败如实回执给 app（HTTP 500 + 原因），不
+    静默重试——sleep 是 app 编排的流程，重试决定权在 app。
     """
     svc = _service_or_404(request)
     if isinstance(svc, JSONResponse):
         return svc
-    return JSONResponse(svc.run_structure_maintenance())
+    return JSONResponse(await asyncio.to_thread(svc.run_structure_maintenance))
 
 
 async def _sleep_sediment_evidence(request: Request) -> JSONResponse:

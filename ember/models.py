@@ -125,12 +125,17 @@ class RecallRoute:
 
 @dataclass
 class RouteHit:
-    """一次 lexical 命中的记录。"""
+    """一次命中锚点（lexical 词面 / semantic 语义）。"""
+
     route_id: str
     event_id: str
     cue: str
     matcher: str
     cue_type: str
+    # 语义命中时的 cosine 相似度（2026-10-19 透传：判定层要用真分数，
+    # 不再拿「存在即过值」凑合）；词面命中为 None——词面是子串精确
+    # 匹配，没有相似度概念。
+    score: float | None = None
 
 
 @dataclass
