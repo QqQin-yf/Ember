@@ -100,12 +100,24 @@ class SearchMemoryTests(unittest.TestCase):
         self.assertIn("仅显示", out2["note"])
 
     def test_time_range_filter(self) -> None:
-        out = self.svc.sidecar_search_memory(
-            {"query": "漫剧", "time_range": "2026-10-01..2026-10-14"})
-        self.assertEqual(out["items"], [])   # 事件 ingest 是 10-15，区间不含
-        out2 = self.svc.sidecar_search_memory(
-            {"query": "漫剧", "time_range": "最近3天"})
-        self.assertEqual(out2["total"], 2)
+        # 事件 ingest 固定 10-15，而「最近N天」按真实 now 解析——不冻结
+        # 的话这是日期敏感测试（10-18 起过期）。冻在 10-16 12:00：
+        # 「最近3天」= 10-13..10-16，稳定覆盖 10-15 的事件。
+        from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
+        class _Frozen(_dt):
+            @classmethod
+            def now(cls, tz=None):
+                return _dt(2026, 10, 16, 12, 0, 0,
+                           tzinfo=_tz(_td(hours=8)))
+
+        with mock.patch("ember.service.datetime", _Frozen):
+            out = self.svc.sidecar_search_memory(
+                {"query": "漫剧", "time_range": "2026-10-01..2026-10-14"})
+            self.assertEqual(out["items"], [])   # 事件 ingest 是 10-15，区间不含
+            out2 = self.svc.sidecar_search_memory(
+                {"query": "漫剧", "time_range": "最近3天"})
+            self.assertEqual(out2["total"], 2)
         out3 = self.svc.sidecar_search_memory(
             {"query": "漫剧", "time_range": "胡说八道"})
         self.assertEqual(out3["status"], "failed")

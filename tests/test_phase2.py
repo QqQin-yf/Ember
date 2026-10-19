@@ -224,7 +224,7 @@ def main():
                         "outcome": "确认了婚礼安排",
                         "state": "等待国庆假期",
                         "affect": "期待",
-                        "significance": "家庭重要事件",
+                        "significance": "8：家庭重要事件",
                         "details": [],
                         "key_quotes": [],
                     },

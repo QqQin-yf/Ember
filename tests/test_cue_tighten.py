@@ -92,6 +92,12 @@ def main():
         for i in range(2):
             ledger.record("s1", 10 + i, route="cue", event_ids=["EVT-200"],
                           cue="用过关键词")
+        # 2026-10-15 起"提取刷新计时器"：record 的 recorded_at=now 会把
+        # last_extracted 刷成现在 → 事件被判"静置 0 天"跳过。本测试模拟
+        # 的是"一周前用过"——把最后提取时间拨回一周前。
+        week_ago_iso = _iso(now - timedelta(days=8))
+        for eid in ("EVT-100", "EVT-200"):
+            ledger.last_extracted[eid] = week_ago_iso
 
         t = CueTightener(store, ledger,
                          os.path.join(root, "events.jsonl"),
@@ -187,6 +193,9 @@ def main():
                       cue="常用词")
         ledger.record("s1", 22, route="cue", event_ids=["EVT-100"],
                       cue="共享词")
+        # 同上：拨回一周前（EVT-300 的使用发生在过去）
+        for eid in ("EVT-300", "EVT-100"):
+            ledger.last_extracted[eid] = week_ago_iso
 
         r3 = t.tighten(now=now)
         retired300 = {(x["cue"], x["uses"]) for x in r3["retired"]

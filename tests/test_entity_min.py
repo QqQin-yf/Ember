@@ -33,6 +33,14 @@ def check(name: str, cond: bool, detail: str = "") -> None:
 
 
 def main() -> None:
+    # 通电验收性质同 test_direction_match：依赖 data_real/（离线脚本
+    # 挂载的真实库，不入 git）。环境缺失 → SKIP 而非 FAIL。判"非空"
+    # 而非"存在"：EmberStore 构造会自动建目录，空壳不算环境就绪。
+    if not (os.path.isdir(REAL) and os.listdir(REAL)):
+        print("SKIP: data_real/ 不存在或为空（需先跑离线挂载脚本）——"
+              "Entity 最小闭环验收只在有真实数据的环境执行")
+        return
+
     print("T-Entity: 最小闭环（明确指向 Entity → 整个区域）")
 
     store = EmberStore(REAL)

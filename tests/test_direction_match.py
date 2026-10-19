@@ -67,6 +67,16 @@ def make_fake_embed(vectors_file: str):
 
 
 def main() -> None:
+    # 本测试是「通电验收」性质：依赖 data_real/（离线脚本挂载的真实
+    # 向量库与实体数据，不入 git）。环境缺失 → 明确 SKIP 而非 FAIL——
+    # 通用回归环境（无 data_real）跑到这里应当干净跳过。
+    # 注意判"非空"而非"存在"：EmberStore 构造会自动建目录，跑过一次
+    # 的空壳目录不能算环境就绪。
+    if not (os.path.isdir(REAL) and os.listdir(REAL)):
+        print("SKIP: data_real/ 不存在或为空（需先跑 scripts/mount_directions.py "
+              "等离线挂载）——Direction 通电验收只在有真实数据的环境执行")
+        return
+
     print("T-Direction: 向量判断聚焦 + 模糊回退 + 失败降级")
 
     store = EmberStore(REAL)
