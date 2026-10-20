@@ -51,7 +51,8 @@ from ember.env import load_env
 load_env(os.path.dirname(os.path.abspath(__file__)))
 
 from ember.instances import InstanceRegistry, parse_instances, resolve_root
-from ember.writer import (READ_SOURCE_TOOL_NAME, REVISE_TOOL_NAME,
+from ember.writer import (PIN_TOOL_NAME, UNPIN_TOOL_NAME,
+                          READ_SOURCE_TOOL_NAME, REVISE_TOOL_NAME,
                           SEARCH_TOOL_NAME, TOOL_NAME,
                           build_pin_tool_specs, build_revise_tool_spec,
                           build_search_tool_spec, build_tools_spec)
@@ -148,6 +149,10 @@ async def _call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             (arguments or {}).get("event_id") or "")
     elif name == SEARCH_TOOL_NAME:
         result = svc.sidecar_search_memory(arguments or {})
+    elif name == PIN_TOOL_NAME:
+        result = svc.sidecar_pin_memory(arguments or {})
+    elif name == UNPIN_TOOL_NAME:
+        result = svc.sidecar_unpin_memory(arguments or {})
     else:
         result = {"status": "failed", "error": f"未知工具: {name}"}
     return [types.TextContent(type="text",
