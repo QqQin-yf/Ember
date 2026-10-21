@@ -12,11 +12,20 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 
+
+def child_environment():
+    # unittest's HTTP imports can load the repository .env into the parent.
+    # A crash fixture must never inherit a live source provider or credentials.
+    env = {k:v for k,v in os.environ.items() if not k.startswith(("EMBER_", "LLM_"))
+           and k not in {"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GLM_API_KEY", "ZHIPU_API_KEY", "SILICONFLOW_API_KEY"}}
+    env.update(EMBER_SOURCE_URL="", EMBER_SOURCE_TOKEN="")
+    return env
+
 class SourceProcessCrashTests(unittest.TestCase):
     def run_child(self, action, root, checkpoint):
         return subprocess.run([sys.executable, "-B", "-m", "tests.source_crash_worker", action,
                                root, checkpoint], cwd=ROOT, capture_output=True, text=True,
-                              encoding="utf-8", timeout=40, check=True)
+                              encoding="utf-8", timeout=40, check=True, env=child_environment())
 
     def test_kill_uncommitted_and_committed_publication_recovers_once(self):
         for checkpoint in ("binding_uncommitted", "first_view_uncommitted", "views_uncommitted", "committed_before_ack"):
@@ -30,7 +39,7 @@ class SourceProcessCrashTests(unittest.TestCase):
                 sources = Path(root, "event_sources.jsonl").read_bytes()
                 child = subprocess.Popen([sys.executable, "-B", "-m", "tests.source_crash_worker", "kill",
                                           root, checkpoint], cwd=ROOT, stdout=subprocess.DEVNULL,
-                                         stderr=subprocess.PIPE)
+                                         stderr=subprocess.PIPE, env=child_environment())
                 try:
                     deadline = time.monotonic() + 25
                     marker = Path(root, "checkpoint")

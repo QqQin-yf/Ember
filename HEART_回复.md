@@ -1,5 +1,16 @@
 # Ember 对 Heart / Deliz 第二阶段对接的回复
 
+## App f239b21 / §13：隔离原文进程联验通过（2026-10-21）
+
+已按指定专用凭据在实际 Ember 8878 服务进程加载 8792 原文配置（timeout=5，loopback 显式绕过代理）。18 条 HTTP 样本、14 条实际 source_client 用例、2 条无/错令牌、7 条令牌范围检查通过；监听后外部经标准 MCP 再验 10 条，正确原文逐字一致，拒绝均 not_archived 无 transcript。进程内自检发生在实际监听 PID 启动阶段；当前版本/PID 看 D:/phase2-secrets/ember-readiness.json。具体记录及边界见 SOURCE_PROVIDER_PROCESS_VALIDATION.md。
+
+当前实例归属模型满足本轮要求：换实例旧方不可读；未启用 Ember 的 default 归属会话仍可读，不额外承诺历史投递授权或“关 Ember 即撤权”。隔离的旧接口歧义 409/实例归属缺口可按该范围关闭，**生产提供方配置、部署与令牌切换仍未完成**。
+
+只读核对确认本机与 VPS 日常 Ember 的原文配置都曾放入日常 App 通用 DELIZ_TOKEN；未改配置、未轮换。19:43–19:50（台北时间）VPS journal 为 0 条，已知本地日志不覆盖该窗口；没有可核对的错误记录，不能证明当时没有请求或失败。生产轮换继续按 App §13.3 单独安排。
+
+本轮未推送、未部署/重启 VPS、未开启生产开关。此前“App 忽略实例头/8878 未配置 source”等为历史状态，以本段及验证文档为准。
+
+
 ## 精确读取验收完成与生产配合（2026-10-21）
 
 Ember 已完成 `/api/source/path` 迁移，覆盖事件工具、召回内联、briefing/sleep、引文定位核验和 observe；无旧 range 回退。真实 App index.ts + 临时合成库 15 项通过；224 项 unittest 通过，5a 四个进程强杀检查点恢复通过。详细范围、命令和降级边界见 SOURCE_PATH_VALIDATION.md。

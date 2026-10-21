@@ -1,5 +1,7 @@
 # Ember 第二阶段隔离联调交付
 
+最新隔离配置（2026-10-21）：启动器支持 `--source-env-file <仓库外受限文件>`，仅接受 EMBER_SOURCE_URL/TOKEN/TIMEOUT，且原文源限 loopback；不继承日常配置。可配 `--source-sample <合成样本>` 和 `--source-report <仓库外结果>`，在实际监听 PID 启动时执行一次自检，不新增公开调试接口。外部 `scripts/check_source_provider_mcp.py` 再走标准 MCP 读回。8792 提供方的进程联验通过，实例 default/phase2/second；当前 PID/提交看 D:/phase2-secrets/ember-readiness.json，完整结果见 SOURCE_PROVIDER_PROCESS_VALIDATION.md。下文“source 不配置”的描述为早期状态，未显式传此文件时仍默认不配置。生产未验证、未开启。
+
 本轮更新（2026-10-21）：精确路径客户端和 5a 四个进程强杀检查点已验收，见 SOURCE_PATH_VALIDATION.md。真实 App 临时库 15 项通过，生产提供方/实例归属实测仍未完成。8878 继续使用仓库外原凭据和独立数据；具体加载版本以 D:/phase2-secrets/ember-readiness.json 为准，不能将旧段落的版本当成最新。新客户端 source 未配置时历史取材会如实不可用，原文路径不会退回旧接口。生产开关未批准。
 
 2026-10-21。已读 App APP_第二阶段回复.md §7—8，核对最新提交 b929d44。范围为真实 Ember 的呈现/出处、普通生成与工具身份、快照/恢复/24 小时清理及原轮次补收轮。App 的完成活动水位属于 Heart 接口，Ember 不接管该字段。

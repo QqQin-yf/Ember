@@ -15,9 +15,13 @@ from ember.models import Event
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.server.requests.append((self.path, dict(self.headers)))
+        payload = json.dumps(self.server.payload).encode()
         self.send_response(self.server.status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
-        self.wfile.write(json.dumps(self.server.payload).encode())
+        self.wfile.write(payload)
+        self.wfile.flush()
     def log_message(self, *args):
         pass
 
