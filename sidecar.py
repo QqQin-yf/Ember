@@ -84,6 +84,8 @@ except ValueError as exc:
 # （MCP SDK 的工具回调拿不到 HTTP 请求，用 contextvar 穿协议层）
 CURRENT_SERVICE: contextvars.ContextVar = contextvars.ContextVar(
     "ember_current_service", default=None)
+CURRENT_CALL_CONTEXT: contextvars.ContextVar = contextvars.ContextVar(
+    "ember_current_call_context", default=None)
 
 # ---------- 实例路由（与 heart 同款：头优先，?inst= 兜底，缺省 default）
 
@@ -140,21 +142,9 @@ async def _call_tool(name: str, arguments: dict) -> list[types.TextContent]:
     svc = CURRENT_SERVICE.get()
     if svc is None:
         result = {"status": "failed", "error": "实例上下文丢失（无进行中的路由）"}
-    elif name == TOOL_NAME:
-        result = svc.sidecar_create_memory_event(arguments or {})
-    elif name == REVISE_TOOL_NAME:
-        result = svc.sidecar_revise_memory_event(arguments or {})
-    elif name == READ_SOURCE_TOOL_NAME:
-        result = svc.sidecar_read_memory_source(
-            (arguments or {}).get("event_id") or "")
-    elif name == SEARCH_TOOL_NAME:
-        result = svc.sidecar_search_memory(arguments or {})
-    elif name == PIN_TOOL_NAME:
-        result = svc.sidecar_pin_memory(arguments or {})
-    elif name == UNPIN_TOOL_NAME:
-        result = svc.sidecar_unpin_memory(arguments or {})
     else:
-        result = {"status": "failed", "error": f"未知工具: {name}"}
+        result = await asyncio.to_thread(svc.sidecar_call_tool, name, arguments or {},
+                                         **(CURRENT_CALL_CONTEXT.get() or {}))
     return [types.TextContent(type="text",
                               text=json.dumps(result, ensure_ascii=False))]
 
@@ -164,22 +154,53 @@ session_manager = StreamableHTTPSessionManager(
 
 
 async def _handle_mcp(scope, receive, send) -> None:
+    names = {b"x-ember-recall-id": "recall_id", b"x-ember-run-id": "run_id",
+             b"x-ember-tool-call-id": "tool_call_id"}
+    context = {}
+    seen = set()
+    for key, value in scope.get("headers") or []:
+        key = key.lower()
+        if key in names or key == b"x-heart-instance":
+            if key in seen:
+                await JSONResponse({"error": "Duplicate identity header", "code": "invalid_identity"},
+                                   status_code=400)(scope, receive, send)
+                return
+            seen.add(key)
+        if key in names:
+            context[names[key]] = value.decode("latin-1")
     svc = REGISTRY.service(_instance_from_scope(scope))
     if svc is None:
         await JSONResponse({"error": "unknown instance"},
                            status_code=404)(scope, receive, send)
         return
     token = CURRENT_SERVICE.set(svc)
+    context_token = CURRENT_CALL_CONTEXT.set(context)
     try:
         await session_manager.handle_request(scope, receive, send)
     finally:
+        CURRENT_CALL_CONTEXT.reset(context_token)
         CURRENT_SERVICE.reset(token)
+
+
+async def _expire_recall_snapshots() -> None:
+    while True:
+        try:
+            await asyncio.to_thread(REGISTRY.expire_recall_snapshots)
+        except Exception:
+            print("[ember-sidecar] recall snapshot cleanup deferred", file=sys.stderr)
+        await asyncio.sleep(60)
 
 
 @contextlib.asynccontextmanager
 async def _lifespan(app):
     async with session_manager.run():
-        yield
+        cleanup = asyncio.create_task(_expire_recall_snapshots())
+        try:
+            yield
+        finally:
+            cleanup.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await cleanup
 
 
 # ---------- 钩子层：失败如实上报，绝不抛 500 挡前端 ----------
@@ -197,6 +218,48 @@ def _opt_int(body: dict, key: str) -> int | None:
     return None
 
 
+def _generation_response(result: dict) -> JSONResponse:
+    code = result.get("code")
+    if code in ("recall_in_progress", "recall_recovery_pending"):
+        status = 202
+    elif code == "response_expired":
+        status = 410
+    elif not code:
+        status = 200
+    elif code in ("unknown_recall", "unknown_tool_call"):
+        status = 404
+    elif code in ("invalid_identity", "invalid_status", "invalid_arguments"):
+        status = 400
+    else:
+        status = 409
+    headers = {"Retry-After": str(result.get("retry_after_sec", 2))} if status == 202 else None
+    return JSONResponse(result, status_code=status, headers=headers)
+
+
+async def _recall_snapshot(request: Request) -> JSONResponse:
+    svc = _service_or_404(request)
+    if isinstance(svc, JSONResponse):
+        return svc
+    result = await asyncio.to_thread(svc.sidecar_recall_snapshot,
+        request.path_params["recall_id"], request.query_params.get("view", "refs"))
+    return _generation_response(result)
+
+
+async def _generation_status(request: Request) -> JSONResponse:
+    svc = _service_or_404(request)
+    if isinstance(svc, JSONResponse):
+        return svc
+    return _generation_response(svc.sidecar_generation_status(request.path_params["recall_id"]))
+
+
+async def _generation_tool_status(request: Request) -> JSONResponse:
+    svc = _service_or_404(request)
+    if isinstance(svc, JSONResponse):
+        return svc
+    return _generation_response(svc.sidecar_tool_status(
+        request.path_params["recall_id"], request.path_params["tool_call_id"]))
+
+
 async def _hook_turn_start(request: Request) -> JSONResponse:
     svc = _service_or_404(request)
     if isinstance(svc, JSONResponse):
@@ -207,12 +270,20 @@ async def _hook_turn_start(request: Request) -> JSONResponse:
         body = {}
     message = str(body.get("message") or "")
     if not message.strip():
+        if "recall_id" in body:
+            return _generation_response({"status": "failed", "code": "invalid_identity",
+                                         "error": "A real user message is required"})
         return JSONResponse({"injected": False, "injected_text": None,
                              "reason": "empty message"})
-    return JSONResponse(svc.hook_turn_start(
+    if "recall_id" in body and (not isinstance(body["recall_id"], str) or not body["recall_id"].strip()):
+        return _generation_response({"status": "failed", "code": "invalid_identity",
+                                     "error": "Invalid recall_id"})
+    return _generation_response(await asyncio.to_thread(svc.hook_turn_start,
         body.get("session_id"), message, body.get("heart_turn_id"),
         user_message_id=_opt_int(body, "user_message_id"),
-        context_start_id=_opt_int(body, "context_start_id")))
+        context_start_id=_opt_int(body, "context_start_id"),
+        recall_id=body.get("recall_id"), occurred_at=body.get("occurred_at"),
+        activity_revision=body.get("activity_revision"), window_revision=body.get("window_revision")))
 
 
 async def _hook_turn_end(request: Request) -> JSONResponse:
@@ -228,9 +299,13 @@ async def _hook_turn_end(request: Request) -> JSONResponse:
         turn = int(raw_turn) if raw_turn is not None else None
     except (TypeError, ValueError):
         turn = None
-    return JSONResponse(svc.hook_turn_end(
+    if "recall_id" in body and (not isinstance(body["recall_id"], str) or not body["recall_id"].strip()):
+        return _generation_response({"status": "failed", "code": "invalid_identity",
+                                     "error": "Invalid recall_id"})
+    return _generation_response(await asyncio.to_thread(svc.hook_turn_end,
         body.get("session_id"), str(body.get("assistant_reply") or ""),
-        turn, assistant_message_id=_opt_int(body, "assistant_message_id")))
+        turn, assistant_message_id=_opt_int(body, "assistant_message_id"),
+        recall_id=body.get("recall_id"), status=body.get("status", "done")))
 
 
 # ---------- 挂关系（2026-10-14 设计稿 v2：借窗口跑，app 编排） ----------
@@ -364,6 +439,10 @@ class BearerAuthMiddleware:
 
 app = BearerAuthMiddleware(Starlette(
     routes=[
+        Route("/ember/recalls/{recall_id}", _recall_snapshot, methods=["GET"]),
+        Route("/ember/generations/{recall_id}/tools/{tool_call_id}",
+              _generation_tool_status, methods=["GET"]),
+        Route("/ember/generations/{recall_id}", _generation_status, methods=["GET"]),
         Route("/ember/hooks/turn_start", _hook_turn_start, methods=["POST"]),
         Route("/ember/hooks/turn_end", _hook_turn_end, methods=["POST"]),
         Route("/ember/sleep/link/batches", _sleep_link_batches,

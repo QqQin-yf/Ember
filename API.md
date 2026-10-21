@@ -21,7 +21,7 @@
 
 ### 2.2 stale 拒收
 
-用户连发消息时，慢到的旧轮 `turn_end` 会被拒收（`{"ok": false, "reason": "stale turn_end …"}`）——不污染新一轮的出处账。turn 计数允许留洞（缺轮后钩子的轮次不存档）。
+旧模式用户连发消息时，慢到的旧轮 `turn_end` 会被拒收（`{"ok": false, "reason": "stale turn_end …"}`）。带 recall_id 的新模式允许补记原生成的真实历史终态，但不会恢复旧槽或污染当前语料，见 GENERATION_BINDING_SPEC.md。turn 计数允许留洞。
 
 ### 2.3 窗口过滤的降级语义
 
@@ -38,8 +38,8 @@
   · create_memory_event 只在「进行中的一轮」存在时可用
 ```
 
-- turn_end 的 turn 校验：与 turn_start 发的号对不上 → stale 拒收
-- 同会话连续两次 turn_start（重新生成）→ 覆盖旧上下文
+- turn_end 的 turn 校验：与登记号不匹配则拒绝
+- 新生成替换旧活动上下文；同 recall_id 同内容重试只重放快照，不开新轮
 
 ## 4. 钩子组（消费方：app）
 
@@ -54,8 +54,12 @@
 | session_id | string | — | 会话标识（缺省默认会话） |
 | message | string | ✓ | 本轮用户消息 |
 | heart_turn_id | string | — | heart 的 `t-XXXXXX`（对账映射） |
-| user_message_id | int | — | 本条消息在后端消息树的行 id（写入记来源） |
-| context_start_id | int | — | 当前窗口起点（后端 message_id）：来源全在窗口内的记忆不再召回 |
+| user_message_id | int/string | 新模式必填 | 真实全局 seq，不是消息 UUID（写入记来源） |
+| context_start_id | int/string | — | 当前窗口起点 seq：来源全在窗口内的记忆不再召回 |
+| recall_id | string | — | 稳定普通生成身份；启用时 session_id 也必填，重试原样携带 |
+| occurred_at | string | — | 原始发生时间，需带时区；新模式固定保存 |
+| activity_revision | int | — | 新模式生成开始时的活动版本，非负，重试保持原值 |
+| window_revision | int | — | 新模式生成开始时的窗口版本，非负，重试保持原值 |
 
 响应 200：
 
@@ -73,6 +77,22 @@
 - `injected_text`：app **自行注入**当轮 system（ember 不改写任何请求）
 - `memory` 为观察统计，前端可不消费
 
+2026-10-20 本段新增 `presentations`（有序呈现粒度）和 `recall_refs`（触发会话、真实锚点 seq 字符串及实际输出事件的出处辅助）。只有事件正文/摘录进入 `recall_refs.events`；实体概览不展开隐藏成员。旧事件或缺可靠消息身份保持 unresolved，路径由 app 解析。完整字段及限制见 [RECALL_REFS_SPEC.md](RECALL_REFS_SPEC.md)。
+
+带 recall_id 的新模式已本地实现持久快照与 24 小时原响应重放，见下节。主动 run 和新原文读取客户端未实现；旧 `/api/source` 调用保持原行为，第二阶段尚未完成真实三方联调或部署。
+
+### 4.1.1 普通生成显式绑定（2026-10-20 本段）
+
+turn_start 可传 recall_id，MCP 随后逐请求带 X-Ember-Recall-Id 和 X-Ember-Tool-Call-Id，turn_end 必须带回同一 recall_id。新调用按活动生成校验，完成工具回执可持久重试；不再借共享当前槽。新增 GET /ember/generations/{recall_id} 及其 /tools/{tool_call_id} 查询。完整字段、错误码、重启与工具读取回执不持久保存规则见 [GENERATION_BINDING_SPEC.md](GENERATION_BINDING_SPEC.md)。
+
+### 4.1.2 召回快照查询及 24 小时正文留存
+
+`GET /ember/recalls/{recall_id}` 默认只返回冻结的呈现/引用元数据；`?view=response` 另带首次完整开轮响应的 response 字段。沿用 Bearer 和实例路由。具体字段和恢复边界见 [RECALL_SNAPSHOT_SPEC.md](RECALL_SNAPSHOT_SPEC.md)。
+
+同 recall_id 同业务内容的 start 在 24 小时内重放原响应，不重新选材或记账；异内容 409 id_conflict。计算/记账恢复中返回 202 recall_in_progress / recall_recovery_pending，Retry-After: 2；app 必须检查状态，不能把 202 当成成功空召回。未提交结果的中断返回 409 recall_outcome_unknown；旧版无快照登记返回 409 recall_snapshot_unavailable；未知 ID 返回 404 unknown_recall。
+
+正文从首次结果提交开始保留 24 小时，读取不续期；到期重复 start 和 response 查询返回 410 response_expired，默认 refs 仍可读，旧 ID 不可复用。启动/查询和每分钟后台任务清理临时正文；身份、引用、原有记忆及聊天保留。读取不恢复旧工具权限。主动 run 尚不支持，不因带 run 头而回退普通槽。
+
 ### 4.2 POST /ember/hooks/turn_end
 
 收轮 + 补记回复行 id。
@@ -83,6 +103,8 @@
 | assistant_reply | string | ✓ | 最终回复 |
 | turn | int | — | turn_start 返回的 turn 号（stale 校验） |
 | assistant_message_id | int | — | 本条回复在后端消息树的行 id |
+| recall_id | string | 新模式必填 | 与 turn_start 相同的普通生成身份 |
+| status | string | — | 新模式 done（默认）/error/cancelled；done 需真实回复与 seq |
 
 响应 200：`{"ok": true, "session_id": "…", "turn": 7}`
 

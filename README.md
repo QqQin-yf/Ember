@@ -28,6 +28,8 @@ python scripts/build_direction_vectors.py  # Direction 向量预计算（换 emb
 
 Sleep 夜间维护（挂关系 → 结构维护 → 沉淀证据）由 app 编排，接口契约见 `API.md` §6。多实例（一颗心一套记忆库，`EMBER_DATA_ROOT` / `EMBER_INSTANCES`）见 `API.md` §1 / §10。
 
+第二阶段已实现普通生成身份绑定、工具回执和稳定召回快照；临时召回正文保留 24 小时，到期保留引用和防复用身份，不删除记忆或聊天。接口见 [RECALL_SNAPSHOT_SPEC.md](RECALL_SNAPSHOT_SPEC.md)，本机隔离交付见 [PHASE2_INTEGRATION.md](PHASE2_INTEGRATION.md)；未部署生产或完成真实三方联调，主动 run 仍待实现。
+
 ## 目录
 
 ```text
@@ -41,6 +43,9 @@ ember/              核心库（每个文件开头有职责说明）
   sediment.py       沉淀证据账本（版本挂证据，app 转交追加）
   pair_seen.py      判过的 pair 留痕（补跑不重复裁决）
   turn_ledger.py    turn_id ↔ message_id 映射账本（旁路）
+  source_refs.py    新事件固定来源账（只存明确消息身份，缺证据不猜）
+  generations.py   普通生成身份、工具回执与 24 小时召回响应快照（SQLite 旁路）
+  journal.py       可恢复记账的 JSONL 持久追加
 data/               记忆数据（events/entities/routes/relations/账本/向量，多实例时按实例分子目录）
 tests/              unittest 套件，discover 全量运行
 scripts/            离线任务入口 + 取数实验脚本

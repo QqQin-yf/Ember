@@ -22,6 +22,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+from .journal import append_record
+
 LEDGER_FILE = "turn_ledger.jsonl"
 
 
@@ -58,6 +60,7 @@ class TurnLedger:
     reply_msg: dict[tuple[str, int], int] = field(default_factory=dict)
     # 全部见过的轮（无条件记账的最小行也在内）——turn 计数恢复的依据
     all_turns: set[tuple[str, int]] = field(default_factory=set)
+    _applied_operations: set[str] = field(default_factory=set)
 
     def __post_init__(self) -> None:
         self._load()
@@ -69,12 +72,20 @@ class TurnLedger:
         p = self._path()
         if not os.path.exists(p):
             return
-        with open(p, encoding="utf-8") as f:
+        with open(p, encoding="utf-8", errors="replace") as f:
             for line in f:
                 line = line.strip()
                 if not line:
                     continue
-                d = json.loads(line)
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                operation_id = d.get("operation_id")
+                if operation_id and operation_id in self._applied_operations:
+                    continue
+                if operation_id:
+                    self._applied_operations.add(operation_id)
                 sid = d.get("ember_session") or ""
                 et = d.get("ember_turn")
                 if not sid or not isinstance(et, int):
@@ -124,6 +135,23 @@ class TurnLedger:
             self.reverse.setdefault(ht, []).append(key)
             self.seen_heart_ids.add(ht)
         return entry
+
+    def record_start_once(self, operation_id: str, entry: dict) -> None:
+        if operation_id in self._applied_operations:
+            return
+        row = dict(entry, operation_id=operation_id)
+        append_record(self._path(), row)
+        key = (row["ember_session"], row["ember_turn"])
+        self.all_turns.add(key)
+        ht = row.get("heart_turn_id")
+        if ht:
+            self.mapping[key] = ht
+            self.reverse.setdefault(ht, []).append(key)
+            self.seen_heart_ids.add(ht)
+        um = row.get("user_message_id")
+        if isinstance(um, int) and um > 0:
+            self.user_msg[key] = um
+        self._applied_operations.add(operation_id)
 
     def max_turn(self, ember_session: str) -> int:
         """该 session 已记账的最大 turn；无记录返回 0（重启恢复计数用）。"""

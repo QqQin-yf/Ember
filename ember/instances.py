@@ -28,6 +28,7 @@ import threading
 from .llm import MockLLMClient
 from .service import EmberService
 from .store import EmberStore
+from .generations import GenerationStore
 
 LEGACY_SENTINEL = "events.jsonl"  # 旧扁平库的标志文件（store.EVENTS_FILE）
 
@@ -109,3 +110,9 @@ class InstanceRegistry:
                 )
                 self._services[name] = svc
             return svc
+
+    def expire_recall_snapshots(self) -> int:
+        """Clean known databases without loading services or recovering writers."""
+        with self._lock:
+            roots = list(self._dirs.values())
+        return sum(GenerationStore(root, recover=False).expire_snapshots() for root in roots)

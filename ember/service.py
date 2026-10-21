@@ -18,8 +18,10 @@ sidecar_* 一族，入口 sidecar.py）。chat_completion 代理路径保留至�
 """
 from __future__ import annotations
 
+import copy
 import json
 import os
+import threading
 import re
 import uuid
 from dataclasses import dataclass, field
@@ -45,6 +47,8 @@ from . import source_client
 from . import executors
 from .cue_tighten import CueTightener
 from .pin_store import PinStore
+from .source_refs import EventSourceStore, event_reference, message_seq
+from .generations import GenerationStore, fingerprint, identity
 from .prompts import (OBSERVE_SYSTEM_PROMPT, build_observe_user_prompt,
                       OBSERVE_MERGE_PROMPT, build_observe_merge_user_prompt)
 from . import observe as observe_mod
@@ -52,6 +56,7 @@ from .observe import ObserveCursor, verify_quotes
 from .core_semantic import (CoreVectorStore, EntitySummaryVectorStore,
                             SEARCH_HIT_FLOOR, cosine)
 from .writer import (
+    PIN_TOOL_NAME, UNPIN_TOOL_NAME, REVISE_TOOL_NAME,
     TOOL_NAME,
     READ_SOURCE_TOOL_NAME,
     build_revise_tool_spec,
@@ -410,6 +415,7 @@ class EmberService:
         # heart 联动（10-06）：turn 映射账本 + turn_span 回填层，均旁路
         self.turn_ledger = TurnLedger(getattr(store, "root", ""))
         self.turn_spans = TurnSpanStore(getattr(store, "root", ""))
+        self.event_sources = EventSourceStore(getattr(store, "root", ""))
         # 召回记账（10-08 定稿 §3.2）：候选组装与旧 Cue 收紧的共同前置，旁路只观察
         self.recall_ledger = RecallLedger(getattr(store, "root", ""))
         # 观察游标（2026-10-16 ④observe）：每会话已检查到的后端 seq
@@ -424,6 +430,14 @@ class EmberService:
         # 旁路形态（2026-10-12）：进行中的一轮（轮前钩子记下，MCP 写入
         # 工具自动关联出处；轮后钩子收掉）。单活跃轮——单用户部署够用。
         self._live_turn: dict[str, Any] | None = None
+        self.generations = GenerationStore(getattr(store, "root", ""))
+        self._generation_lock = threading.RLock()
+        self._generation_contexts: dict[str, dict] = {}
+        self._volatile_tool_results: dict[tuple[str, str], dict] = {}
+        try:
+            self._reconcile_recall_effects()
+        except Exception:
+            pass  # Keep durable pending effects; reads/retries can reconcile later.
 
     # ---------- session ----------
 
@@ -442,7 +456,7 @@ class EmberService:
             # turn，避免与重启前轮次撞号（记账/turn_span 串号）。
             # 只恢复计数，不恢复 messages 历史——上下文恢复由 momo 定为
             # 独立项（涉及 wire 层一致性/缓存/前端，另行设计）。
-            saved_max = self.turn_ledger.max_turn(sid)
+            saved_max = max(self.turn_ledger.max_turn(sid), self.generations.max_turn(sid))
             if saved_max > 0:
                 sess.turn_counter = saved_max
             self.sessions[sid] = sess
@@ -591,7 +605,8 @@ class EmberService:
 
     def run_recall_pipeline(self, session: Session, turn: int,
                             user_text: str,
-                            context_start_id: int | None = None
+                            context_start_id: int | None = None,
+                            deferred_entries: list[dict] | None = None
                             ) -> dict[str, Any]:
         """本地召回全流水线：Cue/Entity 双路 → Sleep 过滤 → 窗口过滤
         → Relation 展开 → 召回记账 → 前缀块构建。
@@ -733,9 +748,11 @@ class EmberService:
         # 与旧 Cue 收紧消费。名额截断后记账——记的是真正注入前缀的 event。
         self._ledger_record(session, turn, recalled_ctx, entity_hits,
                             entity_event_ids, dir_result, excluded,
-                            resolved_brought, observe_extra=observe_extra)
+                            resolved_brought, observe_extra=observe_extra,
+                            collector=deferred_entries)
 
         prefix = ""
+        presentations: list[dict] = []
         if recalled_ctx.recalled_events:
             prefix = self._build_recall_prefix(
                 recalled_ctx, entity_hits=entity_hits,
@@ -743,10 +760,13 @@ class EmberService:
                 summary_fallback=summary_fallback,
                 direction_focused=direction_focused,
                 units=units_for_prefix,
-                strong_dropped=gate_stats["strong_dropped"])
+                strong_dropped=gate_stats["strong_dropped"],
+                presentations=presentations)
 
         return {
             "prefix": prefix,
+            "presentations": presentations,
+            "recall_refs": {"events": self._presented_event_refs(presentations)},
             "recalled_count": len(recalled_ctx.recalled_events),
             "entity_recalled": len(entity_hits),
             "entity_names": [h.name for h in entity_hits],
@@ -767,7 +787,9 @@ class EmberService:
     # ---------- 记忆写入（对话流内，模型自主触发） ----------
 
     def write_validated_event(self, session: Session, turn: int,
-                              validated: dict[str, Any]) -> dict[str, Any]:
+                              validated: dict[str, Any],
+                              writer_recall_id: str | None = None,
+                              writer_tool_call_id: str | None = None) -> dict[str, Any]:
         """validated 参数 → Event 落库全流程（quotes 核对 / turn_span / Routes）。
 
         代理工具循环与 MCP 旁路工具（2026-10-12 拍板）共用的写入主路。
@@ -788,13 +810,16 @@ class EmberService:
         # quote_spans 必填非空（writer.validate 封死省略路径）——粗锚点只
         # 作为旧事件的查询时降级存在，新事件一律带真实时间坐标。
         quote_spans = validated["quote_spans"]
-        span_pairs = spans_from_quotes(quote_spans,
-                                       self._quote_corpus(session))
+        corpus = self._quote_corpus(session)
+        span_pairs = spans_from_quotes(quote_spans, corpus)
         if not span_pairs:
             raise ValueError(
                 "quote_spans 全部未能定位：起尾句均未在会话记录中逐字找到"
                 "——请逐字核对原文后重摘")
 
+        self.event_sources.capture(
+            event.event_id, event.version_id, session.session_id, span_pairs, corpus,
+            writer_recall_id=writer_recall_id, writer_tool_call_id=writer_tool_call_id)
         self.store.write_event(event)
 
         # key_quotes 逐字核对（r4 第 3.2 项，确定性代码侧）：
@@ -1015,7 +1040,8 @@ class EmberService:
                              summary_fallback: bool = False,
                              direction_focused: str | None = None,
                              units: list[dict] | None = None,
-                             strong_dropped: int = 0) -> str:
+                             strong_dropped: int = 0,
+                             presentations: list[dict] | None = None) -> str:
         """结构化前缀块：被唤起的记忆挂在用户消息前面（momo 裁决格式）。
 
         指向强度分层（momo 2026-10-01 裁决：无 must/may，纯运行时聚合）：
@@ -1035,6 +1061,21 @@ class EmberService:
         resolved_map = dict(resolved_brought or [])
         lines = ["[记忆浮现]"]
 
+        def presented(kind: str, eid: str | None = None,
+                      entity_id: str | None = None, light: bool = False) -> None:
+            if presentations is None:
+                return
+            item: dict[str, Any] = {"presentation": kind}
+            if eid is not None:
+                event = self.store.get_event(eid)
+                item["event_id"] = eid
+                item["version_id"] = str(event.version_id) if event.version_id else None
+            if entity_id is not None:
+                item["entity_id"] = entity_id
+            if light:
+                item["light"] = True
+            presentations.append(item)
+
         if summary_fallback:
             # Entity 层 summary 回退：只给概览，不做全文注入
             lines.append(f"你提到了{'、'.join('〈' + n + '〉' for n in entity_names)}，"
@@ -1048,6 +1089,7 @@ class EmberService:
                     continue
                 if (ent.summary or "").strip():
                     lines.append(f"关于〈{h.name}〉：{ent.summary.strip()}")
+                    presented("entity_overview", entity_id=h.entity_id)
             # 成员 summary 退役（2026-10-17 momo：entity summary 打头，
             # 成员不单独抛头露面）——有归属且实体有描述的收敛为 id 清单
             members = []
@@ -1065,10 +1107,13 @@ class EmberService:
                     members.append(eid)
                     continue
                 lines.append(f"- {event.summary}（{eid}）")
+                presented("event_excerpt" if event.summary.strip() else "retrieval_hint", eid)
             if members:
                 lines.append("（名下经历：" + "、".join(members) + "）")
+                presented("entity_overview")
             lines.append("如果对方想深入某一条，可以再具体问问——那时再展开原文，"
                          "或调用 read_memory_source(\"<event_id>\") 翻看。")
+            presented("retrieval_hint")
             lines.append("[记忆概览结束——自然地运用，不要机械复述本结构]")
             return "\n".join(lines) + "\n\n"
 
@@ -1097,6 +1142,8 @@ class EmberService:
                 quotes_line = self._format_key_quotes(event)
                 if quotes_line:
                     lines.append(f"  {quotes_line}")
+                presented("event_text" if core.strip() else
+                          "event_excerpt" if quotes_line else "retrieval_hint", eid)
                 return
             if entity_names and not hits:
                 strength = "实体区域"
@@ -1118,6 +1165,9 @@ class EmberService:
                 quotes_line = self._format_key_quotes(event)
                 if quotes_line:
                     lines.append(f"  {quotes_line}")
+            presented("event_text" if core.strip() else
+                      "event_excerpt" if inlined or self._format_key_quotes(event)
+                      else "retrieval_hint", eid)
             if why:
                 hint = "" if inlined else (
                     f"；需要原话时可调用 read_memory_source(\"{eid}\")")
@@ -1141,8 +1191,11 @@ class EmberService:
                 if ent is not None and (ent.summary or "").strip():
                     lines.append(f"- （此前已浮现）〈{ent.name}〉名下的"
                                  f"相关经历（{eid}）")
+                    presented("entity_overview", entity_id=ent_ref, light=True)
                     return
             lines.append(f"- （此前已浮现）{event.summary}（{eid}）")
+            presented("event_excerpt" if event.summary.strip() else "retrieval_hint",
+                      eid, light=True)
 
         if units is not None:
             # 多源共证呈现（2026-10-15 设计夜定稿）：实体块捆绑在前，
@@ -1169,6 +1222,7 @@ class EmberService:
                             lines.append(f"- （此前已浮现）〈{h.name}〉名下的 "
                                          f"{len(u['event_ids'])} 条经历，"
                                          "需要细节按 id 检索")
+                            presented("entity_overview", entity_id=h.entity_id, light=True)
                     else:
                         _light_line(u["event_ids"][0])
                     continue
@@ -1178,6 +1232,8 @@ class EmberService:
                     lines.append(f"- （印象浮现）"
                                  f"{self.store.get_event(oid).summary}"
                                  f"（{oid}）")
+                    presented("event_excerpt" if self.store.get_event(oid).summary.strip()
+                              else "retrieval_hint", oid)
                     continue
                 if u["kind"] == "entity_block":
                     h = entity_by_id.get(u["entity_id"])
@@ -1189,6 +1245,7 @@ class EmberService:
                             ent_summary = ""
                         if ent_summary:
                             lines.append(f"关于〈{h.name}〉：{ent_summary}")
+                            presented("entity_overview", entity_id=h.entity_id)
                     for eid in u["event_ids"]:
                         _event_line(eid)
                 else:
@@ -1201,10 +1258,26 @@ class EmberService:
             for eid in ctx.recalled_events:
                 _event_line(eid)
         if strong_dropped > 0:
+            presented("retrieval_hint")
             lines.append(f"（另有 {strong_dropped} 条高度相关的记忆因名额"
                          "未展示——需要时可用 search_memory 按话题取回）")
         lines.append("[记忆结束——自然地运用它们，不要机械复述本结构]")
         return "\n".join(lines) + "\n\n"
+
+    def _presented_event_refs(self, presentations: list[dict]) -> list[dict]:
+        """Only actual event content; hidden entity members never become refs."""
+        refs: dict[str, dict] = {}
+        for item in presentations:
+            kind = item["presentation"]
+            eid = item.get("event_id")
+            if kind not in ("event_text", "event_excerpt") or not eid:
+                continue
+            if eid in refs and refs[eid]["presentation"] == "event_text":
+                continue
+            event = self.store.get_event(eid)
+            refs[eid] = event_reference(event, kind, self.event_sources,
+                                        self.turn_spans.span_of(eid))
+        return list(refs.values())
 
     # 召回内联【当时对话】的单条上限（三席合计 ~3600 字，baseline 可调）
     _INLINE_SOURCE_MAX_CHARS = 1200
@@ -1410,13 +1483,20 @@ class EmberService:
                        entity_event_ids: list[str], dir_result,
                        excluded: list[str],
                        resolved_brought: list[tuple[str, str]],
-                       observe_extra: str | None = None) -> None:
+                       observe_extra: str | None = None,
+                       collector: list[dict] | None = None) -> None:
         """召回记账：三段通路各记一行（route=cue/entity/relation）。
 
         记账对象 = Sleep 过滤后真正带出的 event；relation 行的 via 列
         被顶上的被修正者。记账失败不阻断对话（旁路只观察）。
         """
         sid = session.session_id
+        def record(*args, **kwargs):
+            if collector is None:
+                return self.recall_ledger.record(*args, **kwargs)
+            entry = self.recall_ledger.make_entry(*args, **kwargs)
+            collector.append(entry)
+            return entry
         try:
             # cue 通路：按 event 聚合其命中的 distinct cues
             cue_hits = [h for h in ctx.recall_trace.anchors
@@ -1428,19 +1508,19 @@ class EmberService:
                     if h.cue not in by_event[h.event_id]:
                         by_event[h.event_id].append(h.cue)
                 for eid, cues in by_event.items():
-                    self.recall_ledger.record(
+                    record(
                         sid, turn, route="cue", event_ids=[eid],
                         cue=cues[0] if len(cues) == 1 else None)
                 # 多 cue 共命中同一 event 时合并记一行（cue 列 = 全部命中 cue）
                 multi = {eid: cs for eid, cs in by_event.items() if len(cs) > 1}
                 for eid, cues in multi.items():
-                    self.recall_ledger.record(
+                    record(
                         sid, turn, route="cue", event_ids=[eid], cue=";".join(cues))
             # entity 通路：每个命中实体记一行（含聚焦方向）
             for h in entity_hits:
                 evs = [eid for eid in entity_event_ids
                        if eid in ctx.recalled_events]
-                self.recall_ledger.record(
+                record(
                     sid, turn, route="entity", event_ids=evs,
                     entity_id=h.entity_id,
                     direction=(dir_result.top1[0]
@@ -1448,15 +1528,17 @@ class EmberService:
                                and dir_result.top1 else None))
             # relation 展开：修正者顶上
             for dst, src in resolved_brought:
-                self.recall_ledger.record(
+                record(
                     sid, turn, route="relation", event_ids=[dst], via=src)
             # 观察附加席命中：route=observe（提取统一——刷新计时器与
             # 注入去重；判联候选组装按 turn 不分 route，天然兼容）
             if observe_extra:
-                self.recall_ledger.record(sid, turn, route="observe",
+                record(sid, turn, route="observe",
                                           event_ids=[observe_extra])
         except Exception:
-            pass  # 记账是旁路观察层，绝不阻断主对话
+            if collector is not None:
+                raise  # A durable snapshot cannot commit a partial effect plan.
+            pass  # 旧形态的统计仍是旁路观察层。
 
     def recall(self, query: str) -> dict[str, Any]:
         """lexical + semantic direct recall + Entity/Direction + presentation（观察用）。"""
@@ -1574,7 +1656,314 @@ class EmberService:
     #   轮后钩子 → 原文存档 + 收轮。
     # 设计约束：无感工具——上下文永远以前端为准；失败如实回执不编造。
 
+    @staticmethod
+    def _generation_error(code: str, error: str) -> dict:
+        return {"ok": False, "status": "failed", "code": code, "error": error}
+
+    def _reconcile_recall_effects(self, recall_id: str | None = None) -> None:
+        for effect in self.generations.pending_effects(recall_id):
+            entry = json.loads(effect["entry_json"])
+            if effect["kind"] == "turn_start":
+                self.turn_ledger.record_start_once(effect["operation_id"], entry)
+            elif effect["kind"] == "recall":
+                self.recall_ledger.record_once(effect["operation_id"], entry)
+            else:
+                raise ValueError("Unknown recall effect kind")
+            self.generations.acknowledge_effect(effect["operation_id"])
+
+    @staticmethod
+    def _recall_pending(recall_id: str, code: str = "recall_in_progress") -> dict:
+        return {"status": "in_progress", "code": code, "recall_id": recall_id,
+                "retry_after_sec": 2}
+
+    def sidecar_recall_snapshot(self, recall_id: str, view: str = "refs") -> dict:
+        if view not in ("refs", "response"):
+            return self._generation_error("invalid_arguments", "view must be refs or response")
+        row = self.generations.snapshot(recall_id)
+        if row is None:
+            code = "recall_snapshot_unavailable" if self.generations.generation(recall_id) else "unknown_recall"
+            return self._generation_error(code, "No recall snapshot for this identity")
+        if row["state"] == "in_progress":
+            return self._recall_pending(recall_id)
+        if row["state"] != "ready":
+            return self._generation_error("recall_outcome_unknown", "Interrupted recall has no committed result; do not rerun")
+        with self._generation_lock:
+            try:
+                self._reconcile_recall_effects(recall_id)
+            except Exception:
+                return self._recall_pending(recall_id, "recall_recovery_pending")
+            row = self.generations.snapshot(recall_id)
+            if view == "response" and row["response_json"] is None:
+                return self._generation_error("response_expired", "Recall response expired; identity and refs remain")
+            metadata = json.loads(row["metadata_json"])
+            result = {"recall_id": recall_id, "session_id": metadata["session_id"],
+                      "turn": metadata["turn"], "status": "ready", "snapshot": metadata,
+                      "sources_revision": 0,
+                      "source_candidates": copy.deepcopy(metadata["recall_refs"]["events"]),
+                      "response_available": row["response_json"] is not None,
+                      "expires_at": datetime.fromtimestamp(row["expires_at"], timezone.utc).isoformat().replace("+00:00", "Z")}
+            if view == "response":
+                result["response"] = json.loads(row["response_json"])
+            return result
+
+    def _replay_recall(self, recall_id: str) -> dict:
+        result = self.sidecar_recall_snapshot(recall_id, "response")
+        return result["response"] if "response" in result else result
+
     def hook_turn_start(self, session_id: str | None, message: str,
+                        heart_turn_id: str | None = None,
+                        user_message_id: int | None = None,
+                        context_start_id: int | None = None,
+                        recall_id: str | None = None,
+                        occurred_at: str | None = None,
+                        activity_revision: int | None = None,
+                        window_revision: int | None = None) -> dict[str, Any]:
+        """Persist the identity before work; commit response and effects together."""
+        if recall_id is None:
+            with self._generation_lock:
+                try:
+                    self._reconcile_recall_effects()
+                except Exception:
+                    return self._generation_error("ledger_recovery_pending", "Earlier recall effects need recovery")
+                self.generations.supersede()
+                self._generation_contexts.clear()
+                return self._hook_turn_start_legacy(
+                    session_id, message, heart_turn_id, user_message_id, context_start_id)
+        rid, sid, seq = identity(recall_id), identity(session_id), message_seq(user_message_id)
+        if rid is None or sid is None or seq is None or not message.strip():
+            return self._generation_error("invalid_identity", "recall_id, session_id and a real user_message_id are required")
+        if any(v is not None and (isinstance(v, bool) or not isinstance(v, int) or v < 0)
+               for v in (activity_revision, window_revision)):
+            return self._generation_error("invalid_arguments", "Revisions must be nonnegative integers")
+        if occurred_at is not None:
+            try:
+                stamp = datetime.fromisoformat(occurred_at.replace("Z", "+00:00"))
+                if stamp.tzinfo is None:
+                    raise ValueError("Timezone required")
+            except (AttributeError, TypeError, ValueError):
+                return self._generation_error("invalid_arguments", "occurred_at must be an RFC3339 timestamp with timezone")
+        request_context = {"session_id": sid, "heart_turn_id": heart_turn_id,
+            "user_message_id": seq, "context_start_id": context_start_id,
+            "occurred_at": occurred_at, "activity_revision": activity_revision,
+            "window_revision": window_revision}
+        semantic_context = {k: v for k, v in request_context.items()
+                            if k not in ("occurred_at", "activity_revision", "window_revision") or v is not None}
+        request_hash = fingerprint(dict(semantic_context, message=message))
+        old = self.generations.generation(rid)
+        if old is not None:
+            if old["request_hash"] != request_hash:
+                return self._generation_error("id_conflict", "recall_id content conflict")
+            return self._replay_recall(rid)
+        with self._generation_lock:
+            old = self.generations.generation(rid)
+            if old is not None:
+                if old["request_hash"] != request_hash:
+                    return self._generation_error("id_conflict", "recall_id content conflict")
+                return self._replay_recall(rid)
+            try:
+                self._reconcile_recall_effects()
+            except Exception:
+                return self._generation_error("ledger_recovery_pending", "Earlier recall effects need recovery")
+            session = self.get_or_create_session(sid)
+            turn = max(session.turn_counter, self.generations.max_turn(sid)) + 1
+            self.generations.reserve(rid, sid, request_hash, turn, {"request_context": request_context})
+            session.turn_counter = turn
+            self._generation_contexts.clear()
+            self._live_turn = None
+            key = (sid, turn)
+            # Preview only the known real user seq. This preserves legacy window
+            # filtering/source reads during computation without persisting a turn.
+            self.turn_ledger.user_msg[key] = int(seq)
+            try:
+                entries: list[dict] = []
+                rec = self.run_recall_pipeline(session, turn, message,
+                    context_start_id=context_start_id, deferred_entries=entries)
+                stats = {k: rec[k] for k in (
+                    "recalled_count", "entity_recalled", "entity_names", "filtered_by_sleep",
+                    "filtered_by_window", "resolved_brought", "direction_focused",
+                    "direction_reason", "summary_fallback", "semantic_matched", "semantic_reason")}
+                refs = {"recall_id": rid, "session_id": sid, "anchor_message_id": seq,
+                        "events": rec["recall_refs"]["events"]}
+                out = {"injected": bool(rec["prefix"]), "injected_text": rec["prefix"] or None,
+                       "session_id": sid, "turn": turn, "memory": stats, "recall_id": rid,
+                       "presentations": rec["presentations"], "recall_refs": refs}
+                metadata = {"session_id": sid, "turn": turn, "request_context": request_context,
+                            "presentations": rec["presentations"], "recall_refs": refs}
+                start_entry = {"ember_session": sid, "ember_turn": turn,
+                               "user_message_id": int(seq), "recorded_at": _now_iso()}
+                if heart_turn_id:
+                    start_entry["heart_turn_id"] = str(heart_turn_id).strip()
+                effects = [("turn_start", start_entry)] + [("recall", entry) for entry in entries]
+                self.generations.commit_snapshot(rid, turn, out, metadata, effects)
+                self._reconcile_recall_effects(rid)
+            except Exception:
+                self.generations.interrupt(rid)
+                snapshot = self.generations.snapshot(rid)
+                if snapshot is not None and snapshot["state"] == "ready":
+                    return self._recall_pending(rid, "recall_recovery_pending")
+                return self._generation_error("recall_outcome_unknown", "Recall failed before a result commit; do not rerun this identity")
+            finally:
+                if key not in self.turn_ledger.all_turns:
+                    self.turn_ledger.user_msg.pop(key, None)
+            session.messages.append({"role": "user", "content": message, "turn": turn,
+                "_source_session_id": sid, "_source_message_id": seq})
+            self._generation_contexts[rid] = {"session": session, "turn": turn}
+            self._live_turn = {"session": session, "turn": turn, "user_text": message, "recall_id": rid}
+            return out
+
+    def hook_turn_end(self, session_id: str | None, assistant_reply: str,
+                      turn: int | None = None,
+                      assistant_message_id: int | None = None,
+                      recall_id: str | None = None,
+                      status: str = "done") -> dict[str, Any]:
+        with self._generation_lock:
+            if recall_id is None:
+                if self._live_turn and self._live_turn.get("recall_id"):
+                    return self._generation_error("identity_required", "recall_id is required for this generation")
+                return self._hook_turn_end_legacy(session_id, assistant_reply, turn, assistant_message_id)
+            rid = identity(recall_id)
+            row = self.generations.generation(rid) if rid else None
+            if row is None:
+                return self._generation_error("unknown_recall", "Unknown generation")
+            if session_id != row["session_id"] or (turn is not None and turn != row["turn"]):
+                return self._generation_error("context_mismatch", "Generation session/turn mismatch")
+            seq = message_seq(assistant_message_id)
+            if status not in ("done", "error", "cancelled"):
+                return self._generation_error("invalid_status", "Expected done, error or cancelled")
+            if status == "done" and (not assistant_reply.strip() or seq is None):
+                return self._generation_error("invalid_identity", "Completed dialogue needs real reply text and seq")
+            request_hash = fingerprint({"session_id": session_id, "turn": row["turn"],
+                "assistant_reply": assistant_reply, "assistant_message_id": seq, "status": status})
+            if row["end_hash"] is not None:
+                if row["end_hash"] != request_hash:
+                    return self._generation_error("id_conflict", "Generation terminal content conflict")
+                return json.loads(row["end_result"])
+            if row["turn"] is None:
+                return self._generation_error("generation_not_ready", "Generation never completed turn registration")
+            # Completion is a historical fact, even after supersession/restart.
+            # Never reopen a writer or append late text to the current context.
+            ctx = self._generation_contexts.get(rid)
+            if status == "done":
+                self.turn_ledger.record_reply(session_id, row["turn"], int(seq))
+            result = {"ok": True, "session_id": session_id, "turn": row["turn"],
+                      "recall_id": rid, "status": status}
+            self.generations.finish(rid, status, request_hash, result, seq if status == "done" else None)
+            if status == "done" and ctx is not None and row["state"] == "running":
+                ctx["session"].messages.append({"role": "assistant", "content": assistant_reply,
+                    "turn": row["turn"], "_source_session_id": session_id,
+                    "_source_message_id": seq, "_source_recall_id": rid})
+            self._generation_contexts.pop(rid, None)
+            if self._live_turn and self._live_turn.get("recall_id") == rid:
+                self._live_turn = None
+            return result
+
+    def sidecar_generation_status(self, recall_id: str) -> dict:
+        row = self.generations.generation(recall_id)
+        if row is None:
+            return self._generation_error("unknown_recall", "Unknown generation")
+        return {"recall_id": recall_id, "session_id": row["session_id"],
+                "turn": row["turn"], "status": row["state"],
+                "superseded_by": row["superseded_by"],
+                "assistant_message_id": row["assistant_message_id"],
+                "calls": self.generations.calls_for(recall_id),
+                "recall_snapshot_available": bool((snapshot := self.generations.snapshot(recall_id))
+                    and snapshot["state"] == "ready" and snapshot["response_json"] is not None
+                    and not self.generations.pending_effects(recall_id))}
+
+    def _tool_receipt(self, row: dict) -> dict:
+        if row["state"] != "completed":
+            return self._generation_error("tool_outcome_unknown",
+                "Accepted tool outcome is unknown/in progress; do not replay; reconcile the receipt")
+        if row["volatile"]:
+            cached = self._volatile_tool_results.get((row["recall_id"], row["tool_call_id"]))
+            if cached is None:
+                return self._generation_error("result_not_retained",
+                    "Read result was not persisted; this identity cannot be re-executed")
+            return copy.deepcopy(cached)
+        return json.loads(row["result_json"])
+
+    def sidecar_tool_status(self, recall_id: str, tool_call_id: str) -> dict:
+        row = self.generations.call(recall_id, tool_call_id)
+        if row is None or row["recall_id"] != recall_id:
+            return self._generation_error("unknown_tool_call", "Unknown tool call in this generation")
+        return {"recall_id": recall_id, "tool_call_id": tool_call_id,
+                "tool_name": row["tool_name"], "status": row["state"],
+                "result": self._tool_receipt(row)}
+
+    def sidecar_call_tool(self, name: str, arguments: dict,
+                          recall_id: str | None = None,
+                          tool_call_id: str | None = None,
+                          run_id: str | None = None) -> dict:
+        """HTTP-provided identity only. No identified request falls back to live."""
+        if run_id is not None:
+            code = "context_mismatch" if recall_id is not None else "unsupported_phase"
+            return self._generation_error(code, "Active run context is not implemented in this phase")
+        if recall_id is None and tool_call_id is None:
+            with self._generation_lock:
+                if self._live_turn and self._live_turn.get("recall_id"):
+                    return self._generation_error("identity_required", "Generation tool identity headers are required")
+                return self._dispatch_memory_tool(name, arguments)
+        rid, cid = identity(recall_id), identity(tool_call_id)
+        if rid is None or cid is None:
+            return self._generation_error("invalid_identity", "Both recall and tool-call identity headers are required")
+        try:
+            request_hash = fingerprint({"recall_id": rid, "name": name, "arguments": arguments})
+        except (TypeError, ValueError):
+            return self._generation_error("invalid_arguments", "Tool arguments must be finite JSON")
+        with self._generation_lock:
+            old = self.generations.call(rid, cid)
+            if old is not None:
+                if old["recall_id"] != rid or old["request_hash"] != request_hash:
+                    return self._generation_error("id_conflict", "Tool identity content conflict")
+                # Completed receipts are replayable after completion/supersession.
+                return self._tool_receipt(old)
+            row = self.generations.generation(rid)
+            if row is None:
+                return self._generation_error("unknown_recall", "Unknown generation")
+            ctx = self._generation_contexts.get(rid)
+            if row["state"] != "running" or ctx is None:
+                return self._generation_error("stale_generation", "Generation ended, was superseded or lost its live context")
+            self.generations.begin_call(rid, cid, request_hash, name)
+            try:
+                result = self._dispatch_memory_tool(name, arguments,
+                    context=ctx, recall_id=rid, tool_call_id=cid)
+                # A read transcript stays volatile, never in the durable receipt.
+                volatile = name == READ_SOURCE_TOOL_NAME
+                self.generations.complete_call(rid, cid, result, volatile=volatile)
+                if volatile:
+                    self._volatile_tool_results[(rid, cid)] = copy.deepcopy(result)
+                return result
+            except Exception:
+                # A memory JSONL write and its receipt are not one transaction.
+                # Preserve uncertainty rather than creating duplicate effects.
+                try:
+                    self.generations.unknown_call(rid, cid)
+                except Exception:
+                    pass
+                return self._generation_error("tool_outcome_unknown", "Tool outcome could not be committed; reconcile before retrying")
+
+    def _dispatch_memory_tool(self, name: str, arguments: dict,
+                              context: dict | None = None,
+                              recall_id: str | None = None,
+                              tool_call_id: str | None = None) -> dict:
+        if name == TOOL_NAME:
+            if context is not None:
+                return self._create_memory_in_context(context["session"], context["turn"],
+                    arguments, recall_id, tool_call_id)
+            return self.sidecar_create_memory_event(arguments)
+        if name == REVISE_TOOL_NAME:
+            return self.sidecar_revise_memory_event(arguments)
+        if name == READ_SOURCE_TOOL_NAME:
+            return self.sidecar_read_memory_source(arguments.get("event_id") or "")
+        if name == SEARCH_TOOL_NAME:
+            return self.sidecar_search_memory(arguments)
+        if name == PIN_TOOL_NAME:
+            return self.sidecar_pin_memory(arguments)
+        if name == UNPIN_TOOL_NAME:
+            return self.sidecar_unpin_memory(arguments)
+        return {"status": "failed", "error": f"未知工具: {name}"}
+
+    def _hook_turn_start_legacy(self, session_id: str | None, message: str,
                         heart_turn_id: str | None = None,
                         user_message_id: int | None = None,
                         context_start_id: int | None = None) -> dict[str, Any]:
@@ -1596,7 +1985,9 @@ class EmberService:
                                 user_message_id=user_message_id)
         rec = self.run_recall_pipeline(session, turn, message,
                                        context_start_id=context_start_id)
-        session.messages.append({"role": "user", "content": message, "turn": turn})
+        session.messages.append({"role": "user", "content": message, "turn": turn,
+                                 "_source_session_id": session.session_id,
+                                 "_source_message_id": message_seq(user_message_id)})
         self._live_turn = {"session": session, "turn": turn,
                            "user_text": message}
         stats = {k: rec[k] for k in (
@@ -1610,9 +2001,13 @@ class EmberService:
             "session_id": session.session_id,
             "turn": turn,
             "memory": stats,
+            "presentations": rec["presentations"],
+            "recall_refs": {"session_id": session.session_id,
+                            "anchor_message_id": message_seq(user_message_id),
+                            "events": rec["recall_refs"]["events"]},
         }
 
-    def hook_turn_end(self, session_id: str | None,
+    def _hook_turn_end_legacy(self, session_id: str | None,
                       assistant_reply: str,
                       turn: int | None = None,
                       assistant_message_id: int | None = None) -> dict[str, Any]:
@@ -1642,7 +2037,9 @@ class EmberService:
         # assistant 原话也进会话账本：key_quotes 的 ai 侧逐字核对语料
         session.messages.append({"role": "assistant",
                                  "content": assistant_reply,
-                                 "turn": live["turn"]})
+                                 "turn": live["turn"],
+                                 "_source_session_id": session.session_id,
+                                 "_source_message_id": message_seq(assistant_message_id)})
         try:
             self.turn_ledger.record_reply(session.session_id, live["turn"],
                                           assistant_message_id)
@@ -1668,13 +2065,23 @@ class EmberService:
             return {"status": "failed",
                     "error": "当前没有进行中的对话轮（轮前钩子未调用），"
                              "无从记录这条记忆的出处"}
+        if live.get("recall_id"):
+            return self._generation_error("identity_required", "Use the bound MCP generation context")
+        try:
+            return self._create_memory_in_context(live["session"], live["turn"], arguments)
+        except OSError as ex:
+            return {"status": "failed", "error": str(ex)[:300]}
+
+    def _create_memory_in_context(self, session: Session, turn: int, arguments: dict,
+                                  recall_id: str | None = None,
+                                  tool_call_id: str | None = None) -> dict:
         validated, err = validate_writer_arguments(arguments)
         if err:
             return {"status": "failed", "error": f"validation failed: {err}"}
         try:
-            return self.write_validated_event(live["session"], live["turn"],
-                                              validated)
-        except (ValueError, KeyError, OSError) as ex:
+            return self.write_validated_event(session, turn, validated,
+                writer_recall_id=recall_id, writer_tool_call_id=tool_call_id)
+        except (ValueError, KeyError) as ex:
             return {"status": "failed", "error": str(ex)[:300]}
 
     # ---------- 修改记忆（冷静期修正，2026-10-14 momo 拍板） ----------

@@ -34,6 +34,8 @@ import os
 from datetime import datetime, timezone
 from typing import Any
 
+from .journal import append_record
+
 LEDGER_FILE = "recall_ledger.jsonl"
 
 
@@ -61,6 +63,7 @@ class RecallLedger:
         # 注入在场（⑧ 在场去重）：(session_id, event_id) -> 最后注入时刻
         # ——记账行即注入事实（名额截断后记账），2h 内已注入不重复全文
         self.last_injected: dict[tuple[str, str], str] = {}
+        self._applied_operations: set[str] = set()
         self._load()
 
     def _path(self) -> str:
@@ -70,7 +73,7 @@ class RecallLedger:
         p = self._path()
         if not os.path.exists(p):
             return
-        with open(p, encoding="utf-8") as f:
+        with open(p, encoding="utf-8", errors="replace") as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -82,6 +85,11 @@ class RecallLedger:
                 self._index(d)
 
     def _index(self, d: dict[str, Any]) -> None:
+        operation_id = d.get("operation_id")
+        if operation_id and operation_id in self._applied_operations:
+            return
+        if operation_id:
+            self._applied_operations.add(operation_id)
         key = (d.get("session_id") or "", d.get("turn"))
         if not isinstance(key[1], int):
             return
@@ -124,6 +132,17 @@ class RecallLedger:
         event_ids 为空时仍记账——"跑了但没带出"对收紧判据同样有意义
         （cue 被触碰却没命中任何 event，与从未被触碰是两回事）。
         """
+        entry = self.make_entry(session_id, turn, route, event_ids, cue,
+                                entity_id, direction, via)
+        with open(self._path(), "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        self._index(entry)
+        return entry
+
+    @staticmethod
+    def make_entry(session_id: str, turn: int, route: str, event_ids: list[str],
+                   cue: str | None = None, entity_id: str | None = None,
+                   direction: str | None = None, via: str | None = None) -> dict:
         entry = {
             "session_id": session_id,
             "turn": turn,
@@ -139,10 +158,14 @@ class RecallLedger:
             entry["direction"] = direction
         if via:
             entry["via"] = via
-        with open(self._path(), "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-        self._index(entry)
         return entry
+
+    def record_once(self, operation_id: str, entry: dict) -> None:
+        if operation_id in self._applied_operations:
+            return
+        entry = dict(entry, operation_id=operation_id)
+        append_record(self._path(), entry)
+        self._index(entry)
 
     def cue_use_count_for_event(self, event_id: str, cue: str) -> int:
         """某事件名下某条 cue 被真正带出过该事件的次数（收紧判据口径）。
