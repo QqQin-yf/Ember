@@ -224,6 +224,13 @@ class GenerationTests(unittest.TestCase):
         self.start("r-old", "s1", 71)
         self.svc.hook_turn_end("s1", "已经确认按 Route Search 推进。", turn=1, assistant_message_id=75, recall_id="r-old")
         self.start("r-new", "s1", 80, "记下刚才决定。")
+        self.no_fetch.stop()
+        def fetch(sid, ids, **kw):
+            return [{"message_id": int(m["_source_message_id"]), "role": m["role"], "content": m["content"]}
+                    for m in self.svc.sessions[sid].messages if m.get("_source_message_id") in ids]
+        transport = patch("ember.source_client.fetch_source_path", side_effect=fetch)
+        transport.start()
+        self.addCleanup(transport.stop)
         args = write_args(quote_spans=[{"start_quote": "今天我们决定把", "end_quote": "已经确认按 Route Search 推进。"}])
         made = self.call(rid="r-new", args=args)
         self.assertEqual(made["status"], "created", made)

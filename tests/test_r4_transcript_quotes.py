@@ -210,9 +210,8 @@ def test_read_memory_source():
         tool_msg = [m for m in svc.sessions["sQ"].messages
                     if m.get("role") == "tool"][-1]
         content = json.loads(tool_msg["content"])
-        check("有存档返回 ok + 原文",
-              content["status"] == "ok"
-              and "就按这个方案定稿吧" in content["transcript"],
+        check("旧本地语料无精确出处 → not_archived",
+              content["status"] == "not_archived",
               str(content)[:120])
         # 无存档（旧事件）
         old = Event(event_id="EVT-098-yyyy", version_id="v",
@@ -246,9 +245,12 @@ def test_read_memory_source():
             # mock 拉取：账本登记第 1 轮的 message_id，原文接口返回长文本
             svc3.turn_ledger.record("sL", 1, None, user_message_id=500)
             svc3.turn_ledger.record_reply("sL", 1, assistant_message_id=501)
+            svc3.event_sources.capture("EVT-097-xxxx", "v", "sL", [(1, 1)], [
+                {"turn": 1, "role": role, "_source_session_id": "sL", "_source_message_id": seq}
+                for role, seq in (("user", "500"), ("assistant", "501"))])
             from ember import source_client as sc
-            orig_fetch = sc.fetch_source_range
-            sc.fetch_source_range = lambda sid, a, b: [
+            orig_fetch = sc.fetch_source_path
+            sc.fetch_source_path = lambda sid, ids, **kw: [
                 {"message_id": 500, "role": "user", "content": long_text},
                 {"message_id": 501, "role": "assistant", "content": long_text},
             ]
@@ -259,7 +261,7 @@ def test_read_memory_source():
                 svc3._handle_read_source_call(svc3.get_or_create_session("sL"),
                                               [call3])
             finally:
-                sc.fetch_source_range = orig_fetch
+                sc.fetch_source_path = orig_fetch
             tool_msg3 = [m for m in svc3.sessions["sL"].messages
                          if m.get("role") == "tool"][-1]
             content3 = json.loads(tool_msg3["content"])
@@ -332,6 +334,10 @@ def test_inline_source_high_match():
             significance="9：影响后续功能设计",
             key_quotes=[{"speaker": "user", "text": "轮5的原话"}]))
         svc.turn_spans.fill(eid, [(5, 5)], filled_by="test")
+        # This test is presentation eligibility, not path transport (covered by
+        # test_source_paths and the real App probe). Supply a verified read result.
+        svc.read_source_event = lambda eid: {"status": "ok", "transcript": "[turn 5] user: 轮5的原话", "truncated": False}
+
 
     def _prefix(svc, anchors):
         ctx = PresentationContext(
@@ -345,8 +351,8 @@ def test_inline_source_high_match():
         # 正例：双线索（其一语义 0.65 ≥ 0.62 门槛）+ sig 9 → 内联当时对话
         p = _prefix(svc, [_hit("追剧"), _hit("更新", "semantic", score=0.65)])
         check("三条件全满足 → 内联【当时对话】", "【当时对话】" in p, p[:300])
-        check("内联含 span 原文（±3 轮扩展）",
-              "[turn 4] assistant: 轮4的原话" in p, p[:300])
+        check("内联含已核验 span 原文",
+              "[turn 5] user: 轮5的原话" in p, p[:300])
         check("内联后不再出原话行", "原话：" not in p, p[:300])
         check("内联后无深挖提示", "需要原话时" not in p, p[:300])
 

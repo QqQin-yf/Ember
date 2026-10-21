@@ -79,7 +79,7 @@
 
 2026-10-20 本段新增 `presentations`（有序呈现粒度）和 `recall_refs`（触发会话、真实锚点 seq 字符串及实际输出事件的出处辅助）。只有事件正文/摘录进入 `recall_refs.events`；实体概览不展开隐藏成员。旧事件或缺可靠消息身份保持 unresolved，路径由 app 解析。完整字段及限制见 [RECALL_REFS_SPEC.md](RECALL_REFS_SPEC.md)。
 
-带 recall_id 的新模式已本地实现持久快照与 24 小时原响应重放，见下节。主动 run 和新原文读取客户端未实现；旧 `/api/source` 调用保持原行为，第二阶段尚未完成真实三方联调或部署。
+带 recall_id 的新模式已本地实现持久快照与 24 小时原响应重放，见下节。主动 run 未实现。原文客户端已迁移到精确路径，见 §7.1 与 SOURCE_PATH_VALIDATION.md；生产提供方配置和实例归属核验仍待完成，生产开关未批准。
 
 ### 4.1.1 普通生成显式绑定（2026-10-20 本段）
 
@@ -331,39 +331,25 @@ turn_start 可传 recall_id，MCP 随后逐请求带 X-Ember-Recall-Id 和 X-Emb
 
 ## 7. ember 作为客户端
 
-### 7.1 原文提供接口（`/api/source`，Deliz 将来照此 schema 接管）
+### 7.1 原文提供接口（精确路径）
 
-10-14 去原文化后，ember 本地不存会话原文，原文只存后端消息树一份；ember 按需拉取、**用完即弃、本地不落盘**。当前提供方 = heart-chat 只读端点；Deliz 上线后只换 `EMBER_SOURCE_URL`，ember 与调用方零改动。
+原文仍只存 App 消息树，Ember 按需读取、用完即弃，不持久保存正文。所有远程消费方已切到：
 
-请求（GET，`EMBER_SOURCE_TOKEN` 设置时带 `Authorization: Bearer …`）：
-
-```
-GET {EMBER_SOURCE_URL}/api/source?session_id={sid}&from={int}&to={int}
-```
-
-- `from` / `to`：**message_id 整数区间（含两端）**——对外契约只有 message_id 一套（见 §9）
-
-响应 200：
-
-```json
-{"messages": [
-  {"message_id": 123, "role": "user", "content": "原文整行，不截断"},
-  {"message_id": 124, "role": "assistant", "content": "…"}
-]}
+```text
+GET {EMBER_SOURCE_URL}/api/source/path?session_id={sid}&message_ids=71,75,80,82
+Authorization: Bearer <EMBER_SOURCE_TOKEN>
+X-Heart-Instance: <Ember 实例名>
 ```
 
-- 按 `message_id` 升序；区间内没有消息 = 空 `messages` 数组（合法，不是错误）
-- `content` 原样返回，**含被前端截断展示的完整文本**——ember 要做引文逐字核对
+`message_ids` 为可信的全局 seq 字符串集合，非空、去重、按数字升序；不能从旧账本的 min/max 或最大回复号推导。提供方逐条校验会话、原文资格及同一真实父链，可以读取旧分支且不依赖当前 leaf，不展开未请求的中间消息。响应为 `{"messages":[{"message_id":"71","role":"user","content":"原文"}, ...]}`，按 seq 升序、完整返回所请求编号；Ember 再校验编号、数量、顺序、角色与正文类型，不接受部分结果。
 
-失败语义（ember 侧的消费方各自降级，提供方只需如实）：
+事件翻原文、召回内联、briefing 原文块使用该事件冻结的逐轮编号及可信完成绑定；事件内容版本变化、缺编号或缺可信出处返回 `not_archived`。不会用当前内存、当前 leaf 或邻近轮次替代；没有邻近路径证据时 `context_expanded=false`，仅取已证明的来源轮。
 
-| 情形 | ember 行为 |
-|---|---|
-| 未配置 `EMBER_SOURCE_URL` / 网络失败 / 非 200 / 响应缺 `messages` | 按「语料不可用」降级：写记忆引文核对 → 拒绝写入；read_memory_source → `not_archived`；sleep 材料 → 跳过该项 |
-| 区间拉不到对应消息 | 返回空数组即可，不报错 |
+写记忆引文/定位和观察/sleep 通过同一精确客户端：历史语料取自实例内已持久生成的原始开轮/终态身份，不从旧区间账本推断。整份身份集合须由提供方校验在同一路径；若包含重新生成/编辑后的混合路径或重复编号归属不明，历史读取降级。写入只可使用仍能核验的当前真实用户原文；观察不推进游标、不制造事件。恢复混合会话的增量观察需要额外明确路径输入，暂不猜测。
 
-- **绝不重试轰炸**：一次拉取失败就降级，下次需要时再试
-- 提供方鉴权与 heart-chat 现行一致（Bearer，可选）
+未配置、超时、401/404/409/其他非 200、响应残缺/错序/角色冲突均视为不可用；不重试轰炸，不回退 `/api/source`。旧无编号 Event/只有最大回复号的账本不自动升级成可信来源。遗留本地代理仍可核对自身易失文本，但这不能成为可解析的历史路径证据。
+
+配置仍为 `EMBER_SOURCE_URL`、`EMBER_SOURCE_TOKEN`、`EMBER_SOURCE_TIMEOUT`（秒，默认 8）。生产提供方必须核验实例与会话/库的归属；仅发送 `X-Heart-Instance` 不等于源端已经执行隔离。当前 App 接口忽略该头，真实多实例生产验收尚未关闭，配合清单见 PRODUCTION_PREREQUISITES.md。
 
 ## 8. 简报（briefing，消费方：app 截断编排）
 
@@ -388,7 +374,7 @@ GET {EMBER_SOURCE_URL}/api/source?session_id={sid}&from={int}&to={int}
 | EMBER_DATA_ROOT | 记忆库根目录 = heart 的 `data/`：default 实例库住 `<root>/ember`，其余住 `<root>/instances/<名>/ember`（旧扁平库有 events.jsonl 时 default 原样沿用，零迁移） |
 | EMBER_INSTANCES | 实例清单，逗号分隔（缺省 `default`）；清单外实例 404 |
 | EMBER_DATA_DIR | （旧变量）未设 EMBER_DATA_ROOT 时作为根目录回落；默认 `<项目>/data/` |
-| EMBER_SOURCE_URL / EMBER_SOURCE_TOKEN / EMBER_SOURCE_TIMEOUT | 原文提供接口（heart-chat `/api/source`，将来 Deliz 同 schema 接管——契约见 §7.1） |
+| EMBER_SOURCE_URL / EMBER_SOURCE_TOKEN / EMBER_SOURCE_TIMEOUT | 精确路径原文接口（Deliz `/api/source/path`；实例归属/鉴权部署核验见 §7.1） |
 | EMBER_EMBED_BASE_URL / EMBER_EMBED_API_KEY / EMBER_EMBED_MODEL | 向量服务 |
 | ZHIPU_API_KEY / EMBER_SLEEP_MODEL | 观察提炼/合并等任务的 LLM |
 | EMBER_OWNER_NAME | 观察提炼注入 prompt 的用户称呼（不配写 "user"，见 §6 观察式记忆） |

@@ -176,6 +176,12 @@ class RecallRefsTests(unittest.TestCase):
         self.svc.hook_turn_start("source", "请记下刚才的决定。", user_message_id=80)
         args = write_args(quote_spans=[{"start_quote": "今天我们决定把",
                                         "end_quote": "已经确认按 Route Search 推进。"}])
+        # Simulate provider-proven historical corpus; legacy max-reply mappings
+        # themselves are still deliberately not accepted as historical identity.
+        self.fetch.stop()
+        proof = patch.object(self.svc, "_fetched_corpus", return_value=list(self.svc.sessions["source"].messages))
+        proof.start()
+        self.addCleanup(proof.stop)
         out = self.svc.sidecar_create_memory_event(args)
         self.assertEqual(out["status"], "created", out)
         return out["event_id"]

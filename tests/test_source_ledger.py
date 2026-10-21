@@ -426,19 +426,19 @@ class SourceClientTests(unittest.TestCase):
         source_client.SOURCE_URL, source_client.SOURCE_TOKEN = self._old
 
     def test_fetch_range(self) -> None:
-        rows = source_client.fetch_source_range("s1", 10, 11)
+        rows = source_client.fetch_source_path("s1", [10, 11])
         self.assertEqual(rows[0]["message_id"], 10)
         self.assertEqual(rows[0]["role"], "user")
 
     def test_unconfigured_raises(self) -> None:
         source_client.SOURCE_URL = ""
         with self.assertRaises(source_client.SourceUnavailable):
-            source_client.fetch_source_range("s1", 1, 2)
+            source_client.fetch_source_path("s1", [1, 2])
 
     def test_bad_response_raises(self) -> None:
         _FakeSource.status = 500
         with self.assertRaises(source_client.SourceUnavailable):
-            source_client.fetch_source_range("s1", 10, 11)
+            source_client.fetch_source_path("s1", [10, 11])
 
 
 class TranscriptRetireTests(unittest.TestCase):
@@ -485,22 +485,25 @@ class TranscriptRetireTests(unittest.TestCase):
         self.svc.turn_ledger.record_reply("s1", 2, assistant_message_id=201)
         self.svc.hook_turn_start("s1", "第一轮的话")
 
-        class _Rows:
-            pass
-
         fetched = [
             {"message_id": 100, "role": "user", "content": "第一轮的话"},
             {"message_id": 101, "role": "assistant", "content": "第一轮的回"},
             {"message_id": 200, "role": "user", "content": "第二轮的话"},
             {"message_id": 201, "role": "assistant", "content": "第二轮的回"},
         ]
-        orig = source_client.fetch_source_range
-        source_client.fetch_source_range = (
-            lambda sid, a, b: fetched)
+        from unittest.mock import patch
+        identities = [{"turn": 1 + i // 2, "role": r["role"], "message_id": str(r["message_id"])}
+                      for i, r in enumerate(fetched)]
+        proof = patch("ember.service.generation_messages", return_value=identities)
+        proof.start()
+        orig = source_client.fetch_source_path
+        source_client.fetch_source_path = (
+            lambda sid, ids, **kw: fetched)
         try:
             corpus = self.svc._quote_corpus(self.svc.sessions["s1"])
         finally:
-            source_client.fetch_source_range = orig
+            source_client.fetch_source_path = orig
+            proof.stop()
         by_turn: dict[int, set[str]] = {}
         for m in corpus:
             if m.get("turn") is not None:
@@ -516,8 +519,7 @@ class TranscriptRetireTests(unittest.TestCase):
         self.svc.turn_spans.fill("EVT-001-aaaaaa", [(1, 1)],
                                  filled_by="test")
         r = self.svc.read_source_event("EVT-001")
-        self.assertEqual(r["status"], "ok")
-        self.assertIn("周末去杭州了", r["transcript"])
+        self.assertEqual(r["status"], "not_archived")  # Legacy local text is not frozen path evidence.
 
     def test_read_source_unavailable_when_nothing(self) -> None:
         ev = _make_event(self.svc, "s1", 3)

@@ -1,5 +1,7 @@
 # Ember v3 MVP
 
+本轮原文读取已迁移至 `/api/source/path`，含工具、召回/briefing、写入核验和观察/sleep；缺可信身份或混合路径时如实降级。精确读取验收及四个进程强杀恢复检查点见 [SOURCE_PATH_VALIDATION.md](SOURCE_PATH_VALIDATION.md)，生产提供方配合清单见 [PRODUCTION_PREREQUISITES.md](PRODUCTION_PREREQUISITES.md)。生产配置/实例归属尚待实测，生产开关未批准。
+
 Ember 是一套事件中心的记忆系统：以 Entity 为长期锚点、Event 为基本记忆单元、Cue 为事件自己的召回入口、Event Relation 为事件间的结构联系。
 
 形态：**旁路 sidecar**（hooks + MCP + 简报/钉住 + sleep 夜间维护接口），消费方是 app（Deliz）。对接契约见本仓库 `API.md`。
@@ -45,6 +47,7 @@ ember/              核心库（每个文件开头有职责说明）
   turn_ledger.py    turn_id ↔ message_id 映射账本（旁路）
   source_refs.py    新事件固定来源账（只存明确消息身份，缺证据不猜）
   source_completion.py 同生成完成绑定与独立来源候选修订（不改原快照）
+  source_paths.py   可信生成/冻结身份的精确路径取材（不猜区间）
   generations.py   普通生成身份、工具回执与 24 小时召回响应快照（SQLite 旁路）
   journal.py       可恢复记账的 JSONL 持久追加
 data/               记忆数据（events/entities/routes/relations/账本/向量，多实例时按实例分子目录）

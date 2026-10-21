@@ -44,6 +44,7 @@ from .turn_ledger import TurnLedger
 from .recall_ledger import RecallLedger
 from .turn_span import TurnSpanStore, spans_from_quotes
 from . import source_client
+from .source_paths import generation_messages, read_messages
 from . import executors
 from .cue_tighten import CueTightener
 from .pin_store import PinStore
@@ -384,6 +385,7 @@ class EmberService:
         recall_context: bool = False,
     ):
         self.store = store
+        self.source_instance = "default"
         self.client = client          # chat 与 memory writer 共用
         self.model = model
         # 未来开关（本阶段文档已预留）：把 Recall Context 注入本轮对话
@@ -938,11 +940,9 @@ class EmberService:
     def read_source_event(self, event_id: str) -> dict[str, Any]:
         """翻原文单事件实现（只读；代理工具循环与 MCP 旁路工具共用）。
 
-        取原文 = Event 的 source_ref 解析 session + turn_spans 精确区间
-        （无则 not_archived），语料 = 内存会话 ∪ source_client 按需拉取
-        （2026-10-14 退役 transcripts：原文只存后端一份）。两边都没有
-        → not_archived，不报错不编造。superseded 事件也可读——这是
-        显式翻看，不是自动召回。
+        Frozen provenance supplies exact message IDs; the provider checks the
+        historical parent path. Missing identities, versions or provider support
+        return not_archived. No current-session or neighbouring-turn fallback.
         """
         import re
         eid = (event_id or "").strip()
@@ -959,22 +959,33 @@ class EmberService:
                     "reason": "该事件没有可定位的原文存档"
                               "（写入早于定位功能或出处未回填）"}
         sid = sess.group(1)
-        turns = [t for s, e in spans for t in range(s, e + 1)]
-        # 原文上下文（2026-10-17 momo 拍板）：真区间按区间；单句扩
-        # ±3 轮（前后不足 3 轮就有多少拉多少）——读的体验不再孤零零一句
-        context_expanded = False
-        if len(set(turns)) == 1:
-            c = turns[0]
-            turns = list(range(max(1, c - 3), c + 4))
-            context_expanded = True
-        want = set(turns)
-        rows = [m for m in self.sessions.get(sid).messages
-                if m.get("turn") in want] if sid in self.sessions else []
-        have = {m.get("turn") for m in rows}
-        if len(have) < len(want):
-            rows += self._fetched_corpus(sid, want - have)
-        rows.sort(key=lambda r: (r.get("turn", 0),
-                                 0 if r.get("role") == "user" else 1))
+        # Frozen evidence is the only authority for an old Event. A newer
+        # session, max-reply ledger or current leaf cannot replace that source.
+        ref = self.source_completions.enrich(event_reference(
+            event, "expanded", self.event_sources, spans))
+        if ref["source_evidence"] not in ("frozen_messages", "generation_completed"):
+            return {"status": "not_archived", "event_id": resolved,
+                    "reason": "source_path_unknown"}
+        if str((self.event_sources.get(resolved) or {}).get("version_id")) != str(event.version_id):
+            return {"status": "not_archived", "event_id": resolved,
+                    "reason": "source_version_mismatch"}
+        turns = sorted({t for lo, hi in ref["source_turn_spans"] for t in range(lo, hi + 1)})
+        messages = {m["turn"]: m for m in ref["turn_messages"]}
+        identities = []
+        for turn in turns:
+            item = messages.get(turn, {})
+            for role, field in (("user", "user_message_id"), ("assistant", "assistant_message_id")):
+                seq = message_seq(item.get(field))
+                if seq is None:
+                    return {"status": "not_archived", "event_id": resolved,
+                            "reason": "source_seq_missing"}
+                identities.append({"turn": turn, "role": role, "message_id": seq,
+                                   "recall_id": item.get("source_recall_id")})
+        context_expanded = False  # Neighbours have no frozen path evidence.
+        try:
+            rows = read_messages(sid, identities, self.source_instance)
+        except source_client.SourceUnavailable:
+            rows = []
         if not rows:
             return {"status": "not_archived", "event_id": resolved,
                     "reason": "该事件的原文轮次拉取不到"
@@ -1394,42 +1405,31 @@ class EmberService:
 
     def _fetched_corpus(self, sid: str, turns: set[int] | None = None
                         ) -> list[dict[str, Any]]:
-        """向后端原文接口按需拉语料（2026-10-14，transcripts 退役）。
-
-        拉取区间 = turn_ledger 覆盖的 message_id 全幅；每行经 ledger
-        标回 ember turn 坐标（语料同形，定位逻辑零改动）。归属不明的
-        行丢弃。turns 给定时只留这些轮。提供方未配置/不可达 → []
-        （调用方按「只有内存语料」降级，引用内存外原话会如实核对失败）。
-        """
+        """Read exact durable generation identities; mixed/missing paths yield []."""
         try:
-            span = self.turn_ledger.message_span(sid, 1, 10 ** 9)
-            if span is None:
-                return []
-            rows = source_client.fetch_source_range(sid, span[0], span[1])
+            identities = generation_messages(self.generations, sid)
+            # Validate the whole known generation path, including the current
+            # user anchor, before selecting turns. Mixed branches fail closed.
+            rows = read_messages(sid, identities, self.source_instance)
         except (source_client.SourceUnavailable, OSError):
             return []
-        out: list[dict[str, Any]] = []
-        for r in rows:
-            t = self.turn_ledger.turn_of_message(sid, r["message_id"])
-            if t is None:
-                continue
-            if turns is not None and t not in turns:
-                continue
-            out.append({"role": r["role"], "content": r["content"],
-                        "turn": t})
-        return out
+        return [m for m in rows if turns is None or m["turn"] in turns]
 
     def _quote_corpus(self, session: Session) -> list[dict[str, Any]]:
-        """逐字核对与出处定位的共用语料：内存会话 ∪ 按需拉取（去原文化）。
+        """Use a provider-proven path plus the current real in-flight message.
 
-        2026-10-14 退役 transcripts：原文只存后端一份，缺的轮次经
-        source_client 现拉（用完即弃，不落盘）。拉取失败 → 只用内存
-        ——引用内存外原话会如实定位失败（双盲拒绝），绝不编造。
+        Legacy local proxy conversations without source identities still use
+        their own ephemeral text; they cannot produce trusted historical refs.
         """
         fetched = self._fetched_corpus(session.session_id)
-        known = {m.get("turn") for m in session.messages}
-        extra = [r for r in fetched if r["turn"] not in known]
-        return session.messages + extra
+        if not any(m.get("_source_message_id") for m in session.messages):
+            return session.messages + fetched
+        current = [m for m in session.messages if m.get("turn") == session.turn_counter]
+        # Only the current user is known without a parent-chain read. Historical
+        # local rows are not merged by turn number into a different branch.
+        current = [m for m in current if m.get("role") == "user"]
+        present = {m.get("_source_message_id") for m in fetched}
+        return fetched + [m for m in current if m.get("_source_message_id") not in present]
 
     def _verify_key_quotes(self, event: Event,
                            session: Session) -> list[dict[str, str]]:
@@ -3037,13 +3037,16 @@ class EmberService:
     def _observe_session(self, sid: str) -> dict[str, Any]:
         """单会话观察：拉增量 → 过滤 span 已覆盖 → 门槛 → 提炼。"""
         cursor = self.observe_cursor.get(sid)
-        rows = source_client.fetch_source_range(sid, cursor + 1, 10 ** 9)
+        identities = generation_messages(self.generations, sid, completed_only=True)
+        # Validate even consumed anchors; a numeric cursor is not a path proof.
+        rows = [m for m in read_messages(sid, identities, self.source_instance)
+                if m["message_id"] > cursor]
         if not rows:
             return {"session": sid, "status": "empty", "created": 0}
         covered = self._covered_turns(sid)
         unc: list[tuple[dict, int | None]] = []
         for m in rows:
-            t = self.turn_ledger.turn_of_message(sid, m["message_id"])
+            t = m["turn"]
             if t is None or t not in covered:
                 unc.append((m, t))
         if len(unc) < observe_mod.MIN_UNCOVERED:
@@ -3115,6 +3118,9 @@ class EmberService:
             key_quotes=verify_quotes(item.get("quotes"), msgs),
             provenance_refs=["observe"],
         )
+        if turns:
+            self.event_sources.capture(eid, ev.version_id, sid,
+                [(turns[0], turns[-1])], msgs)
         self.store.write_event(ev)
         if turns:
             self.turn_spans.fill(eid, [(turns[0], turns[-1])],

@@ -96,11 +96,7 @@ class BriefingTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.svc = _service(Path(self._tmp.name))
-        # 原文语料：按请求轮次合成（source 未配置环境，走内存合成通道）
-        self.svc._fetched_corpus = (  # noqa: SLF001 — 测试直接替换
-            lambda sid, turns: [{"turn": t, "role": "user",
-                                 "content": f"原文{t}"}
-                                for t in sorted(turns)])
+        self.svc.read_source_event = lambda eid: {"status": "ok", "transcript": "\n".join(f"原文{t}" for t in range(1, 8)), "truncated": False}
         s = self.svc
         self._add("EVT-PIN", 1, "10：钉住的重大决定", OLD, pin=True)
         self._add("EVT-S10", 2, "10：十个分", OLD)
@@ -322,12 +318,14 @@ class ReadContextTests(unittest.TestCase):
         self.svc = _service(Path(self._tmp.name))
         self.captured: list[set] = []
 
-        def fake_corpus(sid, turns):
-            self.captured.append(set(turns))
-            return [{"turn": t, "role": "user", "content": f"原文{t}"}
-                    for t in sorted(turns)]
-
-        self.svc._fetched_corpus = fake_corpus  # noqa: SLF001 — 测试替换
+        from unittest.mock import patch
+        def fetch(sid, ids, **kw):
+            self.captured.append({(int(seq) + 1) // 2 for seq in ids})
+            return [{"message_id": int(seq), "role": "user" if int(seq) % 2 else "assistant",
+                     "content": f"原文{(int(seq) + 1) // 2}"} for seq in sorted(ids, key=int)]
+        self.fetch = patch("ember.source_client.fetch_source_path", side_effect=fetch)
+        self.fetch.start()
+        self.addCleanup(self.fetch.stop)
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
@@ -344,13 +342,17 @@ class ReadContextTests(unittest.TestCase):
             summary="摘要", core="叙述",
         ))
         self.svc.turn_spans.fill(eid, spans, filled_by="test")
+        corpus = [{"turn": t, "role": role, "_source_session_id": "s1",
+                   "_source_message_id": str(2 * t - (role == "user"))}
+                  for lo, hi in spans for t in range(lo, hi + 1) for role in ("user", "assistant")]
+        self.svc.event_sources.capture(eid, eid + "-v1", "s1", spans, corpus)
 
-    def test_single_turn_expands_plus_minus_three(self) -> None:
+    def test_single_turn_does_not_guess_neighbour_path(self) -> None:
         self._add("EVT-A", [(5, 5)])
         out = self.svc.read_source_event("EVT-A")
         self.assertEqual(out["status"], "ok")
-        self.assertTrue(out["context_expanded"])
-        self.assertEqual(self.captured[-1], {2, 3, 4, 5, 6, 7, 8})
+        self.assertFalse(out["context_expanded"])
+        self.assertEqual(self.captured[-1], {5})
         self.assertIn("原文5", out["transcript"])
 
     def test_real_interval_kept_as_is(self) -> None:
@@ -364,7 +366,7 @@ class ReadContextTests(unittest.TestCase):
         self._add("EVT-C", [(1, 1)])
         out = self.svc.read_source_event("EVT-C")
         self.assertEqual(out["status"], "ok")
-        self.assertEqual(self.captured[-1], {1, 2, 3, 4})
+        self.assertEqual(self.captured[-1], {1})
 
 
 if __name__ == "__main__":

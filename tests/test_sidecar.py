@@ -135,11 +135,8 @@ def main():
         e4 = service.hook_turn_end("sc1", reply1)
         check("收轮成功", e4["ok"] is True and e4["turn"] == 1, str(e4))
         src = service.sidecar_read_memory_source(receipt["event_id"])
-        check("翻原文 status=ok", src.get("status") == "ok", str(src)[:160])
-        check("原文含用户原话",
-              "决定把 Ember 的传播模型改成 Route Search" in src.get("transcript", ""),
-              src.get("transcript", "")[:80])
-        check("原文含助手回复", reply1 in src.get("transcript", ""))
+        check("旧无编号出处不冒充可读原文", src.get("status") == "not_archived", str(src)[:160])
+        check("不拿当前内存补旧出处", "transcript" not in src)
 
         print("== S5 收轮后无进行中轮：写入如实回错 ==")
         r5 = service.sidecar_create_memory_event(write_args())
@@ -226,9 +223,14 @@ def main():
         from ember import source_client as sc
         service2.turn_ledger.record("sc1", 1, None, user_message_id=901)
         service2.turn_ledger.record_reply("sc1", 1, assistant_message_id=902)
-        orig_url, orig_fetch = sc.SOURCE_URL, sc.fetch_source_range
+        from unittest.mock import patch
+        proof = patch("ember.service.generation_messages", return_value=[
+            {"turn": 1, "role": role, "message_id": seq}
+            for role, seq in (("user", "901"), ("assistant", "902"))])
+        proof.start()
+        orig_url, orig_fetch = sc.SOURCE_URL, sc.fetch_source_path
         sc.SOURCE_URL = "http://source-mock"
-        sc.fetch_source_range = lambda sid, a, b: [
+        sc.fetch_source_path = lambda sid, ids, **kw: [
             {"message_id": 901, "role": "user",
              "content": "今天我们决定把 Ember 的传播模型改成 Route Search。"},
             {"message_id": 902, "role": "assistant",
@@ -241,7 +243,8 @@ def main():
                 quote_spans=[{"start_quote": "今天我们决定把",
                               "end_quote": "改成 Route Search。"}]))
         finally:
-            sc.SOURCE_URL, sc.fetch_source_range = orig_url, orig_fetch
+            sc.SOURCE_URL, sc.fetch_source_path = orig_url, orig_fetch
+            proof.stop()
         check("拉取语料跨重启核对通过",
               r12b.get("status") == "created"
               and not r12b.get("dropped_quotes"), str(r12b.get("dropped_quotes")))

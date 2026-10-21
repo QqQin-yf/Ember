@@ -8,7 +8,7 @@ turn_span、进 link pending、当场建向量、游标推进）/
 （高相似聚 → LLM 合并 → 旧观察 superseded、证据继承）。
 
 外部依赖全 mock：embed_text（ember.service）、call_llm
-（ember.executors）、fetch_source_range（ember.source_client）。
+（ember.executors）、fetch_source_path（ember.source_client）。
 """
 from __future__ import annotations
 
@@ -62,9 +62,12 @@ class ObserveTests(unittest.TestCase):
             __import__("ember.source_client", fromlist=["SOURCE_URL"]),
             "SOURCE_URL", "http://test"))
         self._ps.append(mock.patch(
-            "ember.source_client.fetch_source_range",
-            side_effect=lambda sid, a, b:
-                [m for m in self.msgs if m["message_id"] >= a]))
+            "ember.source_client.fetch_source_path",
+            side_effect=lambda sid, ids, **kw:
+                [m for m in self.msgs if str(m["message_id"]) in ids]))
+        self._ps.append(mock.patch("ember.service.generation_messages", side_effect=lambda *a, **kw:
+            [{"turn": (m["message_id"] + 1) // 2, "role": m["role"], "message_id": str(m["message_id"])}
+             for m in self.msgs]))
         self.llm_raw = '{"observations": []}'
         self._ps.append(mock.patch(
             "ember.executors.call_llm",

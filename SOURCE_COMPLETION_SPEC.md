@@ -1,5 +1,7 @@
 # 原来源轮完成后的出处补交：App §9 回执与下一段方案
 
+2026-10-21 验收补充：App a7d82f3 / §11 已报告真实 resolved、迟到 resolution 与三方幂等通过；本方逐项核对及仍缺的故障场景见 SOURCE_COMPLETION_COVERAGE.md。完整历史轮上的 source_recall_id 只是身份标记，不要求每轮都有补交。下文“App 仍需补验”为交付时点记录，最新状态以本段和覆盖表为准。
+
 2026-10-21。已读 `D:/deliz/APP_第二阶段回复.md` §9，按用户确认实现同生成 done 后的独立来源绑定、source_candidates 与 sources_revision 更新。本文为已实现契约；交付代码及隔离服务加载版本见本次提交和 D:/phase2-secrets/ember-readiness.json。App 仍需接纳新证据并补验真实出处解析及 Heart resolution，不能把 Ember 自测当成这两项已经通过。
 
 ## 1. 为什么能补，补的是什么

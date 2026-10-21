@@ -108,6 +108,7 @@ class InstanceRegistry:
                     MockLLMClient(),  # 旁路形态不调 LLM，占位即可
                     model="sidecar",
                 )
+                svc.source_instance = name
                 self._services[name] = svc
             return svc
 
