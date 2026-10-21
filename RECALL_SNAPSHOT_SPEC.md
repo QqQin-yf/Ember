@@ -1,5 +1,7 @@
 # 召回快照：查询、重试与 24 小时正文留存
 
+2026-10-21 更新：同生成来源补交及 sources_revision 推进已实现，见 SOURCE_COMPLETION_SPEC.md。原 snapshot/response 冻结；source_candidates 独立持久更新，实际变化时修订 +1，新召回初始为 0。下文首版固定 0 的描述仅对应历史 156f29e；运行版本见隔离就绪回执。
+
 2026-10-20。本地已实现，未提交、推送、部署或做真实三方联调。用户已确认临时召回正文保留 **24 小时**。本文取代此前文档中“快照未实现、TTL 待确认”的阶段说明；主动 run 仍未实现。
 
 ## 1. 开轮和重试
@@ -63,7 +65,7 @@ ready 的 refs 示例：
 
 示例数组仅示意字段。实际 presentations 和 recall_refs 按首次实际呈现保存；实体概览不会展开成事件成员，未知来源维持 unresolved。refs 视图没有注入正文或用户正文。response 视图在上述外壳中另加 `response`，其值为首次完整 turn_start 响应；不是把响应字段直接铺到查询顶层。
 
-source_candidates 当前是冻结 recall_refs.events 的独立副本，sources_revision 固定 0。尚无可信证据补交或自动更新入口；查询不会从后来的收轮、最大 reply、当前事件内容或实体成员表补写旧证据。app 可用冻结 refs 配合自身可靠原文路径服务重试解析，长期无法证明的事件保留 unresolved。
+source_candidates 初始等于冻结 recall_refs.events 的独立副本，sources_revision 初始为 0。已实现可信同生成 done 完成绑定：只补原成员的确切缺失位置，独立候选实际变化才持久推进修订，原快照不变；重复查询/收轮不推进。使用 generation_completed 证据，不以最大 reply、当前 Event 或实体成员表重建历史。App 需接纳并核验新证据再验证真实路径；长期无法证明的事件仍 unresolved，详见 SOURCE_COMPLETION_SPEC.md。
 
 | 情况 | HTTP / code | app 处理 |
 |---|---|---|

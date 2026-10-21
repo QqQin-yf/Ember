@@ -40,10 +40,14 @@ class EventSourceStore:
     def get(self, event_id: str) -> dict | None:
         return copy.deepcopy(self._records.get(event_id))
 
+    def records(self) -> list[dict]:
+        return copy.deepcopy(list(self._records.values()))
+
     def capture(self, event_id: str, version_id: str | None,
                 session_id: str, spans: list[tuple[int, int]],
                 corpus: list[dict], writer_recall_id: str | None = None,
-                writer_tool_call_id: str | None = None) -> None:
+                writer_tool_call_id: str | None = None,
+                writer_turn: int | None = None) -> None:
         if event_id in self._records:
             return
         turns = sorted({turn for lo, hi in spans
@@ -71,10 +75,17 @@ class EventSourceStore:
                     and None not in source_generations):
                 item["source_recall_id"] = next(iter(source_generations))
             messages.append(item)
-        row = {"schema_version": 1, "event_id": event_id,
+        pending = [{"turn": m["turn"], "user_message_id": m["user_message_id"],
+                    "pending_source_recall_id": writer_recall_id}
+                   for m in messages if writer_recall_id and m["turn"] == writer_turn
+                   and m["user_message_id"] and not m["assistant_message_id"]
+                   and not any(r.get("turn") == m["turn"] and r.get("role") == "assistant"
+                               for r in corpus)]
+        row = {"schema_version": 2, "event_id": event_id,
                "version_id": version_id, "source_session_id": session_id,
                "source_turn_spans": [list(span) for span in spans],
-               "turn_messages": messages, "identity_verified": identity_verified}
+               "turn_messages": messages, "identity_verified": identity_verified,
+               "pending_sources": pending}
         if writer_recall_id is not None:
             row["writer_recall_id"] = writer_recall_id
             row["writer_tool_call_id"] = writer_tool_call_id

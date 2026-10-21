@@ -71,6 +71,17 @@ class GenerationStore:
                     response_json TEXT
                 );
                 CREATE INDEX IF NOT EXISTS snapshot_expiry ON recall_snapshots(expires_at);
+                CREATE TABLE IF NOT EXISTS source_completions (
+                    source_hash TEXT NOT NULL,
+                    turn INTEGER NOT NULL,
+                    binding_json TEXT NOT NULL,
+                    PRIMARY KEY(source_hash, turn)
+                );
+                CREATE TABLE IF NOT EXISTS recall_sources (
+                    recall_id TEXT PRIMARY KEY,
+                    revision INTEGER NOT NULL,
+                    candidates_json TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS recall_effects (
                     operation_id TEXT PRIMARY KEY,
                     recall_id TEXT NOT NULL,

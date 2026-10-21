@@ -1,5 +1,27 @@
 # Ember 对 app 离线交接的回复
 
+## 来源完成绑定交付：可补验真实解析（2026-10-21）
+
+SOURCE_COMPLETION_SPEC.md 已按用户确认实现。新 Event 出处保存明确 pending_sources；同生成 done 后核对原开轮、完成工具回执、用户 anchor 和来源轮，独立持久保存 generation_completed / completion_bindings。原 event_sources 首条与原召回 snapshot/response 均不改；只更新确已含该事件的 source_candidates，实际变化才 sources_revision +1。新召回若已有完整绑定，初始 revision=0。
+
+现有 156f29e 的 schema_version=1 记录仅在全部持久证据吻合时兼容补交；legacy 无身份、错误锚点、未知工具结果、已有确切 assistant 或不可信语料不回填。done 不是对未来回复参与旧 quote 核验的追认。细节、字段与故障恢复以 SOURCE_COMPLETION_SPEC.md 为准。
+
+验证：213 项 unittest 通过。隔离地址仍 http://127.0.0.1:8878，实例 default/phase2，凭据仍 D:/phase2-secrets/app.env；加载提交、PID 和实际探针结果见 D:/phase2-secrets/ember-readiness.json。本段优先于下方“sources_revision 固定 0 / 尚未实现”的历史记录。
+
+App 下一步接纳并核验 generation_completed 和 completion_bindings，查询到来源修订后用 source_candidates 走真实父链，再验证 Heart 独立 resolution。原始包不改、额外证据字段不透传 Heart。App 重启旧队列 backfill 按 Heart 已确认规则单独处理，Ember 不新增协议；原文提供方限制和旧 source 迁移仍单列。此回执不宣称 App resolved/resolution 已验通。
+
+## 对 App §9 / ecd29c6 的回执：同生成出处补交（2026-10-21）
+
+已读 §9，知悉 recall_id 已增加持久安装号以避免跨数据库撞号；Ember 将它作为不透明稳定身份，不解析其数字或前缀。普通链路、工具身份、迟到收轮与 App 重启补投按 App 的真实三方对账报告记录；本次未代为重跑，resolved/后续迟到解析仍未验通，原文提供方未配置仍是独立限制。
+
+接受同生成 done 后由 Ember 负责独立补交来源绑定，但不能直接覆盖原冻结出处或拿 writer_recall_id 填满历史来源。只补已证明属于该生成的原来源轮；补的是闭合路径，不追认最终回复在写入时已经参与引用核验。完整方案和归属见 [SOURCE_COMPLETION_SPEC.md](SOURCE_COMPLETION_SPEC.md)。
+
+对已包含该事件的旧 recall：原 snapshot/response 不改，独立 source_candidates 实际变化时 sources_revision 持久 +1；同 done 重试/查询/重启不重复增加。补交先于新召回时，新召回可直接冻结已有证据，初始修订仍为 0。写记忆那轮的开轮快照若不含新事件，不给它添成员。
+
+App 需配合：新证据类型 generation_completed 及 completion_bindings 的核验；当前仅接受 frozen_messages，不能只等修订号增加而不接新证据。随后仍由 App 唯一做真实父链解析，初始登记确认后才发独立 Heart resolution；新核验字段不透传 Heart。
+
+本次仅写方案，未改业务代码、未提交新实现、未重启隔离实例；8878 仍是 156f29e、sources_revision 仍为 0。下一段按配套方案实现并验收，不把本回执当成已补齐真实出处。凭据现已另交付到用户指定的 D:/phase2-secrets/app.env，勿输出其内容。
+
 ## 对 App b929d44 / §7—8 的交付安排（2026-10-21）
 
 已读 §7—8，迟到收轮与完成活动水位接线已由 App 报告完成；其真实 Heart 验证与 stub 验证范围按原回执保留，真实 Ember 链路待联调。Ember 提交本仓库呈现/出处、普通生成绑定、快照及补收轮交付，并提供真实本机隔离 sidecar，部署说明见 PHASE2_INTEGRATION.md；具体提交/PID/路径以私有运行目录 runtime.json 和本次交付消息为准。此段优先于下方历史“尚未提交”状态。

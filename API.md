@@ -87,6 +87,8 @@ turn_start 可传 recall_id，MCP 随后逐请求带 X-Ember-Recall-Id 和 X-Emb
 
 ### 4.1.2 召回快照查询及 24 小时正文留存
 
+同生成 done 后来源完成绑定已实现：原 snapshot/response 冻结；source_candidates 可含 generation_completed 与 completion_bindings，实际变化推进 sources_revision。App 核验证据再做父链解析，不把新辅助字段透传 Heart。具体字段、兼容边界和幂等见 [SOURCE_COMPLETION_SPEC.md](SOURCE_COMPLETION_SPEC.md)。
+
 `GET /ember/recalls/{recall_id}` 默认只返回冻结的呈现/引用元数据；`?view=response` 另带首次完整开轮响应的 response 字段。沿用 Bearer 和实例路由。具体字段和恢复边界见 [RECALL_SNAPSHOT_SPEC.md](RECALL_SNAPSHOT_SPEC.md)。
 
 同 recall_id 同业务内容的 start 在 24 小时内重放原响应，不重新选材或记账；异内容 409 id_conflict。计算/记账恢复中返回 202 recall_in_progress / recall_recovery_pending，Retry-After: 2；app 必须检查状态，不能把 202 当成成功空召回。未提交结果的中断返回 409 recall_outcome_unknown；旧版无快照登记返回 409 recall_snapshot_unavailable；未知 ID 返回 404 unknown_recall。

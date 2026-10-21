@@ -4,6 +4,20 @@
 
 核对文档：`D:/your-heart/EMBER_唤醒对接.md`、`D:/your-heart/唤醒三方契约.md`、`D:/your-heart/HEART_对Ember回复.md`。初次只读核对按 a5a7c8f / v0.5 记录，后续局部实现见下节；未部署或调用生产服务。第 1 节起保留初始核对和建议的历史语境，当前实现以顶部交付状态及配套 SPEC 为准；主动 run 建议仍未实现。
 
+## 来源完成绑定已实现（2026-10-21）
+
+按 SOURCE_COMPLETION_SPEC.md 实现独立完成绑定和来源候选修订；原快照/响应不改，只对原成员/出处身份精确匹配的缺失位置补 seq，同 done 重试或重启不重复推进。213 项测试通过；隔离服务加载身份和真实探针结果见 D:/phase2-secrets/ember-readiness.json，App 补验安排见 APP_交接回复.md 顶部。
+
+App 需接新证据并补验真实 resolved 与迟到 resolution；Heart 不需新字段/接口。已知悉旧队列重启补投由 App 明确标 backfill，Ember 本次不新增相关协议。原文读取限制、生命周期和主动 run 仍不在本次交付。下方“仅方案、来源修订为 0”属于实现前历史记录。
+
+## App §9 真实联调反馈与出处补交方案（2026-10-21）
+
+已读 App §9，普通生成/召回、工具身份、迟到收轮、App 重启补投等通过项按其三方对账报告登记；App ecd29c6 已修复跨数据库 recall_id 撞号。resolved 出处和真实迟到解析尚未验通，原文提供方未配置仍单列，不据此宣称全部二阶段完成。
+
+Ember 接受在同生成 done 后提供独立的来源轮完成绑定，详见 SOURCE_COMPLETION_SPEC.md：原出处与召回 snapshot/response 冻结，确切匹配原来源轮的新证据只进入来源辅助；已包含该事件的 recall 在候选实际变化时推进 sources_revision。App 接新证据后仍自行验证父链、发送独立 resolution；Heart 无需新增字段/接口。最终回复不能被追认为记忆写入时已存在的引用证据。
+
+本次仅方案回执，运行服务仍为 156f29e，未实现修订更新或重启服务；不扩大生产开关、调度或自动 writer。§9 的重启补投 delivery 规则继续由 Heart/App 确认，Ember 不代为裁定。
+
 ## App §7—8 后的隔离交付（2026-10-21）
 
 已核对 App b929d44 与集中回执。Ember 按用户授权提交快照/普通生成/补收轮相关实现，启动本机独立数据和 Bearer token 的真实隔离 sidecar（127.0.0.1:8878）；说明见 PHASE2_INTEGRATION.md，运行身份见本次交付消息与私有目录 runtime.json。本段取代下方“尚未提交”的历史状态，不代表生产部署或三方验收。App 完成水位的真实 Heart 验证按其 §8 保留，Ember 未代为重跑 Heart。

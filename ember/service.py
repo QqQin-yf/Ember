@@ -49,6 +49,7 @@ from .cue_tighten import CueTightener
 from .pin_store import PinStore
 from .source_refs import EventSourceStore, event_reference, message_seq
 from .generations import GenerationStore, fingerprint, identity
+from .source_completion import SourceCompletions
 from .prompts import (OBSERVE_SYSTEM_PROMPT, build_observe_user_prompt,
                       OBSERVE_MERGE_PROMPT, build_observe_merge_user_prompt)
 from . import observe as observe_mod
@@ -431,6 +432,7 @@ class EmberService:
         # 工具自动关联出处；轮后钩子收掉）。单活跃轮——单用户部署够用。
         self._live_turn: dict[str, Any] | None = None
         self.generations = GenerationStore(getattr(store, "root", ""))
+        self.source_completions = SourceCompletions(self.generations, self.event_sources)
         self._generation_lock = threading.RLock()
         self._generation_contexts: dict[str, dict] = {}
         self._volatile_tool_results: dict[tuple[str, str], dict] = {}
@@ -819,7 +821,8 @@ class EmberService:
 
         self.event_sources.capture(
             event.event_id, event.version_id, session.session_id, span_pairs, corpus,
-            writer_recall_id=writer_recall_id, writer_tool_call_id=writer_tool_call_id)
+            writer_recall_id=writer_recall_id, writer_tool_call_id=writer_tool_call_id,
+            writer_turn=turn)
         self.store.write_event(event)
 
         # key_quotes 逐字核对（r4 第 3.2 项，确定性代码侧）：
@@ -1277,6 +1280,7 @@ class EmberService:
             event = self.store.get_event(eid)
             refs[eid] = event_reference(event, kind, self.event_sources,
                                         self.turn_spans.span_of(eid))
+            refs[eid] = self.source_completions.enrich(refs[eid])
         return list(refs.values())
 
     # 召回内联【当时对话】的单条上限（三席合计 ~3600 字，baseline 可调）
@@ -1670,6 +1674,7 @@ class EmberService:
             else:
                 raise ValueError("Unknown recall effect kind")
             self.generations.acknowledge_effect(effect["operation_id"])
+        self.source_completions.reconcile()
 
     @staticmethod
     def _recall_pending(recall_id: str, code: str = "recall_in_progress") -> dict:
@@ -1696,10 +1701,11 @@ class EmberService:
             if view == "response" and row["response_json"] is None:
                 return self._generation_error("response_expired", "Recall response expired; identity and refs remain")
             metadata = json.loads(row["metadata_json"])
+            revision, candidates = self.source_completions.view(recall_id, metadata["recall_refs"]["events"])
             result = {"recall_id": recall_id, "session_id": metadata["session_id"],
                       "turn": metadata["turn"], "status": "ready", "snapshot": metadata,
-                      "sources_revision": 0,
-                      "source_candidates": copy.deepcopy(metadata["recall_refs"]["events"]),
+                      "sources_revision": revision,
+                      "source_candidates": candidates,
                       "response_available": row["response_json"] is not None,
                       "expires_at": datetime.fromtimestamp(row["expires_at"], timezone.utc).isoformat().replace("+00:00", "Z")}
             if view == "response":
@@ -1837,6 +1843,7 @@ class EmberService:
             if row["end_hash"] is not None:
                 if row["end_hash"] != request_hash:
                     return self._generation_error("id_conflict", "Generation terminal content conflict")
+                self._recover_source_completions()
                 return json.loads(row["end_result"])
             if row["turn"] is None:
                 return self._generation_error("generation_not_ready", "Generation never completed turn registration")
@@ -1855,7 +1862,16 @@ class EmberService:
             self._generation_contexts.pop(rid, None)
             if self._live_turn and self._live_turn.get("recall_id") == rid:
                 self._live_turn = None
+            self._recover_source_completions()
             return result
+
+    def _recover_source_completions(self) -> None:
+        try:
+            self.source_completions.reconcile()
+        except Exception:
+            # The accepted terminal receipt is the durable recovery journal.
+            # Queries retry reconciliation and return pending while unavailable.
+            pass
 
     def sidecar_generation_status(self, recall_id: str) -> dict:
         row = self.generations.generation(recall_id)
