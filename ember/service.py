@@ -44,7 +44,8 @@ from .turn_ledger import TurnLedger
 from .recall_ledger import RecallLedger
 from .turn_span import TurnSpanStore, spans_from_quotes
 from . import source_client
-from .source_paths import generation_messages, read_messages
+from .source_paths import (generation_messages, read_messages, legacy_messages,
+                           current_path_corpus, SourceCorpus, QuoteSourceError)
 from . import executors
 from .cue_tighten import CueTightener
 from .pin_store import PinStore
@@ -817,9 +818,7 @@ class EmberService:
         corpus = self._quote_corpus(session)
         span_pairs = spans_from_quotes(quote_spans, corpus)
         if not span_pairs:
-            raise ValueError(
-                "quote_spans 全部未能定位：起尾句均未在会话记录中逐字找到"
-                "——请逐字核对原文后重摘")
+            raise QuoteSourceError(getattr(corpus, "issue", None) or "quote_not_found")
 
         self.event_sources.capture(
             event.event_id, event.version_id, session.session_id, span_pairs, corpus,
@@ -832,7 +831,7 @@ class EmberService:
         # content；用户侧用原话，不含召回前缀——历史里存的就是原话）
         # 里逐字查找；对不上的条目丢弃（不拒绝整个 Event），
         # 丢弃清单写进 tool result 让模型知道哪句没对上
-        dropped = self._verify_key_quotes(event, session)
+        dropped = self._verify_key_quotes(event, session, corpus=corpus)
 
         if span_pairs:
             self.turn_spans.fill(event.event_id, span_pairs,
@@ -927,7 +926,8 @@ class EmberService:
         except (LLMError, ValueError, KeyError, OSError) as ex:
             # 失败也如实进上下文：模型知道自己这次没写成
             self._append_tool_record(session, tool_calls,
-                                     {"status": "failed", "error": str(ex)[:300]})
+                                     dict({"status": "failed", "error": str(ex)[:300]},
+                                          **({"code": ex.code} if isinstance(ex, QuoteSourceError) else {})))
             status.tool_result_in_context = True
             status.status = "failed"
             status.error = str(ex)[:300]
@@ -1405,15 +1405,24 @@ class EmberService:
 
     def _fetched_corpus(self, sid: str, turns: set[int] | None = None
                         ) -> list[dict[str, Any]]:
-        """Read exact durable generation identities; mixed/missing paths yield []."""
+        """Read known raw identities on the anchored path, retaining safe diagnostics."""
         try:
-            identities = generation_messages(self.generations, sid)
-            # Validate the whole known generation path, including the current
-            # user anchor, before selecting turns. Mixed branches fail closed.
-            rows = read_messages(sid, identities, self.source_instance)
-        except (source_client.SourceUnavailable, OSError):
-            return []
-        return [m for m in rows if turns is None or m["turn"] in turns]
+            modern = generation_messages(self.generations, sid)
+            modern_turns = {m["turn"] for m in modern}
+            legacy = legacy_messages(self.turn_ledger, sid)
+            candidates = modern + [m for m in legacy if m["turn"] not in modern_turns]
+            session = self.sessions.get(sid)
+            current = [m for m in session.messages if m.get("turn") == session.turn_counter
+                       and m.get("role") in ("user", "assistant") and message_seq(m.get("_source_message_id"))] if session else []
+            anchor = ({"turn": current[-1]["turn"], "role": current[-1]["role"],
+                       "message_id": message_seq(current[-1]["_source_message_id"])} if current else None)
+            rows = current_path_corpus(sid, candidates, anchor, self.source_instance)
+            rows.issue = rows.issue or getattr(legacy, "issue", None)
+        except source_client.SourceUnavailable as exc:
+            return SourceCorpus(issue=exc.code)
+        except OSError:
+            return SourceCorpus(issue="source_unreachable")
+        return SourceCorpus([m for m in rows if turns is None or m["turn"] in turns], rows.issue)
 
     def _quote_corpus(self, session: Session) -> list[dict[str, Any]]:
         """Use a provider-proven path plus the current real in-flight message.
@@ -1423,16 +1432,17 @@ class EmberService:
         """
         fetched = self._fetched_corpus(session.session_id)
         if not any(m.get("_source_message_id") for m in session.messages):
-            return session.messages + fetched
+            return SourceCorpus(session.messages + fetched, getattr(fetched, "issue", None))
         current = [m for m in session.messages if m.get("turn") == session.turn_counter]
         # Only the current user is known without a parent-chain read. Historical
         # local rows are not merged by turn number into a different branch.
         current = [m for m in current if m.get("role") == "user"]
         present = {m.get("_source_message_id") for m in fetched}
-        return fetched + [m for m in current if m.get("_source_message_id") not in present]
+        return SourceCorpus(fetched + [m for m in current if m.get("_source_message_id") not in present],
+                            getattr(fetched, "issue", None))
 
     def _verify_key_quotes(self, event: Event,
-                           session: Session) -> list[dict[str, str]]:
+                           session: Session, corpus: list[dict] | None = None) -> list[dict[str, str]]:
         """key_quotes 逐字核对（r4 第 3.2 项，确定性，代码侧）。
 
         每条 text 逐字查找本会话原文。核对语料见 _quote_corpus（持久存档
@@ -1453,7 +1463,7 @@ class EmberService:
             if role in corpus_by_role and isinstance(content, str):
                 corpus_by_role[role].append(content)
 
-        for m in self._quote_corpus(session):
+        for m in (self._quote_corpus(session) if corpus is None else corpus):
             _feed(m.get("role"), m.get("content"))
 
         def _find_anywhere(text: str, speaker: str) -> bool:
@@ -2097,6 +2107,8 @@ class EmberService:
         try:
             return self.write_validated_event(session, turn, validated,
                 writer_recall_id=recall_id, writer_tool_call_id=tool_call_id)
+        except QuoteSourceError as ex:
+            return {"status": "failed", "code": ex.code, "error": str(ex)}
         except (ValueError, KeyError) as ex:
             return {"status": "failed", "error": str(ex)[:300]}
 

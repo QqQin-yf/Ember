@@ -1,5 +1,12 @@
 # Ember 对 app 离线交接的回复
 
+## 日常旧模式历史摘录修复（2026-10-23）
+
+修复旧 hook 模式没有新生成账就丢失历史语料的问题：从旧原始逐条编号记录取候选，仍由精确路径端点对照本轮锚点核验；冲突编号不取 max，错误分支不会污染原文，也不会使正确路径全部失效。连接/鉴权/路径/缺编号与真正 quote_not_found 分开回执，取材过程不打开第二阶段开关。loopback/Tailscale 源请求绕过公共代理。
+
+真实失败的两份摘录已在临时库配真实 App 原文重放通过，未写生产记忆；完整 237 项 VPS 隔离回归通过。App 原文服务须保持运行，本次用户启动 App 后连接已恢复。详见 QUOTE_SOURCE_COMPAT_FIX.md；独立令牌切换/通用令牌轮换仍单独保留，不因本次修复自动完成。
+
+
 ## App f239b21 / §13：隔离原文进程联验通过（2026-10-21）
 
 已按指定专用凭据在实际 Ember 8878 服务进程加载 8792 原文配置（timeout=5，loopback 显式绕过代理）。18 条 HTTP 样本、14 条实际 source_client 用例、2 条无/错令牌、7 条令牌范围检查通过；监听后外部经标准 MCP 再验 10 条，正确原文逐字一致，拒绝均 not_archived 无 transcript。进程内自检发生在实际监听 PID 启动阶段；当前版本/PID 看 D:/phase2-secrets/ember-readiness.json。具体记录及边界见 SOURCE_PROVIDER_PROCESS_VALIDATION.md。

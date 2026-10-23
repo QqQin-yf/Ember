@@ -262,7 +262,7 @@ def main():
                           "end_quote": "这句话不存在222"}]))
         check("双盲句对 → failed 且回执指路",
               r13.get("status") == "failed"
-              and "quote_spans" in r13.get("error", ""),
+              and r13.get("code") == "source_unconfigured",
               str(r13)[:160])
         check("拒绝发生在落盘前（库中没有半成品）",
               len(service2.store.all_events()) == n_events_before)

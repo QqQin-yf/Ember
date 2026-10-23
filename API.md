@@ -333,6 +333,8 @@ turn_start 可传 recall_id，MCP 随后逐请求带 X-Ember-Recall-Id 和 X-Emb
 
 ### 7.1 原文提供接口（精确路径）
 
+2026-10-23 兼容修正：日常旧 hook 模式无需 recall_id 也可使用原始逐条编号，由精确路径提供方对照本轮真实锚点核验；不使用派生 max-reply 或范围推断。混合分支的历史候选可在 64 次请求预算内分割校验并保留合法部分，连接/鉴权错误不分割重试。span/出处/key_quotes 复用同份语料。失败回执区分 source_unconfigured、source_unreachable、source_auth_failed、source_instance_unknown、source_session_unknown、source_identity_missing、source_path_unknown、source_unavailable、source_read_limit 与 quote_not_found；不再统一要求重摘。详见 QUOTE_SOURCE_COMPAT_FIX.md。
+
 原文仍只存 App 消息树，Ember 按需读取、用完即弃，不持久保存正文。所有远程消费方已切到：
 
 ```text

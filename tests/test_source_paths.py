@@ -102,11 +102,12 @@ class ExactPathTests(unittest.TestCase):
         self.assertEqual(self.svc.read_source_event("E")["reason"], "source_seq_missing")
         self.assertFalse(self.server.requests)
 
-    def test_legacy_mapping_alone_is_not_remote_evidence(self):
+    def test_raw_legacy_receipts_require_provider_validation(self):
         self.svc.turn_ledger.record("source", 1, user_message_id=71)
         self.svc.turn_ledger.record_reply("source", 1, 75)
-        self.assertEqual(self.svc._fetched_corpus("source"), [])
-        self.assertFalse(self.server.requests)
+        rows = self.svc._fetched_corpus("source")
+        self.assertEqual([m["_source_message_id"] for m in rows], ["71", "75"])
+        self.assertEqual(len(self.server.requests), 1)
         with self.assertRaises(source_client.SourceUnavailable):
             self.svc._observe_session("source")
         self.assertEqual(self.svc.observe_cursor.get("source"), 0)
@@ -120,7 +121,8 @@ class ExactPathTests(unittest.TestCase):
         self.assertEqual([m["content"] for m in corpus], ["new user"])
         expected = generation_messages(self.svc.generations, "source")
         self.assertEqual([m["message_id"] for m in expected], ["71", "75", "80"])
-        self.assertIn("message_ids=71%2C75%2C80", self.server.requests[-1][0])
+        self.assertIn("message_ids=71%2C75%2C80", self.server.requests[0][0])
+        self.assertTrue(all("80" in url for url, _ in self.server.requests))
 
     def test_role_conflict_is_rejected(self):
         with self.assertRaises(source_client.SourceUnavailable):

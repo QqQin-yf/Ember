@@ -56,3 +56,110 @@ def read_messages(sid: str, identities: list[dict], instance: str) -> list[dict]
         out.append(dict(row, turn=identity["turn"], _source_session_id=sid,
                         _source_message_id=seq, _source_recall_id=identity.get("recall_id")))
     return out
+
+
+class SourceCorpus(list):
+    """List-compatible transient source rows with failure context, no raw body."""
+    def __init__(self, rows=(), issue=None):
+        super().__init__(rows)
+        self.issue = issue
+
+
+class QuoteSourceError(ValueError):
+    def __init__(self, code):
+        self.code = code
+        messages = {
+            "source_unconfigured": "原文服务未配置，历史原文不可用，请检查原文连接配置，不必反复重摘。",
+            "source_unreachable": "原文服务连接失败或超时，暂时无法核验历史摘录；请恢复原文连接后重试。",
+            "source_auth_failed": "原文服务鉴权失败，暂时无法核验历史摘录；请检查原文凭据。",
+            "source_identity_missing": "缺少可靠的历史消息编号，暂时无法核验这段摘录。",
+            "source_path_unknown": "部分来源不在本轮实际消息路径上，无法将其作为本轮出处。",
+            "source_session_unknown": "当前实例无权读取来源会话，或来源会话已不存在。",
+            "source_instance_unknown": "原文服务拒绝了当前实例身份，暂时无法核验历史摘录。",
+            "quote_not_found": "quote_spans 未能定位：在已核验的可用原文中未找到起尾摘录，请核对引用来源。",
+        }
+        super().__init__(messages.get(code, "历史原文未完整取得，暂时无法核验摘录；请检查原文读取状态。"))
+
+
+def legacy_messages(ledger, sid):
+    """Exact individual hook receipts only; never use max-reply/range inference.
+
+    A role/turn with conflicting raw receipts is withheld. These identities are
+    candidates only: the provider still has to prove membership in the path.
+    """
+    records = {}
+    try:
+        stream = open(ledger._path(), encoding="utf-8")
+    except FileNotFoundError:
+        return []
+    with stream:
+        for line in stream:
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            turn = row.get("ember_turn")
+            if row.get("ember_session") != sid or not isinstance(turn, int) or turn < 1:
+                continue
+            item = records.setdefault(turn, {"user": set(), "assistant": set()})
+            for role, field in (("user", "user_message_id"), ("assistant", "assistant_message_id")):
+                seq = message_seq(row.get(field))
+                if seq:
+                    item[role].add(seq)
+    out = []
+    issue = None
+    for turn, item in sorted(records.items()):
+        if any(len(ids) > 1 for ids in item.values()):
+            issue = "source_identity_missing"
+            continue
+        for role, ids in item.items():
+            if ids:
+                out.append({"turn": turn, "role": role, "message_id": next(iter(ids))})
+    return SourceCorpus(out, issue)
+
+
+def current_path_corpus(sid, identities, anchor, instance, max_requests=64):
+    """Prove known identities against the real current user anchor.
+
+    Split only on explicit path/missing-row rejection. Unavailable/auth errors
+    stop immediately. At most max_requests; never use min/max/current leaf.
+    """
+    grouped = {}
+    for item in identities:
+        grouped.setdefault(item["message_id"], []).append(item)
+    unique = []
+    issue = None
+    for seq, group in grouped.items():
+        positions = {(m["turn"], m["role"]) for m in group}
+        if len(positions) != 1:
+            issue = "source_identity_missing"
+            continue
+        unique.append(group[0])
+    if not unique:
+        return SourceCorpus(issue="source_identity_missing")
+    if anchor is None:
+        return SourceCorpus(read_messages(sid, unique, instance), issue)
+    anchor_seq = anchor["message_id"]
+    unique = [m for m in unique if int(m["message_id"]) < int(anchor_seq)]
+    accepted = []
+    budget = max_requests
+    def fetch(batch):
+        nonlocal budget, issue
+        if budget <= 0:
+            issue = "source_read_limit"
+            return
+        budget -= 1
+        try:
+            result = read_messages(sid, batch + [anchor], instance)
+            accepted.extend(m for m in result if m["_source_message_id"] != anchor_seq)
+        except source_client.SourceUnavailable as exc:
+            if exc.http_status != 409 or exc.code not in {"source_path_unknown", "source_unavailable"}:
+                raise
+            issue = exc.code
+            if len(batch) > 1:
+                mid = len(batch) // 2
+                fetch(batch[:mid])
+                fetch(batch[mid:])
+    fetch(unique)
+    accepted.sort(key=lambda m: int(m["_source_message_id"]))
+    return SourceCorpus(accepted, issue)
