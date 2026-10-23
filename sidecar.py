@@ -51,6 +51,7 @@ from ember.env import load_env
 load_env(os.path.dirname(os.path.abspath(__file__)))
 
 from ember.instances import InstanceRegistry, parse_instances, resolve_root
+from ember.tool_validation import validate_tool_input
 from ember.writer import (PIN_TOOL_NAME, UNPIN_TOOL_NAME,
                           READ_SOURCE_TOOL_NAME, REVISE_TOOL_NAME,
                           SEARCH_TOOL_NAME, TOOL_NAME,
@@ -137,16 +138,23 @@ async def _list_tools() -> list[types.Tool]:
     return out
 
 
-@mcp_server.call_tool()
-async def _call_tool(name: str, arguments: dict) -> list[types.TextContent]:
+@mcp_server.call_tool(validate_input=False)
+async def _call_tool(name: str, arguments: dict) -> types.CallToolResult:
+    # Keep schema enforcement here so SDK errors do not hide the field path/hint.
+    tool = next((tool for tool in await _list_tools() if tool.name == name), None)
+    if tool is not None:
+        error = validate_tool_input(arguments, tool.inputSchema)
+        if error is not None:
+            return types.CallToolResult(isError=True, content=[types.TextContent(
+                type="text", text=json.dumps(error, ensure_ascii=False))])
     svc = CURRENT_SERVICE.get()
     if svc is None:
         result = {"status": "failed", "error": "实例上下文丢失（无进行中的路由）"}
     else:
         result = await asyncio.to_thread(svc.sidecar_call_tool, name, arguments or {},
                                          **(CURRENT_CALL_CONTEXT.get() or {}))
-    return [types.TextContent(type="text",
-                              text=json.dumps(result, ensure_ascii=False))]
+    return types.CallToolResult(content=[types.TextContent(
+        type="text", text=json.dumps(result, ensure_ascii=False))])
 
 
 session_manager = StreamableHTTPSessionManager(
