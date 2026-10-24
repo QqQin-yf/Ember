@@ -1,6 +1,8 @@
 # Ember v3 MVP
 
-本轮原文读取已迁移至 `/api/source/path`，含工具、召回/briefing、写入核验和观察/sleep；缺可信身份或混合路径时如实降级。精确读取验收及四个进程强杀恢复检查点见 [SOURCE_PATH_VALIDATION.md](SOURCE_PATH_VALIDATION.md)，生产提供方配合清单见 [PRODUCTION_PREREQUISITES.md](PRODUCTION_PREREQUISITES.md)。生产配置/实例归属尚待实测，生产开关未批准。
+当前部署、验收与剩余工作统一见 [CURRENT_STATUS.md](CURRENT_STATUS.md)（2026-10-24 更新）。日常 sidecar 已部署至 `f910d4d`；第二阶段代码部署、功能开启和真实三方联调分别记录，不能混为完成。
+
+原文读取已迁移至 `/api/source/path`，覆盖工具、召回/briefing、写入核验和观察/sleep；缺可信身份或混合路径时如实降级。历史精确路径及强杀恢复验收见 [SOURCE_PATH_VALIDATION.md](SOURCE_PATH_VALIDATION.md)，生产权限/凭据与开启前置见 [PRODUCTION_PREREQUISITES.md](PRODUCTION_PREREQUISITES.md)。
 
 Ember 是一套事件中心的记忆系统：以 Entity 为长期锚点、Event 为基本记忆单元、Cue 为事件自己的召回入口、Event Relation 为事件间的结构联系。
 
@@ -23,6 +25,7 @@ cp .env.example .env    # 填入真实 key（智谱 LLM / 硅基流动 embedding
 python sidecar.py       # 默认 127.0.0.1:8767（EMBER_HOST / EMBER_SIDECAR_PORT 可改）
 
 # 离线任务（都是手动触发）
+python -B scripts/check_memory_health.py --data-dir <实际实例数据目录>  # 只读离线体检
 python scripts/mount_directions.py         # Direction 挂载（Entity 达 8 事件后）
 python scripts/build_cue_vectors.py        # Cue 语义向量预计算（新 cue 后/换模型后）
 python scripts/build_direction_vectors.py  # Direction 向量预计算（换 embedding 模型后）
@@ -30,7 +33,7 @@ python scripts/build_direction_vectors.py  # Direction 向量预计算（换 emb
 
 Sleep 夜间维护（挂关系 → 结构维护 → 沉淀证据）由 app 编排，接口契约见 `API.md` §6。多实例（一颗心一套记忆库，`EMBER_DATA_ROOT` / `EMBER_INSTANCES`）见 `API.md` §1 / §10。
 
-第二阶段已实现普通生成身份绑定、工具回执和稳定召回快照；临时召回正文保留 24 小时，到期保留引用和防复用身份，不删除记忆或聊天。接口见 [RECALL_SNAPSHOT_SPEC.md](RECALL_SNAPSHOT_SPEC.md)，本机隔离交付见 [PHASE2_INTEGRATION.md](PHASE2_INTEGRATION.md)；未部署生产或完成真实三方联调，主动 run 仍待实现。
+第二阶段已实现普通生成身份绑定、工具回执和稳定召回快照；临时召回正文保留 24 小时，到期保留引用和防复用身份，不删除记忆或聊天。接口见 [RECALL_SNAPSHOT_SPEC.md](RECALL_SNAPSHOT_SPEC.md)，本机隔离交付见 [PHASE2_INTEGRATION.md](PHASE2_INTEGRATION.md)；相关代码已随日常 sidecar 部署，真实三方生产接线与开启验收仍单列，主动 run 仍待实现。
 
 ## 目录
 
@@ -60,6 +63,8 @@ scripts/            离线任务入口 + 取数实验脚本
 ```bash
 py -m unittest discover -s tests   # 全量（无需任何外部服务；LLM 用 Mock）
 ```
+
+只读体检、JSON 输出和退出码见 [MEMORY_HEALTH_CHECK.md](MEMORY_HEALTH_CHECK.md)。
 
 ## 红线
 
