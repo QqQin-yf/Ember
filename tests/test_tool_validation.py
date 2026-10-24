@@ -2,7 +2,7 @@
 import copy
 import json
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from ember.tool_validation import validate_tool_input
 from ember.writer import build_tools_spec
@@ -60,6 +60,28 @@ class ToolInputValidationTests(unittest.TestCase):
             error = json.loads(receipt.content[0].text)
             self.assertEqual(error["actual_path"], "event.recall_routes")
             service.sidecar_call_tool.assert_not_called()
+        finally:
+            sidecar.CURRENT_SERVICE.reset(token)
+
+    def test_mcp_marks_business_failures_without_reclassifying_pending_reads(self):
+        import sidecar
+        service = Mock()
+        token = sidecar.CURRENT_SERVICE.set(service)
+        try:
+            for status, expected in (("failed", True), ("rejected", True), ("created", False),
+                                     ("pending", False), ("in_progress", False), ("not_archived", False)):
+                with self.subTest(status=status):
+                    payload = {"status": status, "code": "test-code"}
+                    with patch.object(sidecar.asyncio, "to_thread", new=AsyncMock(return_value=payload)):
+                        coroutine = sidecar._call_tool("create_memory_event", self.args)
+                        try:
+                            with self.assertRaises(StopIteration) as completed:
+                                coroutine.send(None)
+                            result = completed.exception.value
+                        finally:
+                            coroutine.close()
+                    self.assertEqual(result.isError, expected)
+                    self.assertEqual(json.loads(result.content[0].text), payload)
         finally:
             sidecar.CURRENT_SERVICE.reset(token)
 

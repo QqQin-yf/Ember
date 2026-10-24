@@ -319,6 +319,22 @@ class GenerationHTTPTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(receipt.status_code, 200)
         self.assertEqual(receipt.json()["result"], result)
 
+    async def test_mcp_business_validation_failure_replays_as_tool_error(self):
+        await self.start()
+        headers = {"X-Ember-Recall-Id": "r-1", "X-Ember-Tool-Call-Id": "invalid-tool"}
+        args = write_args()
+        args["recall_routes"] = []
+        body = {"jsonrpc": "2.0", "id": 9, "method": "tools/call",
+                "params": {"name": "create_memory_event", "arguments": args}}
+        first = (await self.client.post("/mcp/", headers=headers, json=body)).json()["result"]
+        again = (await self.client.post("/mcp/", headers=headers, json=body)).json()["result"]
+        self.assertTrue(first["isError"])
+        self.assertEqual(first, again)
+        result = json.loads(first["content"][0]["text"])
+        self.assertEqual(result["field"], "recall_routes")
+        self.assertTrue(result["hint"])
+        self.assertFalse(self.registry.service("default").store.all_events())
+
     async def test_concurrent_instance_headers_do_not_leak_context(self):
         import asyncio
         await self.start(sid="session-A")

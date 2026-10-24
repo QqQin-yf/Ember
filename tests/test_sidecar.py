@@ -77,6 +77,17 @@ def write_args(user_quote: str | None = None,
 
 
 def main():
+    global PASS, FAIL
+    PASS = FAIL = 0
+    # Never inherit a developer/production source URL or send real requests.
+    from unittest.mock import patch
+    from ember import source_client
+    with patch.multiple(source_client, SOURCE_URL="", SOURCE_TOKEN=""), \
+         patch.object(source_client, "_open_source", side_effect=AssertionError("Unexpected source network request")):
+        return _run_tests()
+
+
+def _run_tests():
     tmp = tempfile.mkdtemp(prefix="ember_sidecar_test_")
     try:
         store = EmberStore(tmp)
@@ -254,13 +265,13 @@ def main():
               any(s <= 1 <= e for s, e in span12), str(span12))
         service2.hook_turn_end("sc1", "好，这条也记下了。")
 
-        print("== S13 双盲句对：整条写入拒绝，回执指路 ==")
+        print("== S13 历史原文未配置：拒绝且不误报摘录错误 ==")
         n_events_before = len(service2.store.all_events())
         service2.hook_turn_start("sc1", "再写一条。")
         r13 = service2.sidecar_create_memory_event(write_args(
             quote_spans=[{"start_quote": "这句话不存在111",
                           "end_quote": "这句话不存在222"}]))
-        check("双盲句对 → failed 且回执指路",
+        check("原文未配置 → source_unconfigured",
               r13.get("status") == "failed"
               and r13.get("code") == "source_unconfigured",
               str(r13)[:160])
@@ -273,6 +284,26 @@ def main():
               and "quote_spans" in r13b.get("error", ""),
               str(r13b)[:160])
         service2.hook_turn_end("sc1", "好。")
+
+        print("== S14 原文可读但摘录不存在：拒绝且不落盘 ==")
+        isolated = EmberService(EmberStore(os.path.join(tmp, "quote-only")), MockLLMClient())
+        isolated.hook_turn_start("quote-only", "过去真实原文。", user_message_id=1)
+        isolated.hook_turn_end("quote-only", "过去真实回复。", assistant_message_id=2)
+        isolated.hook_turn_start("quote-only", "当前真实原文。", user_message_id=3)
+        rows = {1: {"role": "user", "content": "过去真实原文。"},
+                2: {"role": "assistant", "content": "过去真实回复。"},
+                3: {"role": "user", "content": "当前真实原文。"}}
+        def exact_source(sid, ids, **kwargs):
+            return [dict(message_id=int(seq), **rows[int(seq)]) for seq in sorted(ids, key=int)]
+        with patch.object(sc, "SOURCE_URL", "http://source-mock"), \
+             patch.object(sc, "fetch_source_path", side_effect=exact_source) as provider:
+            missing = isolated.sidecar_create_memory_event(write_args(
+                quote_spans=[{"start_quote": "不存在的起句", "end_quote": "不存在的尾句"}]))
+        check("通过精确路径读取了原文", provider.call_count == 1)
+        check("可读原文中未找到摘录 → quote_not_found",
+              missing.get("status") == "failed" and missing.get("code") == "quote_not_found",
+              str(missing))
+        check("错误摘录不创建事件", not isolated.store.all_events())
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

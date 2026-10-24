@@ -204,22 +204,62 @@ def build_tools_spec() -> list[dict[str, Any]]:
     }]
 
 
+class WriterArgumentError(str):
+    """Keep the legacy string API while carrying an exact field and remedy."""
+    def __new__(cls, message: str, field: str, hint: str):
+        value = super().__new__(cls, message)
+        value.field = field
+        value.hint = hint
+        return value
+
+
+def _invalid_writer(field: str, message: str, hint: str | None = None):
+    hints = {
+        "recall_routes": "请提供至少一条召回线索，例如 [{\"cue_type\": \"lexical\", \"cue\": \"关键词\"}]。",
+        "quote_spans": "请提供至少一组 start_quote / end_quote，逐字摘自真实原文。",
+        "event.significance": "请使用 1-10 的数字加冒号和理由，例如 8：关系的重要转折。",
+        "event.key_quotes": "请提供最多三条逐字摘录；无摘录时传 []。",
+    }
+    if hint is None and field.endswith(".cue"):
+        hint = "请填写非空的召回关键词，不能只含空白字符。"
+    if hint is None and field.endswith((".start_quote", ".end_quote")):
+        hint = "请逐字复制真实原文中的起句或尾句，不能留空。"
+    return None, WriterArgumentError(message, field,
+        hint or hints.get(field) or f"请按 {field} 的类型和约束修改参数后重新调用。")
+
+
+def writer_error_result(error: str) -> dict[str, Any]:
+    result = {"status": "failed", "code": "invalid_tool_arguments",
+              "error": f"validation failed: {error}"}
+    if isinstance(error, WriterArgumentError):
+        result.update(field=error.field, hint=error.hint)
+    return result
+
+
 def validate_writer_arguments(args: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
     """对 Memory Writer tool call 的 arguments 做严格校验。
 
     返回 (validated, error)。校验失败的 Event 一律拒绝写入。
     """
     if not isinstance(args, dict):
-        return None, "arguments 不是对象"
+        return _invalid_writer('$', "arguments 不是对象")
+
+    event = args.get("event")
+    if isinstance(event, dict):
+        for field in ("recall_routes", "quote_spans"):
+            if field not in args and field in event:
+                return _invalid_writer(field,
+                    f"{field} 放错层级：当前位于 event.{field}，应放在顶层。",
+                    f"将 event.{field} 移出，与 event 平级，保留原内容。")
 
     unknown = set(args) - {"event", "recall_routes", "quote_spans"}
     if unknown:
-        return None, f"多余的顶层字段: {sorted(unknown)}"
+        return _invalid_writer('$', f"多余的顶层字段: {sorted(unknown)}")
 
     # quote_spans 必填（2026-10-12 裁决：新事件一律带真实时间坐标，
     # 不给/给空都算不合法——粗锚点只作为旧事件的查询时降级存在）
     if "quote_spans" not in args:
-        return None, "缺少字段: quote_spans（起尾句对，逐字摘自对话原文）"
+        return _invalid_writer('quote_spans', "缺少字段: quote_spans（起尾句对，逐字摘自对话原文）")
 
     event = args.get("event")
     required_event = [
@@ -228,75 +268,75 @@ def validate_writer_arguments(args: dict[str, Any]) -> tuple[dict[str, Any] | No
         "key_quotes",
     ]
     if not isinstance(event, dict):
-        return None, "event 不是对象"
+        return _invalid_writer('event', "event 不是对象")
     missing = [k for k in required_event if k not in event]
     if missing:
-        return None, f"event 缺少字段: {missing}"
+        return _invalid_writer(f'event.{missing[0]}', f"event 缺少字段: {missing}")
     extra = set(event) - set(required_event)
     if extra:
-        return None, f"event 含未声明字段（LLM 不得提供系统字段）: {sorted(extra)}"
+        return _invalid_writer('event', f"event 含未声明字段（LLM 不得提供系统字段）: {sorted(extra)}")
     if not isinstance(event["summary"], str) or not event["summary"].strip():
-        return None, "summary 必须是非空字符串"
+        return _invalid_writer('event.summary', "summary 必须是非空字符串")
     if not isinstance(event["core"], str) or not event["core"].strip():
-        return None, "core 必须是非空字符串"
+        return _invalid_writer('event.core', "core 必须是非空字符串")
 
     list_fields = ["participants", "objects", "details"]
     for k in list_fields:
         if not isinstance(event[k], list) or not all(isinstance(i, str) for i in event[k]):
-            return None, f"event.{k} 必须是字符串数组"
+            return _invalid_writer(f'event.{k}', f"event.{k} 必须是字符串数组")
     for k in ["context", "outcome", "state", "affect", "significance"]:
         if not isinstance(event[k], str):
-            return None, f"event.{k} 必须是字符串"
+            return _invalid_writer(f'event.{k}', f"event.{k} 必须是字符串")
     # significance 数字化（2026-10-17 momo：简报分层依据，格式必须可靠）
     if not re.match(r"\s*(10|[1-9])\s*[：:]", event["significance"]):
-        return None, ("significance 必须以 1-10 的数字开头，后跟冒号和"
+        return _invalid_writer('event.significance', "significance 必须以 1-10 的数字开头，后跟冒号和"
                       "一句话理由（如「8：Deliz 开发线的转折」）")
 
     # key_quotes（r4 第 3 项）：数组、元素 speaker∈{user,ai} + 非空 text；
     # 上限 3 条（baseline），超出整条拒绝
     kq = event.get("key_quotes")
     if not isinstance(kq, list):
-        return None, "event.key_quotes 必须是数组"
+        return _invalid_writer('event.key_quotes', "event.key_quotes 必须是数组")
     if len(kq) > 3:
-        return None, f"event.key_quotes 最多 3 条，得到 {len(kq)} 条"
+        return _invalid_writer('event.key_quotes', f"event.key_quotes 最多 3 条，得到 {len(kq)} 条")
     allowed_kq = {"speaker", "text"}
     for i, q in enumerate(kq):
         if not isinstance(q, dict):
-            return None, f"event.key_quotes[{i}] 不是对象"
+            return _invalid_writer(f'event.key_quotes[{i}]', f"event.key_quotes[{i}] 不是对象")
         if set(q) - allowed_kq:
-            return None, f"event.key_quotes[{i}] 含未声明字段: {sorted(set(q) - allowed_kq)}"
+            return _invalid_writer(f'event.key_quotes[{i}]', f"event.key_quotes[{i}] 含未声明字段: {sorted(set(q) - allowed_kq)}")
         if q.get("speaker") not in ("user", "ai"):
-            return None, f"event.key_quotes[{i}].speaker 必须是 user 或 ai"
+            return _invalid_writer(f'event.key_quotes[{i}].speaker', f"event.key_quotes[{i}].speaker 必须是 user 或 ai")
         if not isinstance(q.get("text"), str) or not q["text"].strip():
-            return None, f"event.key_quotes[{i}].text 必须是非空字符串"
+            return _invalid_writer(f'event.key_quotes[{i}].text', f"event.key_quotes[{i}].text 必须是非空字符串")
 
     routes = args.get("recall_routes")
     if not isinstance(routes, list) or not routes:
-        return None, "recall_routes 必须是非空数组"
+        return _invalid_writer('recall_routes', "recall_routes 必须是非空数组")
     allowed_route = {"cue_type", "cue"}
     for i, r in enumerate(routes):
         if not isinstance(r, dict):
-            return None, f"recall_routes[{i}] 不是对象"
+            return _invalid_writer(f'recall_routes[{i}]', f"recall_routes[{i}] 不是对象")
         if set(r) - allowed_route:
-            return None, f"recall_routes[{i}] 含未声明字段: {sorted(set(r) - allowed_route)}"
+            return _invalid_writer(f'recall_routes[{i}]', f"recall_routes[{i}] 含未声明字段: {sorted(set(r) - allowed_route)}")
         if r.get("cue_type") not in ("lexical", "conceptual", "relational", "situational"):
-            return None, f"recall_routes[{i}].cue_type 非法"
+            return _invalid_writer(f'recall_routes[{i}].cue_type', f"recall_routes[{i}].cue_type 非法")
         if not isinstance(r.get("cue"), str) or not r["cue"].strip():
-            return None, f"recall_routes[{i}].cue 必须是非空字符串"
+            return _invalid_writer(f'recall_routes[{i}].cue', f"recall_routes[{i}].cue 必须是非空字符串")
 
     # quote_spans 必填非空：逐对校验（起/尾句均须非空字符串）
     quote_spans = args.get("quote_spans")
     if not isinstance(quote_spans, list) or not quote_spans:
-        return None, "quote_spans 必须是非空数组（至少一对起尾句，逐字摘自对话原文）"
+        return _invalid_writer('quote_spans', "quote_spans 必须是非空数组（至少一对起尾句，逐字摘自对话原文）")
     allowed_q = {"start_quote", "end_quote"}
     for i, q in enumerate(quote_spans):
         if not isinstance(q, dict):
-            return None, f"quote_spans[{i}] 不是对象"
+            return _invalid_writer(f'quote_spans[{i}]', f"quote_spans[{i}] 不是对象")
         if set(q) - allowed_q:
-            return None, f"quote_spans[{i}] 含未声明字段: {sorted(set(q) - allowed_q)}"
+            return _invalid_writer(f'quote_spans[{i}]', f"quote_spans[{i}] 含未声明字段: {sorted(set(q) - allowed_q)}")
         for k in ("start_quote", "end_quote"):
             if not isinstance(q.get(k), str) or not q[k].strip():
-                return None, f"quote_spans[{i}].{k} 必须是非空字符串"
+                return _invalid_writer(f'quote_spans[{i}].{k}', f"quote_spans[{i}].{k} 必须是非空字符串")
 
     return {"event": event, "recall_routes": routes,
             "quote_spans": quote_spans}, None

@@ -135,6 +135,26 @@ turn_start 可传 recall_id，MCP 随后逐请求带 X-Ember-Recall-Id 和 X-Emb
 
 成功回执：`{"status": "created", "event_id": "EVT-…", "summary", "raw_ref", "route_count", "recall_cues" [, "dropped_quotes"]}`
 
+#### 工具失败回执（2026-10-23）
+
+MCP 的 schema 校验失败，以及业务返回 `status=failed`、`status=rejected` 或 `ok=false` 时，外层 `CallToolResult.isError=true`。`pending`、`in_progress`、`not_archived` 等状态本身不被改成失败。已有回执正文与稳定调用身份的重放规则保留。
+
+写记忆的参数错误保留 `status=failed` / `error`，补充 `code=invalid_tool_arguments`、精确 `field` 和 `hint`。例如：
+
+```json
+{
+  "status": "failed",
+  "code": "invalid_tool_arguments",
+  "field": "recall_routes[0].cue",
+  "error": "validation failed: recall_routes[0].cue 必须是非空字符串",
+  "hint": "请填写非空的召回关键词，不能只含空白字符。"
+}
+```
+
+层级放错会指明 `event.recall_routes` 应移到顶层，不自动搬移或补全模型参数。原文读取失败保留各自的 `source_*` code 并提供处理建议；只有可用原文中的摘录不匹配才返回 `quote_not_found`，其 `field=quote_spans`。未配置、鉴权失败、会话/路径不明均不能通过改写摘录来绕过。
+
+验收记录见 [TOOL_ERROR_RELIABILITY.md](TOOL_ERROR_RELIABILITY.md)。
+
 ### 5.2 read_memory_source
 
 翻一条记忆对应的对话原文（只读）。只在需要核对原话细节时调用。语料 = 内存会话 ∪ 向后端原文接口按需拉取（用完即弃，本地不落盘）。

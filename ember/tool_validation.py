@@ -13,6 +13,7 @@ def validate_tool_input(arguments: dict, schema: dict) -> dict | None:
                 return {
                     "status": "failed", "code": "invalid_tool_arguments",
                     "field": field, "actual_path": f"event.{field}",
+                    "hint": f"将 event.{field} 移至顶层，与 event 平级，保留原内容。",
                     "error": f"{field} 放错层级：当前位于 event.{field}，顶层缺少 {field}。请将它从 event 内移出，与 event、quote_spans 平级，保留原内容。",
                 }
     error = next(Draft202012Validator(schema).iter_errors(arguments), None)
@@ -41,4 +42,5 @@ def validate_tool_input(arguments: dict, schema: dict) -> dict | None:
     else:
         detail = f"不符合约束 {error.validator}，请核对工具参数定义"
     return {"status": "failed", "code": "invalid_tool_arguments",
-            "field": path or "$", "error": f"{path or '$'}：{detail}"}
+            "field": path or "$", "error": f"{path or '$'}：{detail}",
+            "hint": f"请按工具定义检查 {path or '$'}；{detail}。"}

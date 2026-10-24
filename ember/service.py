@@ -66,7 +66,7 @@ from .writer import (
     build_pin_tool_specs,
     EMBEDDED_WRITER_PROMPT,
     build_tools_spec,
-    validate_writer_arguments,
+    validate_writer_arguments, writer_error_result,
     SEARCH_TOOL_NAME,
     build_search_tool_spec,
 )
@@ -892,9 +892,10 @@ class EmberService:
                                      {"status": "ignored", "reason": "unknown tool"})
             return {"handled": True, "status": status}
 
-        def _fail(err: str) -> dict[str, Any]:
-            self._append_tool_record(session, tool_calls,
-                                     {"status": "failed", "error": err[:300]})
+        def _fail(err: str, validation_error: str | None = None) -> dict[str, Any]:
+            receipt = (writer_error_result(validation_error) if validation_error is not None
+                       else {"status": "failed", "error": err[:300]})
+            self._append_tool_record(session, tool_calls, receipt)
             status.tool_result_in_context = True
             status.status = "failed"
             status.error = err
@@ -908,7 +909,7 @@ class EmberService:
 
         validated, err = validate_writer_arguments(args)
         if err:
-            return _fail(f"validation failed: {err}")
+            return _fail(f"validation failed: {err}", validation_error=err)
         status.validation = "passed"
 
         try:
@@ -926,8 +927,8 @@ class EmberService:
         except (LLMError, ValueError, KeyError, OSError) as ex:
             # 失败也如实进上下文：模型知道自己这次没写成
             self._append_tool_record(session, tool_calls,
-                                     dict({"status": "failed", "error": str(ex)[:300]},
-                                          **({"code": ex.code} if isinstance(ex, QuoteSourceError) else {})))
+                                     ex.as_result() if isinstance(ex, QuoteSourceError)
+                                     else {"status": "failed", "error": str(ex)[:300]})
             status.tool_result_in_context = True
             status.status = "failed"
             status.error = str(ex)[:300]
@@ -2103,12 +2104,12 @@ class EmberService:
                                   tool_call_id: str | None = None) -> dict:
         validated, err = validate_writer_arguments(arguments)
         if err:
-            return {"status": "failed", "error": f"validation failed: {err}"}
+            return writer_error_result(err)
         try:
             return self.write_validated_event(session, turn, validated,
                 writer_recall_id=recall_id, writer_tool_call_id=tool_call_id)
         except QuoteSourceError as ex:
-            return {"status": "failed", "code": ex.code, "error": str(ex)}
+            return ex.as_result()
         except (ValueError, KeyError) as ex:
             return {"status": "failed", "error": str(ex)[:300]}
 

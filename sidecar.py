@@ -153,8 +153,11 @@ async def _call_tool(name: str, arguments: dict) -> types.CallToolResult:
     else:
         result = await asyncio.to_thread(svc.sidecar_call_tool, name, arguments or {},
                                          **(CURRENT_CALL_CONTEXT.get() or {}))
-    return types.CallToolResult(content=[types.TextContent(
-        type="text", text=json.dumps(result, ensure_ascii=False))])
+    # Explicit failures must reach the model as tool errors; pending/read states
+    # retain their existing semantics and receipt payloads.
+    return types.CallToolResult(
+        isError=result.get("status") in {"failed", "rejected"} or result.get("ok") is False,
+        content=[types.TextContent(type="text", text=json.dumps(result, ensure_ascii=False))])
 
 
 session_manager = StreamableHTTPSessionManager(

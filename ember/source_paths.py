@@ -80,6 +80,23 @@ class QuoteSourceError(ValueError):
         }
         super().__init__(messages.get(code, "历史原文未完整取得，暂时无法核验摘录；请检查原文读取状态。"))
 
+    def as_result(self):
+        hints = {
+            "source_unconfigured": "请检查原文连接配置；恢复前不要反复重摘或重试写入。",
+            "source_unreachable": "请检查原文服务连通性；恢复后再重新调用，不必改写摘录。",
+            "source_auth_failed": "请检查原文服务令牌配置，不要修改摘录来重试。",
+            "source_instance_unknown": "请检查实例配置和原文服务的实例归属规则。",
+            "source_session_unknown": "请检查来源会话是否存在、是否属于当前实例；不要猜测其他会话。",
+            "source_identity_missing": "需要可核验的消息编号；不要用相邻轮次或当前窗口代替历史出处。",
+            "source_path_unknown": "请核对消息是否来自同一真实分支；不要改用范围读取。",
+            "quote_not_found": "请从已核验原文中逐字重摘起尾句，保持原场景范围。",
+        }
+        result = {"status": "failed", "code": self.code, "error": str(self),
+                  "hint": hints.get(self.code, "请检查原文读取条件；未恢复前不要反复重摘。")}
+        if self.code == "quote_not_found":
+            result["field"] = "quote_spans"
+        return result
+
 
 def legacy_messages(ledger, sid):
     """Exact individual hook receipts only; never use max-reply/range inference.
