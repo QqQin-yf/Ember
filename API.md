@@ -379,7 +379,7 @@ X-Heart-Instance: <Ember 实例名>
 
 - `POST /ember/briefing/refresh`：体 `{"session_id", "keep_from_message_id"}`（现场起点的后端消息行 id——现场区间记忆不进，原文已在上下文；ember 经账本换算，app 不接触内部轮号）。返回 `{"status": "ok", "text", "chars", "stats": {…}}`，`text` 即注入文本
 - `GET /ember/briefing`：取当前简报；从未刷新 → `{"status": "empty"}`
-- 入选/分层/预算/去重全规则见 **BRIEFING_SPEC.md**（要点：pin 与 significance=10 必进给原文层；72h 新增 8-9 给 core、1-7 给 summary 一句；召回过的旧记忆只放最相关一条；现场与观察事件不进；预算 6000 字从低层砍，pin/10 永不砍；简报注入计一次在场——2h 内召回走轻量行）。每条条目带绝对时间标注 `[MM-DD]`（跨年 `[YYYY-MM-DD]`，取经历时间 event_time；缺失则无标注）
+- 入选/分层/预算/去重全规则见 **BRIEFING_SPEC.md**（要点：pin 与 significance=10 必进给原文层；72h 新增 8-9 给 core、1-7 给 summary 一句；召回过的旧记忆只放最相关一条；现场与观察事件不进；预算 6000 字从低层砍，pin/10 永不砍；简报注入计一次在场——2h 内召回走轻量行）。每条条目显式标注 `[日期：YYYY-MM-DD]`（取存储的 event_time；缺失/null/空白显示 `[时间缺失]`，不可解析显示 `[时间解析失败]`，不以 ingest_time 兜底）。普通写记忆的 event_time 目前是写入时刻；已有缓存在下次正常 refresh 后采用新格式
 - 钉住端点：`POST /ember/memory/pin` / `POST /ember/memory/unpin`（体 `{"event_id"}`，幂等；联动见 §5.5）
 
 ## 9. 坐标系说明

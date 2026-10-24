@@ -3266,18 +3266,17 @@ class EmberService:
 
     @staticmethod
     def _briefing_when(ev: Any) -> str:
-        """条目时间标注（2026-10-18 momo 拍板，给 app 的 AI 看）：
-        绝对时间，经历时间 event_time 渲染为 MM-DD（跨年带年份）。
-        解析失败/缺失 → 空串（条目无前缀，不硬编造时间）。
-        """
-        raw = str(getattr(ev, "event_time", "") or "")
+        """Every entry explicitly labels its stored date or why it is unavailable."""
+        raw = getattr(ev, "event_time", None)
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            return "时间缺失"
+        if not isinstance(raw, str):
+            return "时间解析失败"
         try:
-            dt = datetime.fromisoformat(raw)
+            dt = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
         except ValueError:
-            return ""
-        now = datetime.now(timezone.utc).astimezone()
-        fmt = "%m-%d" if dt.year == now.year else "%Y-%m-%d"
-        return dt.strftime(fmt)
+            return "时间解析失败"
+        return f"日期：{dt:%Y-%m-%d}"
 
     def _briefing_source_block(self, ev: Any) -> str:
         """原文层条目：core + ±3 轮原文（复用 read_source_event）。
@@ -3286,8 +3285,7 @@ class EmberService:
         source 接口卡死。
         """
         when = self._briefing_when(ev)
-        head = (f"◆ [{when}] {ev.core.strip()}" if when
-                else f"◆ {ev.core.strip()}")
+        head = f"◆ [{when}] {ev.core.strip()}"
         try:
             src = self.read_source_event(ev.event_id)
         except Exception:  # noqa: BLE001 — 拉不到原文不挡简报
@@ -3418,8 +3416,7 @@ class EmberService:
             if ev.event_id in kept_ids:
                 continue
             when = self._briefing_when(ev)
-            line = (f"• [{when}] {ev.core.strip()}" if when
-                    else f"• {ev.core.strip()}")
+            line = f"• [{when}] {ev.core.strip()}"
             if used + len(line) + 1 > budget:
                 dropped["core"] += 1
                 continue
@@ -3431,8 +3428,7 @@ class EmberService:
             if ev.event_id in kept_ids:
                 continue
             when = self._briefing_when(ev)
-            line = (f"• [{when}] {ev.summary.strip()}" if when
-                    else f"• {ev.summary.strip()}")
+            line = f"• [{when}] {ev.summary.strip()}"
             if used + len(line) + 1 > budget:
                 dropped["summary"] += 1
                 continue
