@@ -51,6 +51,7 @@ from .cue_tighten import CueTightener
 from .pin_store import PinStore
 from .source_refs import EventSourceStore, event_reference, message_seq
 from .generations import GenerationStore, fingerprint, identity
+from .runs import RunStore, failure as run_failure
 from .source_completion import SourceCompletions
 from .prompts import (OBSERVE_SYSTEM_PROMPT, build_observe_user_prompt,
                       OBSERVE_MERGE_PROMPT, build_observe_merge_user_prompt)
@@ -435,6 +436,7 @@ class EmberService:
         # 工具自动关联出处；轮后钩子收掉）。单活跃轮——单用户部署够用。
         self._live_turn: dict[str, Any] | None = None
         self.generations = GenerationStore(getattr(store, "root", ""))
+        self.runs = RunStore(getattr(store, "root", ""))
         self.source_completions = SourceCompletions(self.generations, self.event_sources)
         self._generation_lock = threading.RLock()
         self._generation_contexts: dict[str, dict] = {}
@@ -1449,7 +1451,8 @@ class EmberService:
         每条 text 逐字查找本会话原文。核对语料见 _quote_corpus（持久存档
         ∪ 内存——2026-10-12 修正：旁路形态下 sidecar 重启会清空内存会话，
         易失语料会让「引用更早对话的原话」全部误伤）。做空白
-        归一容错（与 locate_turn 同款策略）。对不上的条目从 event 上
+        归一容错。key_quotes 保存原话，仍使用独立的逐字校验，
+        不沿用 quote_spans 的格式容错定位。对不上的条目从 event 上
         丢弃并返回（调用方写进 tool result）；原话的价值在于是真话，
         不能让改写或编造的句子混进去。
         """
@@ -1917,14 +1920,53 @@ class EmberService:
                 "tool_name": row["tool_name"], "status": row["state"],
                 "result": self._tool_receipt(row)}
 
+    def sidecar_run_start(self, body: dict) -> dict:
+        return self.runs.start(body)
+
+    def _verify_run_reply(self, start: dict, finish: dict) -> dict | None:
+        reply_id = message_seq(finish["assistant_message_id"])
+        messages = start["messages"]
+        ids = [message_seq(row["message_id"]) for row in messages]
+        if reply_id in ids:
+            return run_failure("context_mismatch", "Reply seq is already in the start window")
+        try:
+            rows = source_client.fetch_source_path(start["session_id"], ids + [reply_id],
+                                                   instance=self.source_instance)
+        except source_client.SourceUnavailable as exc:
+            result = run_failure("run_source_unavailable", "Reply verification pending; retry the same fixed finish intent")
+            result["source_code"] = exc.code
+            return result
+        by_id = {message_seq(row.get("message_id")): row for row in rows if isinstance(row, dict)}
+        if len(rows) != len(ids) + 1 or len(by_id) != len(rows):
+            return run_failure("run_source_mismatch", "Source identities incomplete or repeated")
+        if [message_seq(row.get("message_id")) for row in rows] != ids + [reply_id]:
+            return run_failure("run_source_mismatch", "Verified source order does not match the attested window and reply")
+        for item in messages:
+            row = by_id.get(message_seq(item["message_id"]))
+            if row is None or row.get("role") != item["role"]:
+                return run_failure("run_source_mismatch", "Start path role/identity mismatch")
+        reply = by_id.get(reply_id)
+        if reply is None or reply.get("role") != "assistant" or reply.get("content") != finish["assistant_reply"]:
+            return run_failure("run_source_mismatch", "Committed reply role/text mismatch")
+        return None
+
+    def sidecar_run_finish(self, body: dict) -> dict:
+        return self.runs.finish(body, self._verify_run_reply)
+
+    def sidecar_run_status(self, run_id: str) -> dict:
+        return self.runs.query(run_id)
+
     def sidecar_call_tool(self, name: str, arguments: dict,
                           recall_id: str | None = None,
                           tool_call_id: str | None = None,
                           run_id: str | None = None) -> dict:
         """HTTP-provided identity only. No identified request falls back to live."""
         if run_id is not None:
-            code = "context_mismatch" if recall_id is not None else "unsupported_phase"
-            return self._generation_error(code, "Active run context is not implemented in this phase")
+            if recall_id is not None:
+                return run_failure("context_mismatch", "Ordinary recall and active run identities cannot be mixed")
+            if not isinstance(arguments, dict):
+                return run_failure("invalid_arguments", "Tool arguments must be an object")
+            return self.runs.call(run_id, tool_call_id, name, arguments, self._dispatch_memory_tool)
         if recall_id is None and tool_call_id is None:
             with self._generation_lock:
                 if self._live_turn and self._live_turn.get("recall_id"):

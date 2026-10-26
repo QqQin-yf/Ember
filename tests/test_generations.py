@@ -79,7 +79,7 @@ class GenerationTests(unittest.TestCase):
 
     def test_run_or_mixed_identity_does_not_fall_back_to_dialogue(self):
         self.start()
-        self.assertEqual(self.svc.sidecar_call_tool("create_memory_event", write_args(), run_id="run1")["code"], "unsupported_phase")
+        self.assertEqual(self.svc.sidecar_call_tool("create_memory_event", write_args(), run_id="run1")["code"], "invalid_identity")
         self.assertEqual(self.svc.sidecar_call_tool("create_memory_event", write_args(), run_id="run1", recall_id="r-1", tool_call_id="t")["code"], "context_mismatch")
         self.assertEqual(len(self.svc.store.all_events()), 0)
 
@@ -352,7 +352,7 @@ class GenerationHTTPTests(unittest.IsolatedAsyncioTestCase):
         _, unknown = await self.tool({"X-Ember-Recall-Id": "missing", "X-Ember-Tool-Call-Id": "t"})
         self.assertEqual(unknown["code"], "unknown_recall")
         _, active = await self.tool({"X-Ember-Run-Id": "run1", "X-Ember-Tool-Call-Id": "t"})
-        self.assertEqual(active["code"], "unsupported_phase")
+        self.assertEqual(active["code"], "run_not_found")
         self.assertEqual(len(self.registry.service("default").store.all_events()), 0)
 
     async def test_duplicate_identity_header_rejected_before_dispatch(self):

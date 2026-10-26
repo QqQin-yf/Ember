@@ -1,5 +1,17 @@
 # Ember 对 Heart / Deliz 第二阶段对接的回复
 
+## App wake-integration 独立 run 首版交付（2026-10-24，本地未部署）
+
+已实现独立 `/ember/runs/start`、`finish`、查询及 MCP run/tool_call 绑定，按实例持久保存幂等身份、固定 finish 意图与首终态，不经过普通 turn 或 _live_turn。首版仅开放 read_memory_source；现有 search_memory 有提取账/恢复 Cue 副作用，不按纯读开放。长期主动 Event、工具结果证据和 pending 写入继续禁用，finish 不自动写记忆、不发 echo、不改开关。
+
+精确字段和 503/finishing/重启对账语义见 RUNS_SPEC.md，给 App 的对接点见 APP_WAKE_RUNS_REPLY.md。完整 293 项回归、旧 sidecar 38 项、run 专项 24 项通过；App 已对齐白名单和补投规则，真实 App、Heart、Ember 隔离 HTTP 联调随后 20/20 通过，覆盖正常完成、MCP 绑定、503 后双端重启补投、App 中断恢复和窗口活动取消。见 [WAKE_THREE_PARTY_VALIDATION.md](WAKE_THREE_PARTY_VALIDATION.md)。模型/候选触发为夹具，Heart 自身重启与真实调度未覆盖；未部署日常或开启主动发送。
+
+## App 日常配置启用回执接收（2026-10-24）
+
+已读 App `D:/deliz/PHASE2_ACTIVATION_2026-10-24.md`。日常原文独立令牌已切换，Deliz/Ember 已重启；真实 Ember MCP 原文读取、原文令牌权限隔离和本轮归属拒错已由 App 验通。Ember 本方只读确认线上 `0d5c1f7`、新 PID 1855103、配置权限 0600，不重复改配置或重启。
+
+接收 App `EMBER_RECALL_REFS=1`、`HEART_PHASE2=1` 及 Heart 收到 window-main-9 的实测回执；日常跨已知实例案例未新增，仍按既有隔离证据说明。下一次正常聊天结束后，以同一真实生成身份对齐 Deliz recall/outbox、Ember snapshot/turn_end、Heart recalls/end 和完成水位。回执时没有新真实生成、完成水位为 null，不冒称已验通第一轮，也不补造对话。主动唤醒未开启；其他 sleep/主动 run 不随本次自动放行。当前总表见 [CURRENT_STATUS.md](CURRENT_STATUS.md)。
+
 > 当前状态入口（2026-10-24）：[CURRENT_STATUS.md](CURRENT_STATUS.md)。下文按各段日期保留历史验收记录；旧的“未部署”不覆盖日常 sidecar 已部署 `f910d4d` 的事实，代码部署也不等于第二阶段已开启或三方联调完成。
 
 ## 日常旧模式历史摘录修复（2026-10-23）

@@ -1,5 +1,7 @@
 # 普通生成绑定与工具回执：本段接口
 
+> 2026-10-24 更新：普通生成部分保持本契约；主动 run 已另行实现独立工作区接入，见 [RUNS_SPEC.md](RUNS_SPEC.md)。下文 unsupported_phase/未实现 runs 的描述保留为此前阶段记录。新 run 首版仅允许 read_memory_source，不能混用 recall_id 或普通 _live_turn；尚未部署日常主动链路。
+
 2026-10-20。本地实现，尚未提交/部署或与真实 app 联调。与 RECALL_REFS_SPEC.md 的呈现/出处段及 RECALL_SNAPSHOT_SPEC.md 的快照段配套；主动 run 仍未实现。
 
 ## 1. app 接线所需字段

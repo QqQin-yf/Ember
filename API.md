@@ -130,6 +130,8 @@ turn_start 可传 recall_id，MCP 随后逐请求带 X-Ember-Recall-Id 和 X-Emb
 校验与回执：
 
 - `quote_spans` 全部定位不上 → **整条拒绝**（`failed`，指路重摘）——双盲纪律
+- 出处定位先找原文子串，未命中时只保留文字和数字作连续子串匹配，忽略 emoji、Markdown 标记、标点和空白。容错只能唯一命中一条原文消息；仍保存该真实消息的坐标，不改写原文、不用语义相似或错字匹配。精确命中优先于容错候选。
+- 容错有多个消息候选 → `failed / quote_ambiguous`，返回具体 `field`（如 `quote_spans[0].end_quote`）、`candidate_count` 和扩长摘录的建议；整条写入在落盘前拒绝，不能任选第一条或当作单端缺失降级。
 - `key_quotes` 逐字核对，对不上的条目丢弃并进 `dropped_quotes`（记忆本体已保存，不因摘录出入重试）
 - 出处（会话/轮次/heart 钉子/message_id）由进行中的一轮自动关联，模型无需提供
 
@@ -401,3 +403,8 @@ X-Heart-Instance: <Ember 实例名>
 | ZHIPU_API_KEY / EMBER_SLEEP_MODEL | 观察提炼/合并等任务的 LLM |
 | EMBER_OWNER_NAME | 观察提炼注入 prompt 的用户称呼（不配写 "user"，见 §6 观察式记忆） |
 | EMBER_BRIEFING_BUDGET | 简报字符硬顶（缺省 6000，见 §8） |
+
+
+## 主动 run 隔离接入（ember-runs/1）
+
+新增 `POST /ember/runs/start`、`POST /ember/runs/finish`、`GET /ember/runs/{run_id}`。严格字段、幂等/终态/重启与 MCP 绑定见 [RUNS_SPEC.md](RUNS_SPEC.md)，App 接线回执见 [APP_WAKE_RUNS_REPLY.md](APP_WAKE_RUNS_REPLY.md)。首版仅开放 read_memory_source；不支持写入工具或有副作用的 search_memory。当前仅工作区实现和隔离验收，不代表日常主动发送已开启。

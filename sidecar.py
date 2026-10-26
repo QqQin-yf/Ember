@@ -247,6 +247,34 @@ def _generation_response(result: dict) -> JSONResponse:
     return JSONResponse(result, status_code=status, headers=headers)
 
 
+def _run_response(result: dict) -> JSONResponse:
+    code = result.get("code")
+    status = (404 if code == "run_not_found" else
+              503 if code == "run_source_unavailable" else
+              400 if code in {"invalid_arguments", "invalid_identity"} else
+              409 if code else 200)
+    return JSONResponse(result, status_code=status,
+                        headers={"Retry-After": "2"} if status == 503 else None)
+
+
+async def _run_lifecycle(request: Request) -> JSONResponse:
+    if sum(k.lower() == b"x-heart-instance" for k, _ in request.scope.get("headers", [])) > 1:
+        return _run_response({"status": "failed", "code": "invalid_identity",
+                              "error": "Duplicate instance header"})
+    svc = _service_or_404(request)
+    if isinstance(svc, JSONResponse):
+        return svc
+    if request.method == "GET":
+        return _run_response(await asyncio.to_thread(svc.sidecar_run_status, request.path_params["run_id"]))
+    try:
+        body = await request.json()
+    except Exception:
+        return _run_response({"status": "failed", "code": "invalid_arguments",
+                              "field": "$", "error": "Expected JSON object"})
+    operation = svc.sidecar_run_start if request.url.path.endswith("/start") else svc.sidecar_run_finish
+    return _run_response(await asyncio.to_thread(operation, body))
+
+
 async def _recall_snapshot(request: Request) -> JSONResponse:
     svc = _service_or_404(request)
     if isinstance(svc, JSONResponse):
@@ -450,6 +478,9 @@ class BearerAuthMiddleware:
 
 app = BearerAuthMiddleware(Starlette(
     routes=[
+        Route("/ember/runs/start", _run_lifecycle, methods=["POST"]),
+        Route("/ember/runs/finish", _run_lifecycle, methods=["POST"]),
+        Route("/ember/runs/{run_id}", _run_lifecycle, methods=["GET"]),
         Route("/ember/recalls/{recall_id}", _recall_snapshot, methods=["GET"]),
         Route("/ember/generations/{recall_id}/tools/{tool_call_id}",
               _generation_tool_status, methods=["GET"]),

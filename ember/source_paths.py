@@ -66,8 +66,10 @@ class SourceCorpus(list):
 
 
 class QuoteSourceError(ValueError):
-    def __init__(self, code):
+    def __init__(self, code, *, field=None, candidate_count=None):
         self.code = code
+        self.field = field
+        self.candidate_count = candidate_count
         messages = {
             "source_unconfigured": "原文服务未配置，历史原文不可用，请检查原文连接配置，不必反复重摘。",
             "source_unreachable": "原文服务连接失败或超时，暂时无法核验历史摘录；请恢复原文连接后重试。",
@@ -77,6 +79,7 @@ class QuoteSourceError(ValueError):
             "source_session_unknown": "当前实例无权读取来源会话，或来源会话已不存在。",
             "source_instance_unknown": "原文服务拒绝了当前实例身份，暂时无法核验历史摘录。",
             "quote_not_found": "quote_spans 未能定位：在已核验的可用原文中未找到起尾摘录，请核对引用来源。",
+            "quote_ambiguous": "摘录去除格式后匹配到多条原文消息，无法唯一确定出处；请增加能区分场景的原文文字。",
         }
         super().__init__(messages.get(code, "历史原文未完整取得，暂时无法核验摘录；请检查原文读取状态。"))
 
@@ -90,11 +93,16 @@ class QuoteSourceError(ValueError):
             "source_identity_missing": "需要可核验的消息编号；不要用相邻轮次或当前窗口代替历史出处。",
             "source_path_unknown": "请核对消息是否来自同一真实分支；不要改用范围读取。",
             "quote_not_found": "请从已核验原文中逐字重摘起尾句，保持原场景范围。",
+            "quote_ambiguous": "请扩长该端摘录，加入同一条原文中的独特文字，再重新调用；不要只调整标点或 emoji。",
         }
         result = {"status": "failed", "code": self.code, "error": str(self),
                   "hint": hints.get(self.code, "请检查原文读取条件；未恢复前不要反复重摘。")}
         if self.code == "quote_not_found":
             result["field"] = "quote_spans"
+        if self.field is not None:
+            result["field"] = self.field
+        if self.candidate_count is not None:
+            result["candidate_count"] = self.candidate_count
         return result
 
 

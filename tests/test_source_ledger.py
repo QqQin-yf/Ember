@@ -423,6 +423,7 @@ class SourceClientTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.server.shutdown()
+        self.server.server_close()
         source_client.SOURCE_URL, source_client.SOURCE_TOKEN = self._old
 
     def test_fetch_range(self) -> None:

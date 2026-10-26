@@ -44,6 +44,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+from .source_paths import QuoteSourceError
+
 SPAN_FILE = "turn_spans.jsonl"
 
 
@@ -68,33 +70,37 @@ def _conversation(messages: list[dict]) -> list[dict]:
             and isinstance(m.get("turn"), int)]
 
 
-def _locate_index(quote: str, corpus: list[dict]) -> int | None:
+def _locate_index(quote: str, corpus: list[dict], *, field: str = "quote_spans") -> int | None:
     """quote 在语料中的消息下标。
 
-    匹配策略：先精确子串；失败则空白归一后再找（换行/多空格容错，
-    仍是逐字内容匹配）。找不到返回 None（调用方按未定位处理）。
+    先精确子串；失败后仅保留文字和数字，忽略格式、emoji 和空白。
+    容错匹配必须唯一，歧义报错；文字仍须连续对应，不跳过任何文字。
+    返回的是原始消息下标，不改写原文。找不到返回 None。
     """
-    import re
     if not quote.strip():
         return None
     for i, m in enumerate(corpus):
         if quote in (m.get("content") or ""):
             return i
-    norm = re.sub(r"\s+", "", quote)
-    if len(norm) < 4:
+    norm = "".join(c for c in quote if c.isalnum())
+    if not norm:
         return None
+    candidates = []
     for i, m in enumerate(corpus):
         content = m.get("content") or ""
-        if norm and norm in re.sub(r"\s+", "", content):
-            return i
-    return None
+        if norm in "".join(c for c in content if c.isalnum()):
+            candidates.append(i)
+    if len(candidates) > 1:
+        raise QuoteSourceError("quote_ambiguous", field=field,
+                               candidate_count=len(candidates))
+    return candidates[0] if candidates else None
 
 
 def locate_turn(quote: str, messages: list[dict]) -> int | None:
     """在对话窗口原文里逐字找 quote，返回它所在消息的 turn 序数。
 
-    匹配策略：先精确子串；失败则空白归一后再找（换行/多空格容错，
-    仍是逐字内容匹配）。找不到返回 None（调用方降级粗锚点）。
+    先精确子串，再忽略非文字数字字符匹配；容错歧义抛出可诊断错误。
+    找不到返回 None。
     """
 
     corpus = _conversation(messages)
@@ -122,9 +128,11 @@ def spans_from_quotes(quote_spans: list[dict],
     lo_turn, hi_turn = min(turns), max(turns)
 
     pairs: list[tuple[int, int]] = []
-    for qs in quote_spans or []:
-        s_idx = _locate_index(qs.get("start_quote", ""), corpus)
-        e_idx = _locate_index(qs.get("end_quote", ""), corpus)
+    for i, qs in enumerate(quote_spans or []):
+        s_idx = _locate_index(qs.get("start_quote", ""), corpus,
+                              field=f"quote_spans[{i}].start_quote")
+        e_idx = _locate_index(qs.get("end_quote", ""), corpus,
+                              field=f"quote_spans[{i}].end_quote")
         if s_idx is None and e_idx is None:
             continue
         if s_idx is None:
