@@ -1,7 +1,7 @@
 """Raw-slice automatic recall: fresh query embeddings and complete diagnostic ranks.
 
-No candidate/presentation thresholds have been chosen. Rankings are observable
-and durable; they do not inject text or expand Events/Entities automatically.
+Candidates require cosine similarity >= 0.6. Complete rankings and the candidate
+pool are durable; final presentation rules have not been chosen.
 """
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -16,6 +16,9 @@ import uuid
 from .slice_embedding import SliceEmbeddingConfig, SliceEmbeddingClient, SliceEmbeddingError
 from .source_refs import message_seq
 from .turn_slices import TurnSliceStore
+
+
+CANDIDATE_MIN_SCORE = 0.6
 
 
 class SliceRecall:
@@ -52,10 +55,11 @@ class SliceRecall:
             'anchor_message_id': message_seq(anchor_message_id),
             'context_start_id': message_seq(context_start_id),
             'status': 'ranked', 'mode': 'diagnostic', 'injected': False,
-            'candidate_threshold': None, 'presentation_threshold': None,
+            'candidate_threshold': CANDIDATE_MIN_SCORE, 'candidate_count': 0,
+            'candidate_pool': [], 'presentation_threshold': None,
             'presentation_limit': None, 'ranked_count': 0,
             'filtered_by_window': 0, 'filtered_by_anchor': 0,
-            'invalid_vectors': 0, 'selection_reason': 'thresholds_not_set'}
+            'invalid_vectors': 0, 'selection_reason': 'presentation_rules_not_set'}
         query_vector = None
         ranked = []
         try:
@@ -110,7 +114,11 @@ class SliceRecall:
                 ranked.sort(key=lambda r: (-r['score'], r['slice_id']))
                 for index, item in enumerate(ranked, 1):
                     item['rank'] = index
+                    # Compare full precision; displayed rounding never admits a candidate.
+                    item['in_candidate_pool'] = item['score'] >= CANDIDATE_MIN_SCORE
                 metadata['ranked_count'] = len(ranked)
+                metadata['candidate_pool'] = [dict(item) for item in ranked if item['in_candidate_pool']]
+                metadata['candidate_count'] = len(metadata['candidate_pool'])
         except SliceEmbeddingError as exc:
             metadata.update(status='unavailable', error_code=str(exc))
         with self.db() as db:
@@ -118,7 +126,8 @@ class SliceRecall:
                 (trace_id, self.instance, json.dumps(metadata, ensure_ascii=False),
                  json.dumps(query_vector, allow_nan=False) if query_vector is not None else None,
                  json.dumps(ranked, allow_nan=False), datetime.now(timezone.utc).isoformat()))
-        return metadata
+        # Hook responses stay compact; full candidate identities are available in the trace.
+        return {key: value for key, value in metadata.items() if key != 'candidate_pool'}
 
     def trace(self, trace_id, include_sources=False):
         if not self.path.exists():
@@ -151,7 +160,8 @@ def automatic_slice_recall(service, session, turn, text, context_start_id=None):
             context_start_id=context_start_id)
     except (OSError, sqlite3.Error, ValueError):
         matched = {'status': 'unavailable', 'error_code': 'slice_recall_storage_unavailable',
-                   'ranked_count': 0, 'mode': 'diagnostic', 'injected': False}
+                   'ranked_count': 0, 'candidate_threshold': CANDIDATE_MIN_SCORE,
+                   'candidate_count': 0, 'mode': 'diagnostic', 'injected': False}
     return {'prefix': '', 'presentations': [], 'recall_refs': {'events': []},
         'recalled_count': 0, 'entity_recalled': 0, 'entity_names': [],
         'filtered_by_sleep': 0, 'filtered_by_window': matched.get('filtered_by_window', 0),

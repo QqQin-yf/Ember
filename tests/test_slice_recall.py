@@ -47,10 +47,37 @@ class SliceRecallTests(unittest.TestCase):
         self.assertEqual([r['slice_id'] for r in trace['rankings']],
                          [first['slice_id'], middle['slice_id'], last['slice_id']])
         self.assertEqual([r['score'] for r in trace['rankings']], [1., 0., -1.])
-        self.assertIsNone(trace['candidate_threshold'])
+        self.assertEqual(trace['candidate_threshold'], 0.6)
+        self.assertEqual(trace['candidate_count'], 1)
+        self.assertEqual([r['slice_id'] for r in trace['candidate_pool']], [first['slice_id']])
         self.assertFalse(trace['injected'])
         self.assertNotIn('original user', json.dumps(trace))
         self.assertNotIn('synthetic-secret', Path(self.recall.path).read_bytes().decode(errors='ignore'))
+
+    def test_candidate_gate_includes_exactly_point_six_and_excludes_rounded_up_scores(self):
+        import math
+        exact = self.add(1, [.6, .8])
+        below_score = .5999999999
+        below = self.add(3, [below_score, math.sqrt(1 - below_score ** 2)])
+        above = self.add(5, [.8, .6])
+        metadata, _ = self.match()
+        self.assertEqual(metadata['candidate_count'], 2)
+        trace = SliceRecall(self.tmp.name).trace(metadata['trace_id'])
+        self.assertEqual([r['slice_id'] for r in trace['candidate_pool']],
+                         [above['slice_id'], exact['slice_id']])
+        row = next(r for r in trace['rankings'] if r['slice_id'] == below['slice_id'])
+        self.assertEqual(round(row['score'], 6), .6)
+        self.assertFalse(row['in_candidate_pool'])
+        self.assertEqual(len(trace['rankings']), 3)
+
+    def test_stored_pool_does_not_change_when_policy_changes_later(self):
+        self.add(1, [.8, .6])
+        metadata, _ = self.match()
+        with patch('ember.slice_recall.CANDIDATE_MIN_SCORE', .9):
+            trace = self.recall.trace(metadata['trace_id'])
+        self.assertEqual(trace['candidate_threshold'], .6)
+        self.assertEqual(trace['candidate_count'], 1)
+        self.assertEqual(len(trace['candidate_pool']), 1)
 
     def test_each_new_input_gets_a_fresh_vector(self):
         self.add(1, [1., 0.])

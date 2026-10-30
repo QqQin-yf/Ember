@@ -137,10 +137,13 @@ class PipelineHTTPTests(unittest.TestCase):
             self.assertEqual(preview.status_code, 200, preview.text)
             metadata = preview.json()
             self.assertEqual(metadata['ranked_count'], 1)
+            self.assertEqual(metadata['candidate_threshold'], .6)
+            self.assertEqual(metadata['candidate_count'], 1)
             self.assertFalse(metadata['injected'])
             trace = client.get('/ember/recall/slices/' + metadata['trace_id'] + '?view=sources')
             self.assertEqual(trace.status_code, 200)
             self.assertEqual(trace.json()['rankings'][0]['messages'][0]['content'], 'original user')
+            self.assertEqual(len(trace.json()['candidate_pool']), 1)
             self.assertEqual(client.get('/ember/recall/slices/' + metadata['trace_id'],
                 headers={'X-Heart-Instance': 'other'}).status_code, 404)
             start = client.post('/ember/hooks/turn_start', json={

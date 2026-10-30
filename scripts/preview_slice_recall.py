@@ -29,12 +29,14 @@ def main():
         '<style>body{font:16px/1.7 system-ui;max-width:1000px;margin:40px auto;padding:0 20px;background:#f7f7f5;color:#222}details{background:white;border:1px solid #ddd;border-radius:8px;padding:14px;margin:12px 0}summary{cursor:pointer}pre{white-space:pre-wrap;font:inherit}small{color:#666}</style>',
         '<h1>原文切片匹配排名</h1>', '<p>' + escape(args.query) + '</p>',
         '<p>模型：' + escape(result.get('model', '')) + ' · 匹配 ' + str(result['ranked_count']) + ' 组</p>',
-        '<p>本页保留完整排名，无门槛、无候选截断，也未向聊天注入内容。点击展开原文。</p>']
+        '<p>候选门槛：相似度 ≥ ' + str(result['candidate_threshold']) + ' · 候选 '
+        + str(result['candidate_count']) + ' 组。保留完整排名，不截断候选池，暂未向聊天注入内容。点击展开原文。</p>']
     for item in result['rankings']:
         messages = item.get('messages', [])
         preview = next((m['content'] for m in messages if m['role'] == 'user'),
                        messages[0]['content'] if messages else item.get('source_status', ''))
-        parts.append('<details><summary><b>#' + str(item['rank']) + ' · ' + f"{item['score']:.6f}" + '</b>　'
+        badge = '候选' if item['in_candidate_pool'] else '未达门槛'
+        parts.append('<details><summary><b>#' + str(item['rank']) + ' · ' + f"{item['score']:.6f}" + ' · ' + badge + '</b>　'
                      + escape(preview[:100]) + '</summary><small>会话 ' + escape(item['session_id'])
                      + ' · 消息 ' + escape(str(item['user_message_id'])) + ' / '
                      + escape(item['assistant_message_id']) + '</small>')
