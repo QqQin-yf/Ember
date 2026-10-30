@@ -18,7 +18,9 @@ class RerankerError(Exception):
 class RerankerConfig:
     enabled: bool=False
     model: str='Qwen/Qwen3-VL-Reranker-8B'
-    min_score: float=0.5
+    min_score: float=0.7
+    image_min_score: float=0.5
+    mixed_min_score: float=0.55
     source_budget_chars: int=4000
     timeout_seconds: float=30
 
@@ -29,7 +31,8 @@ class RerankerConfig:
             value=json.loads(Path(path).read_text(encoding='utf-8-sig'))
             config=cls(**value)
             if (type(config.enabled) is not bool or not isinstance(config.model,str) or not config.model.strip() or
-                    type(config.min_score) not in (int,float) or not math.isfinite(config.min_score) or not 0<=config.min_score<=1 or
+                    any(type(score) not in (int,float) or not math.isfinite(score) or not 0<=score<=1
+                        for score in (config.min_score,config.image_min_score,config.mixed_min_score)) or
                     type(config.source_budget_chars) is not int or config.source_budget_chars<200 or
                     type(config.timeout_seconds) not in (int,float) or not math.isfinite(config.timeout_seconds) or config.timeout_seconds<=0):
                 raise ValueError
@@ -38,6 +41,9 @@ class RerankerConfig:
             return cls()
         except (OSError,ValueError,TypeError):
             raise RerankerError('reranker_config_invalid') from None
+
+    def score_floor(self, modality='text'):
+        return {'text':self.min_score,'image':self.image_min_score,'mixed':self.mixed_min_score}[modality]
 
 
 class SliceReranker:

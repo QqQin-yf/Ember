@@ -34,7 +34,7 @@ App 的下一轮召回前缀会提示未处理分组。MCP 工具提供以下流
 
 请求协议依据[硅基流动官方 rerank 文档](https://docs.siliconflow.cn/docs/api/rerank-post)。
 
-配置参考 `config/slice-reranker.example.json`，实际启用文件是被忽略的 `config/slice-reranker.local.json`，也可设置 `EMBER_SLICE_RERANK_CONFIG`。示例默认禁用，防止未配置测试或新环境发真实请求。本地已启用。reranker 的初始通过分数设为 **0.5**，原文呈现预算 **4000 字符**，两项均独立可调；reranker 分数与向量相似度不是同一分数空间，该门槛尚未经过真实数据标定。
+配置参考 `config/slice-reranker.example.json`，实际启用文件是被忽略的 `config/slice-reranker.local.json`，也可设置 `EMBER_SLICE_RERANK_CONFIG`。示例默认禁用，防止未配置测试或新环境发真实请求。本地已启用。用户暂定的 reranker 通过门槛分别为：纯文本 **0.7**（`min_score`）、图片 **0.5**（`image_min_score`）、图文混合 **0.55**（`mixed_min_score`）。当前只处理文本，图片和图文门槛为后续接入保留。原文呈现预算为 **4000 字符**，这些参数均独立可调；reranker 分数与向量相似度不是同一分数空间，这些门槛尚未经过充分标定。
 
 呈现按实际已展示的 Event 归属处理：
 

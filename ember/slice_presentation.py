@@ -33,13 +33,13 @@ def append_slice_presentations(service,result,query):
                     stale.append(candidate['slice_id']);continue
                 candidates.append(candidate);sources.append(source)
             ranks=SliceReranker(config,embed_config).rank(query,sources) if sources else []
-            selection.update(status='ranked',model=config.model,min_score=config.min_score,
+            selection.update(status='ranked',model=config.model,min_score=config.score_floor('text'),modality='text',
                 source_budget_chars=config.source_budget_chars,stale_sources=stale,
                 rankings=[{'slice_id':candidates[r['index']]['slice_id'],'score':r['relevance_score']} for r in ranks])
             presented={r['event_id'] for r in result.get('recall_refs',{}).get('events',[])}
             blocks=[];used=0
             for rank in ranks:
-                if rank['relevance_score']<config.min_score:
+                if rank['relevance_score']<config.score_floor('text'):
                     continue
                 source=sources[rank['index']];candidate=candidates[rank['index']]
                 try:
@@ -76,7 +76,7 @@ def append_slice_presentations(service,result,query):
     except (OSError,sqlite3.Error,ValueError,KeyError,TypeError):
         selection.update(status='unavailable',error_code='slice_presentation_unavailable')
     metadata.update(mode='hybrid',injected=bool(selection['selected']),rerank=selection,
-                    presentation_status=selection['status'],presentation_threshold=config.min_score if config else None,
+                    presentation_status=selection['status'],presentation_threshold=config.score_floor('text') if config else None,
                     selection_reason='rerank_then_ownership')
     stored={**trace,**metadata}
     stored.pop('rankings',None);stored.pop('created_at',None)
