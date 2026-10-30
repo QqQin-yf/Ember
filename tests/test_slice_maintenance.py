@@ -212,6 +212,18 @@ class SliceMaintenanceTests(unittest.TestCase):
         bad = self.event_decision();bad[0]['old_evidence'] = 'invented'
         with self.assertRaises(MaintenanceModelError):
             validate_decisions('event', payload, bad)
+        bad = self.event_decision()
+        bad[0]['old_evidence'] = 'old detailreply'
+        with self.assertRaises(MaintenanceModelError):
+            validate_decisions('event', payload, bad)
+        bad[0]['old_evidence'] = 'old detail\nreply'
+        with self.assertRaises(MaintenanceModelError):
+            validate_decisions('event', payload, bad)
+        payload['new_event']['core'] = 'separate field'
+        bad = self.event_decision()
+        bad[0]['event_evidence'] = 'new understanding\nseparate field'
+        with self.assertRaises(MaintenanceModelError):
+            validate_decisions('event', payload, bad)
         payload = stage_two(self.root, m, m['candidates'])
         bad = self.turn_decision('add_source');bad[0]['turns'][0]['target_event_id'] = 'invented'
         with self.assertRaises(MaintenanceModelError):

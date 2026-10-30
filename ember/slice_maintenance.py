@@ -107,12 +107,20 @@ class MaintenanceQueue:
         return valid
 
 
-def _text(messages):
-    return '\n'.join(m['content'] for m in messages)
+def _contains_evidence(quote, texts):
+    return isinstance(quote, str) and bool(quote) and any(quote in text for text in texts)
 
 
-def _event_text(document):
-    return '\n'.join(str(v) for k, v in document.items() if k not in ('event_id', 'version_id'))
+def _document_texts(value):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, list):
+        for item in value:
+            yield from _document_texts(item)
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            if key not in ('event_id', 'version_id'):
+                yield from _document_texts(item)
 
 
 def validate_decisions(phase, payload, decisions):
@@ -144,8 +152,10 @@ def validate_decisions(phase, payload, decisions):
             old = entry.get('old_evidence')
             key = 'event_evidence' if phase == 'event' else 'new_evidence'
             new = entry.get(key)
-            target_text = _event_text(payload['new_event']) if phase == 'event' else _text(turns[entry['turn']]['messages'])
-            if not isinstance(old, str) or not old or old not in _text(source['messages']) or not isinstance(new, str) or not new or new not in target_text:
+            target_texts = (_document_texts(payload['new_event']) if phase == 'event' else
+                            (m['content'] for m in turns[entry['turn']]['messages']))
+            if (not _contains_evidence(old, (m['content'] for m in source['messages'])) or
+                    not _contains_evidence(new, target_texts)):
                 raise MaintenanceModelError('maintenance_evidence_invalid')
             if phase == 'turn':
                 if entry.get('action') not in ('link', 'add_source'):
