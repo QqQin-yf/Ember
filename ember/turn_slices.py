@@ -34,6 +34,17 @@ class TurnSliceStore:
                 content_hash TEXT NOT NULL,
                 saved_at TEXT NOT NULL
             )""")
+            db.execute("""CREATE TABLE IF NOT EXISTS slice_embeddings (
+                slice_id TEXT NOT NULL,
+                space TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                state TEXT NOT NULL,
+                dimensions INTEGER,
+                vector_json TEXT,
+                error_code TEXT,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (slice_id, space)
+            )""")
             with db:
                 yield db
         finally:
@@ -103,6 +114,54 @@ class TurnSliceStore:
         result = dict(row)
         result["messages"] = json.loads(result.pop("messages_json"))
         result["user_is_system"] = bool(result["user_is_system"])
+        return result
+
+    def pending_embeddings(self, space: str, limit: int = 100) -> list[dict]:
+        """Missing, failed or stale vectors; never treat stale results as ready."""
+        if not self.path.exists():
+            return []
+        if type(limit) is not int or limit < 1:
+            raise ValueError("Positive limit required")
+        with self._db() as db:
+            rows = db.execute("""SELECT s.slice_id FROM turn_slices s
+                LEFT JOIN slice_embeddings e ON s.slice_id=e.slice_id AND e.space=?
+                WHERE e.slice_id IS NULL OR e.state!='ready'
+                   OR e.content_hash!=s.content_hash
+                ORDER BY s.saved_at, s.slice_id LIMIT ?""", (space, limit)).fetchall()
+        return [self.get(row["slice_id"]) for row in rows]
+
+    def save_embedding(self, source: dict, space: str, vector: list[float] | None,
+                       error_code: str | None = None) -> bool:
+        """Commit only if the original slice has not changed during the request."""
+        with self._db() as db:
+            current = db.execute("SELECT content_hash FROM turn_slices WHERE slice_id=?",
+                                 (source["slice_id"],)).fetchone()
+            if current is None or current[0] != source["content_hash"]:
+                return False
+            db.execute("""INSERT INTO slice_embeddings VALUES (?,?,?,?,?,?,?,?)
+                ON CONFLICT(slice_id,space) DO UPDATE SET
+                    content_hash=excluded.content_hash, state=excluded.state,
+                    dimensions=excluded.dimensions, vector_json=excluded.vector_json,
+                    error_code=excluded.error_code, updated_at=excluded.updated_at""",
+                (source["slice_id"], space, source["content_hash"],
+                 "failed" if error_code else "ready",
+                 len(vector) if vector is not None else None,
+                 json.dumps(vector, allow_nan=False) if vector is not None else None,
+                 error_code, datetime.now(timezone.utc).isoformat()))
+        return True
+
+    def embedding(self, slice_id: str, space: str) -> dict | None:
+        if not self.path.exists():
+            return None
+        with self._db() as db:
+            row = db.execute("""SELECT e.* FROM slice_embeddings e
+                JOIN turn_slices s ON e.slice_id=s.slice_id AND e.content_hash=s.content_hash
+                WHERE e.slice_id=? AND e.space=? AND e.state='ready'""",
+                (slice_id, space)).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["vector"] = json.loads(result.pop("vector_json"))
         return result
 
 

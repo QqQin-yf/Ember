@@ -14,4 +14,18 @@ python -B scripts/save_turn_slice.py --data-dir data --session-id <会话编号>
 
 同一对来源编号重复保存不会增加切片；重新拉取发现内容改变时更新同一份检索副本；不同实例、会话、重新生成的回复编号分别存储。失败不写不完整切片。CLI 会重新打开数据库核验保存结果，只输出状态、编号和长度，不打印正文或凭据。
 
-这是按需保存入口，尚未接到每轮自动推送、历史全量回填、编辑/删除自动同步、向量化或召回；也不创建 Event、不判断经历边界。这里只落实一轮切片的保存规则，后续完整索引协议和数据模型继续按讨论定稿。
+这是按需保存入口，尚未接到每轮自动推送、历史全量回填、编辑/删除自动同步或召回；也不创建 Event、不判断经历边界。这里只落实一轮切片的保存规则，后续完整索引协议和数据模型继续按讨论定稿。
+
+## 切片向量化
+
+在 `config/slice-embedding.local.json` 的 `api_key` 中填入硅基流动 key。这个文件由 `config/.gitignore` 排除，不进入 GitHub；可提交的空白模板是 `config/slice-embedding.example.json`。切片使用自己的配置，不影响原有 Event/Cue/Direction 的模型或向量。
+
+```powershell
+python -B scripts/embed_turn_slices.py --data-dir data
+```
+
+默认模型为 `Qwen/Qwen3-VL-Embedding-8B`，接口为 `https://api.siliconflow.cn/v1/embeddings`，按[硅基流动官方接口文档](https://api-docs.siliconflow.cn/docs/api/embeddings-post)发送单个文本字符串。一轮完整切片（含 user/assistant 角色分隔）生成一个向量，不把人和 AI 分开生成，不摘要、不截断；系统侧已在保存切片时排除。使用模型默认维度，记录实际返回的维度。
+
+向量保存到同一个 `turn_slices.sqlite3` 的 `slice_embeddings` 表，记录来源内容指纹、提供方、模型、输入格式、维度、向量和状态。原文保存成功不依赖向量成功。已有且内容未变的向量跳过；失败或源切片改变的，下次运行补算；模型或提供方改变时分开保存，不混用。请求期间原文改变时，不落入过期向量。
+
+每次最多处理 100 片，可用 `--limit` 修改；失败记录固定错误码，不保存服务端错误正文或凭据。每片单独请求，下一次运行重试失败项；没有后台自动任务。没有加无信息量判定或召回门槛；这里的向量就绪不等于允许召回。当前仅本地和 GitHub 开发，不部署 VPS。
