@@ -54,6 +54,7 @@ from ember.instances import InstanceRegistry, parse_instances, resolve_root
 from ember.tool_validation import validate_tool_input
 from ember.slice_pipeline import SlicePipeline, IngestionJobs, complete_turn, complete_run
 from ember.slice_recall import SliceRecall
+from ember.slice_maintenance import SliceMaintenanceWorker
 from ember.writer import (PIN_TOOL_NAME, UNPIN_TOOL_NAME,
                           READ_SOURCE_TOOL_NAME, REVISE_TOOL_NAME,
                           SEARCH_TOOL_NAME, TOOL_NAME,
@@ -211,11 +212,15 @@ async def _lifespan(app):
         pipeline = SlicePipeline(REGISTRY)
         app.state.slice_pipeline = pipeline
         ingestion = asyncio.create_task(pipeline.run())
+        maintenance = SliceMaintenanceWorker(REGISTRY)
+        app.state.slice_maintenance = maintenance
+        maintaining = asyncio.create_task(maintenance.run())
         try:
             yield
         finally:
             pipeline.stop_event.set()
-            await ingestion
+            maintenance.stop_event.set()
+            await asyncio.gather(ingestion, maintaining)
             cleanup.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await cleanup

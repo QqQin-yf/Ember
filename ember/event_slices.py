@@ -35,7 +35,12 @@ class EventSliceLinks:
                 instance TEXT NOT NULL, event_id TEXT NOT NULL, version_id TEXT NOT NULL,
                 slice_id TEXT NOT NULL, turn INTEGER NOT NULL,
                 span_start INTEGER NOT NULL, span_end INTEGER NOT NULL, source_hash TEXT NOT NULL,
-                PRIMARY KEY(instance,event_id,version_id,slice_id,turn));''')
+                PRIMARY KEY(instance,event_id,version_id,slice_id,turn));
+                CREATE TABLE IF NOT EXISTS event_slice_additions (
+                addition_id TEXT PRIMARY KEY, instance TEXT NOT NULL,event_id TEXT NOT NULL,
+                version_id TEXT NOT NULL,event_hash TEXT NOT NULL,slice_id TEXT NOT NULL,
+                content_hash TEXT NOT NULL,turn INTEGER NOT NULL,new_event_id TEXT NOT NULL,
+                new_event_hash TEXT NOT NULL,evidence_json TEXT NOT NULL,job_id TEXT NOT NULL);''')
             yield db
 
     @staticmethod
@@ -130,6 +135,22 @@ class EventSliceLinks:
             item['summary'] = json.loads(item.pop('reference_json')).get('summary', '')
             item['membership_kind'] = 'span'
             result.append(item)
+        # Explicit non-span additions are separate from interval ownership.
+        with self.db() as db:
+            additions = [dict(r) for r in db.execute('''SELECT a.* FROM event_slice_additions a
+                JOIN turn_slices t ON a.slice_id=t.slice_id AND a.instance=t.instance
+                    AND a.content_hash=t.content_hash WHERE a.instance=?''', (instance,))]
+        if additions:
+            from .maintenance_materials import events, event_document
+            library = events(self.store.path.parent)
+            for row in additions:
+                target, new = library.get(row['event_id']), library.get(row['new_event_id'])
+                if (target and new and str(target.get('version_id')) == row['version_id'] and
+                        fingerprint(event_document(target)) == row['event_hash'] and
+                        fingerprint(event_document(new)) == row['new_event_hash']):
+                    result.append({'instance': instance, 'event_id': row['event_id'], 'version_id': row['version_id'],
+                        'slice_id': row['slice_id'], 'turn': row['turn'], 'span_start': None, 'span_end': None,
+                        'source_hash': row['addition_id'], 'summary': target.get('summary',''), 'membership_kind': 'added_source'})
         return result
 
     def for_slice(self, slice_id, instance='default'):

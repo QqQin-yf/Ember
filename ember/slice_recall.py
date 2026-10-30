@@ -84,6 +84,12 @@ class SliceRecall:
                 memberships = {}
                 for membership in EventSliceLinks(self.root).all(self.instance):
                     memberships.setdefault(membership['slice_id'], []).append(membership)
+                from .slice_maintenance import MaintenanceQueue
+                relations = {}
+                for relation in MaintenanceQueue(self.root).relations(self.instance):
+                    relations.setdefault(relation['old_slice_id'], []).append(relation)
+                    if relation['new_slice_id']:
+                        relations.setdefault(relation['new_slice_id'], []).append(relation)
                 qnorm = math.hypot(*query_vector)
                 if not qnorm or not math.isfinite(qnorm):
                     raise SliceEmbeddingError('embedding_response_invalid')
@@ -115,7 +121,9 @@ class SliceRecall:
                         'assistant_message_id': row['assistant_message_id'],
                         'content_hash': row['content_hash'], 'score': max(-1., min(1., score)),
                         'hit_entry': 'raw_slice_vector', 'direct': True,
-                        'span_memberships': memberships.get(row['slice_id'], [])})
+                        'span_memberships': [m for m in memberships.get(row['slice_id'], []) if m['membership_kind']=='span'],
+                        'maintenance_relations': relations.get(row['slice_id'], []),
+                        'source_memberships': [m for m in memberships.get(row['slice_id'], []) if m['membership_kind']=='added_source']})
                 ranked.sort(key=lambda r: (-r['score'], r['slice_id']))
                 for index, item in enumerate(ranked, 1):
                     item['rank'] = index

@@ -1,0 +1,7 @@
+{
+  "base_url": "",
+  "model": "",
+  "api_key": "",
+  "timeout_seconds": 30,
+  "batch_size": 16
+}

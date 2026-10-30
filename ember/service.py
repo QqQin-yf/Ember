@@ -881,6 +881,11 @@ class EmberService:
             sync_from_files(self.store.root, self.source_instance)
         except Exception:
             pass  # Derived span membership can be rebuilt independently.
+        try:
+            from .slice_maintenance import enqueue_event_maintenance
+            enqueue_event_maintenance(self, event)
+        except Exception:
+            pass  # Independent worker discovers unqueued committed Events after recovery.
         return result
 
     def _handle_memory_tool_call(self, session: Session, turn: int,
