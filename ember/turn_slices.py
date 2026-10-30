@@ -102,7 +102,14 @@ class TurnSliceStore:
                    OR turn_slices.user_is_system != excluded.user_is_system""",
                 (slice_id, instance, session_id, key[2], key[3], int(omitted),
                  body, content_hash, now))
-        return self.get(slice_id)
+        saved = self.get(slice_id)
+        try:
+            from .event_slices import EventSliceLinks, sync_from_files
+            sync_from_files(self.path.parent, instance)
+            EventSliceLinks(self.path.parent).reconcile_slice(saved)
+        except (OSError, sqlite3.Error, ValueError):
+            pass  # Derived memberships can be rebuilt; keep the durable original.
+        return saved
 
     def get(self, slice_id: str) -> dict | None:
         if not self.path.exists():

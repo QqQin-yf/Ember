@@ -80,6 +80,10 @@ class SliceRecall:
             else:
                 # Exactly one fresh embedding for this whole input; no old Cue/Direction calls.
                 query_vector = SliceEmbeddingClient(config).embed(text)
+                from .event_slices import EventSliceLinks
+                memberships = {}
+                for membership in EventSliceLinks(self.root).all(self.instance):
+                    memberships.setdefault(membership['slice_id'], []).append(membership)
                 qnorm = math.hypot(*query_vector)
                 if not qnorm or not math.isfinite(qnorm):
                     raise SliceEmbeddingError('embedding_response_invalid')
@@ -110,7 +114,8 @@ class SliceRecall:
                         'session_id': row['session_id'], 'user_message_id': row['user_message_id'],
                         'assistant_message_id': row['assistant_message_id'],
                         'content_hash': row['content_hash'], 'score': max(-1., min(1., score)),
-                        'hit_entry': 'raw_slice_vector', 'direct': True})
+                        'hit_entry': 'raw_slice_vector', 'direct': True,
+                        'span_memberships': memberships.get(row['slice_id'], [])})
                 ranked.sort(key=lambda r: (-r['score'], r['slice_id']))
                 for index, item in enumerate(ranked, 1):
                     item['rank'] = index

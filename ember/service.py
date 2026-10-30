@@ -876,6 +876,11 @@ class EmberService:
             result["dropped_quotes"] = dropped
         # 待配对队列（2026-10-14 设计稿 v2）：写入成功即记，挂关系出队消费
         self.link_pending_add(event.event_id)
+        try:
+            from .event_slices import sync_from_files
+            sync_from_files(self.store.root, self.source_instance)
+        except Exception:
+            pass  # Derived span membership can be rebuilt independently.
         return result
 
     def _handle_memory_tool_call(self, session: Session, turn: int,
@@ -1893,6 +1898,8 @@ class EmberService:
     def _recover_source_completions(self) -> None:
         try:
             self.source_completions.reconcile()
+            from .event_slices import sync_from_files
+            sync_from_files(self.store.root, self.source_instance)
         except Exception:
             # The accepted terminal receipt is the durable recovery journal.
             # Queries retry reconciliation and return pending while unavailable.
