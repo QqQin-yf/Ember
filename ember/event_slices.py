@@ -151,6 +151,25 @@ class EventSliceLinks:
                     result.append({'instance': instance, 'event_id': row['event_id'], 'version_id': row['version_id'],
                         'slice_id': row['slice_id'], 'turn': row['turn'], 'span_start': None, 'span_end': None,
                         'source_hash': row['addition_id'], 'summary': target.get('summary',''), 'membership_kind': 'added_source'})
+        from .knowledge import KnowledgeStore
+        knowledge = KnowledgeStore(self.store.path.parent, instance)
+        if knowledge.path.exists():
+            from .maintenance_materials import events
+            library = events(self.store.path.parent)
+            with knowledge.db() as db:
+                explicit = [dict(r) for r in db.execute('SELECT * FROM slice_memory_sources WHERE instance=?',(instance,))]
+            for row in explicit:
+                event = library.get(row['memory_id'])
+                if event is None:
+                    continue
+                try:
+                    sources = knowledge.read_sources(json.loads(row['sources_json']))
+                except ValueError:
+                    continue
+                for source in sources:
+                    result.append({'instance':instance,'event_id':event['event_id'],'version_id':str(event['version_id']),
+                        'slice_id':source['slice_id'],'turn':None,'span_start':None,'span_end':None,
+                        'source_hash':source['content_hash'],'summary':event.get('summary',''),'membership_kind':'explicit_source'})
         return result
 
     def for_slice(self, slice_id, instance='default'):

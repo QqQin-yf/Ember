@@ -55,6 +55,8 @@ from ember.tool_validation import validate_tool_input
 from ember.slice_pipeline import SlicePipeline, IngestionJobs, complete_turn, complete_run
 from ember.slice_recall import SliceRecall
 from ember.slice_maintenance import SliceMaintenanceWorker
+from ember.pool_maintenance import PoolMaintenanceWorker, KnowledgeEmbeddingWorker
+from ember.knowledge_tools import tool_specs as knowledge_tool_specs
 from ember.writer import (PIN_TOOL_NAME, UNPIN_TOOL_NAME,
                           READ_SOURCE_TOOL_NAME, REVISE_TOOL_NAME,
                           SEARCH_TOOL_NAME, TOOL_NAME,
@@ -132,7 +134,7 @@ async def _list_tools() -> list[types.Tool]:
     # 工具清单全实例同源（纯函数构建，不触任何实例的数据）；
     # 组成必须与 EmberService.sidecar_tool_specs 保持一致
     specs = (build_tools_spec() + [build_revise_tool_spec()[0]]
-             + build_search_tool_spec() + build_pin_tool_specs())
+             + build_search_tool_spec() + build_pin_tool_specs() + knowledge_tool_specs())
     out: list[types.Tool] = []
     for spec in specs:
         fn = spec["function"]
@@ -215,12 +217,20 @@ async def _lifespan(app):
         maintenance = SliceMaintenanceWorker(REGISTRY)
         app.state.slice_maintenance = maintenance
         maintaining = asyncio.create_task(maintenance.run())
+        pool_worker = PoolMaintenanceWorker(REGISTRY)
+        knowledge_worker = KnowledgeEmbeddingWorker(REGISTRY)
+        app.state.pool_maintenance = pool_worker
+        app.state.knowledge_embedding = knowledge_worker
+        pooling = asyncio.create_task(pool_worker.run())
+        embedding_knowledge = asyncio.create_task(knowledge_worker.run())
         try:
             yield
         finally:
             pipeline.stop_event.set()
             maintenance.stop_event.set()
-            await asyncio.gather(ingestion, maintaining)
+            pool_worker.stop_event.set()
+            knowledge_worker.stop_event.set()
+            await asyncio.gather(ingestion, maintaining, pooling, embedding_knowledge)
             cleanup.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await cleanup

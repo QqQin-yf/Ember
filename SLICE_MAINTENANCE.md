@@ -31,4 +31,4 @@
 
 `MaintenanceQueue(root).statuses()` 可检查任务状态，`relations(instance)` 返回当前仍有效的联系。新 worker 使用原有 Event 写入接口，无需 App 新增维护调用。
 
-本次仅完成本地后台实现与模拟验证；真实第三方判断需配置模型后再验证。旧链路与切片链路的合流、reranker 和最终呈现属于另外的工作，不由本维护 worker 处理。
+此 Event 写入后的维护与每轮候选池归类独立运行。每轮归类、App AI 提炼、认知/规律及混合召回见 `KNOWLEDGE_RECALL.md`。GLM-4.7 已通过隔离样例的真实调用验证；没有批量维护真实记忆，也没有部署 VPS。

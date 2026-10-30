@@ -57,7 +57,8 @@ class StructureRunTests(unittest.TestCase):
         with mock.patch("ember.executors.call_llm") as m, \
                 mock.patch("ember.service.embed_text",
                            return_value=[0.1, 0.2, 0.3]), \
-                mock.patch("ember.source_client.SOURCE_URL", ""):
+                mock.patch("ember.source_client.SOURCE_URL", ""), \
+                mock.patch.object(self.svc, "run_observe_pass", side_effect=AssertionError("retired observation writer")):
             out = self.svc.run_structure_maintenance()
         m.assert_not_called()   # 归属判定/summary 重算已退役
         self.assertEqual(set(out), {"cue_tighten", "vector_backfill",
@@ -66,7 +67,7 @@ class StructureRunTests(unittest.TestCase):
         self.assertNotIn("summary", out)
         self.assertGreaterEqual(out["cue_tighten"]["checked_events"], 3)
         self.assertEqual(out["vector_backfill"]["events"], 3)
-        self.assertEqual(out["observe"]["status"], "unconfigured")
+        self.assertEqual(out["observe"]["status"], "retired")
 
     def test_rerun_idempotent(self) -> None:
         """幂等：向量补建只补一次，收紧照跑。"""

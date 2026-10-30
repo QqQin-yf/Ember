@@ -615,19 +615,20 @@ class EmberService:
                             context_start_id: int | None = None,
                             deferred_entries: list[dict] | None = None
                             ) -> dict[str, Any]:
-        """Automatic recall uses raw slices only; selection remains diagnostic."""
-        from .slice_recall import automatic_slice_recall
-        return automatic_slice_recall(self, session, turn, user_text, context_start_id)
+        """Retain Event/Entity recall; raw-slice retrieval is an independent branch."""
+        from .hybrid_recall import automatic_hybrid_recall
+        return automatic_hybrid_recall(self, session, turn, user_text, context_start_id, deferred_entries)
 
     def legacy_event_recall_pipeline(self, session: Session, turn: int,
                             user_text: str,
                             context_start_id: int | None = None,
-                            deferred_entries: list[dict] | None = None
+                            deferred_entries: list[dict] | None = None,
+                            allow_observe: bool = True
                             ) -> dict[str, Any]:
-        """历史 Event 召回（不用于自动轮前）：Cue/Entity 双路 → Sleep 过滤 → 窗口过滤
+        """保留的 Event 召回：Cue/Entity 双路 → Sleep 过滤 → 窗口过滤
         → Relation 展开 → 召回记账 → 前缀块构建。
 
-        仅供显式历史检索和协议回归；普通轮前 hook 不再调用此路。
+        普通轮前与显式历史检索共用此路；混合召回关闭观察附加席。
         记账失败不阻断（旁路只观察）。返回：
         {prefix, recalled_count, entity_recalled, entity_names,
          filtered_by_sleep, filtered_by_window, resolved_brought,
@@ -749,8 +750,8 @@ class EmberService:
 
         # ---- 观察附加席（2026-10-16 ④observe）：不占 3 席，输入向量
         # × 观察层 core 向量宽松命中至多 1 条——「一旦被召回才谈印证」
-        observe_extra = self._observe_extra_hit(
-            user_text, set(recalled_ctx.recalled_events))
+        observe_extra = (self._observe_extra_hit(
+            user_text, set(recalled_ctx.recalled_events)) if allow_observe else None)
         units_for_prefix = selected_units
         if observe_extra:
             recalled_ctx.recalled_events.append(observe_extra)
@@ -966,6 +967,10 @@ class EmberService:
         historical parent path. Missing identities, versions or provider support
         return not_archived. No current-session or neighbouring-turn fallback.
         """
+        from .knowledge_tools import read_memory
+        explicit = read_memory(self, event_id)
+        if explicit is not None:
+            return explicit
         import re
         eid = (event_id or "").strip()
         resolved = self._resolve_event_id(eid) if eid else None
@@ -1314,6 +1319,10 @@ class EmberService:
             refs[eid] = event_reference(event, kind, self.event_sources,
                                         self.turn_spans.span_of(eid))
             refs[eid] = self.source_completions.enrich(refs[eid])
+            from .knowledge import KnowledgeStore
+            explicit_sources = KnowledgeStore(self.store.root,self.source_instance).event_sources(eid)
+            if explicit_sources is not None:
+                refs[eid]['source_slices'] = explicit_sources
         return list(refs.values())
 
     # 召回内联【当时对话】的单条上限（三席合计 ~3600 字，baseline 可调）
@@ -2020,7 +2029,8 @@ class EmberService:
                 result = self._dispatch_memory_tool(name, arguments,
                     context=ctx, recall_id=rid, tool_call_id=cid)
                 # A read transcript stays volatile, never in the durable receipt.
-                volatile = name == READ_SOURCE_TOOL_NAME
+                from .knowledge_tools import VOLATILE_TOOLS
+                volatile = name == READ_SOURCE_TOOL_NAME or name in VOLATILE_TOOLS
                 self.generations.complete_call(rid, cid, result, volatile=volatile)
                 if volatile:
                     self._volatile_tool_results[(rid, cid)] = copy.deepcopy(result)
@@ -2038,6 +2048,9 @@ class EmberService:
                               context: dict | None = None,
                               recall_id: str | None = None,
                               tool_call_id: str | None = None) -> dict:
+        from .knowledge_tools import TOOL_NAMES, dispatch
+        if name in TOOL_NAMES:
+            return dispatch(self, name, arguments, context)
         if name == TOOL_NAME:
             if context is not None:
                 return self._create_memory_in_context(context["session"], context["turn"],
@@ -2144,8 +2157,10 @@ class EmberService:
 
     def sidecar_tool_specs(self) -> list[dict[str, Any]]:
         """MCP tools/list 工具清单（含修正、检索与钉住）。"""
+        from .knowledge_tools import tool_specs
         return (build_tools_spec() + [build_revise_tool_spec()[0]]
-                + build_search_tool_spec() + build_pin_tool_specs())
+                + build_search_tool_spec() + build_pin_tool_specs()
+                + tool_specs())
 
     def sidecar_create_memory_event(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """MCP 工具 create_memory_event 执行体：进行中的一轮 + 参数 → 落库。
@@ -3521,16 +3536,19 @@ class EmberService:
                             "dropped": dropped}}
         with open(self._briefing_path(), "w", encoding="utf-8") as f:
             json.dump(report, f, ensure_ascii=False)
-        return report
+        from .knowledge_tools import append_briefing
+        return append_briefing(self, report)
 
     def sidecar_briefing_get(self) -> dict[str, Any]:
         """取当前简报（断线重进/新会话开场；无则如实 empty）。"""
         p = self._briefing_path()
         if not os.path.exists(p):
-            return {"status": "empty"}
+            from .knowledge_tools import append_briefing
+            return append_briefing(self, {"status": "empty"})
         try:
             with open(p, encoding="utf-8") as f:
-                return json.load(f)
+                from .knowledge_tools import append_briefing
+                return append_briefing(self, json.load(f))
         except (json.JSONDecodeError, OSError):
             return {"status": "empty"}
 
@@ -3557,8 +3575,7 @@ class EmberService:
                 "was_pinned": removed}
 
     def run_structure_maintenance(self) -> dict[str, Any]:
-        """睡眠收尾维护（2026-10-17 重构）：cue 收紧 + 向量补建
-        + 观察提炼与合并。
+        """睡眠收尾维护：cue 收紧 + 向量补建；观察条目已退役。
 
         归属判定（extract/attach + entity summary 当场写改）已全部
         收编窗口判联（momo：散事主题延续时召回自举，glm 全库扫兜底
@@ -3571,10 +3588,10 @@ class EmberService:
             self.store, self.recall_ledger,
             self.store._path(EVENTS_FILE),  # noqa: SLF001
             self.entity_store).tighten()
-        # 观察式记忆（2026-10-16 ④observe）：提炼在前、合并在后
-        # （合并要比对刚落库观察的向量）
-        report["observe"] = self.run_observe_pass()
-        report["observe_merge"] = self._merge_observations()
+        # Pool grouping now feeds App-authored knowledge. Keep response keys
+        # for callers, but never create or merge retired observation entries.
+        report["observe"] = {"status": "retired"}
+        report["observe_merge"] = {"status": "retired"}
         return report
 
     def _backfill_vectors(self) -> dict[str, Any]:

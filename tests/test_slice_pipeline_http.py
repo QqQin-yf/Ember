@@ -55,11 +55,13 @@ class PipelineHTTPTests(unittest.TestCase):
         self.config = SliceEmbeddingConfig('synthetic-secret', base_url=base + '/v1', timeout_seconds=5)
         self.provider.model = self.config.model
         import sidecar
+        from ember.slice_reranker import RerankerConfig
         self.sidecar = sidecar
         for patcher in (patch.object(sidecar, 'REGISTRY', self.registry), patch.object(sidecar, 'TOKEN', ''),
                         patch.object(sidecar, 'session_manager', sidecar.StreamableHTTPSessionManager(
                             app=sidecar.mcp_server, json_response=False, stateless=True)),
                         patch.object(SliceEmbeddingConfig, 'load', return_value=self.config),
+                        patch('ember.slice_presentation.RerankerConfig.load',return_value=RerankerConfig()),
                         patch.multiple(source_client, SOURCE_URL=base, SOURCE_TOKEN='synthetic-source-token')):
             patcher.start()
             self.addCleanup(patcher.stop)

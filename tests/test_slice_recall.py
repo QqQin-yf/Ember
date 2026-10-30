@@ -23,6 +23,10 @@ class SliceRecallTests(unittest.TestCase):
         self.addCleanup(patcher.stop)
         self.store = TurnSliceStore(self.tmp.name)
         self.recall = SliceRecall(self.tmp.name)
+        from ember.slice_reranker import RerankerConfig
+        reranker = patch('ember.slice_presentation.RerankerConfig.load',return_value=RerankerConfig())
+        reranker.start()
+        self.addCleanup(reranker.stop)
 
     def add(self, seq, vector, session='old', instance='default'):
         source = self.store.save(session, [
@@ -137,26 +141,26 @@ class SliceRecallTests(unittest.TestCase):
         self.assertEqual(trace['error_code'], 'embedding_http_429')
         self.assertEqual(trace['rankings'], [])
 
-    def test_automatic_hook_retires_all_old_routes_and_freezes_diagnostic_on_retry(self):
+    def test_automatic_hook_retains_old_route_and_freezes_both_branches_on_retry(self):
         self.add(1, [1., 0.])
         svc = EmberService(EmberStore(self.tmp.name), MockLLMClient())
         svc.store.write_event(Event(event_id='old', version_id='v', source_ref='x', raw_ref='x',
             event_time='2026-01-01', ingest_time='2026-01-01', summary='beacon', core='old body'))
         svc.store.write_route(RecallRoute(route_id='cue', event_id='old', matcher='lexical',
                                          cue_type='lexical', cue='beacon'))
-        with patch('ember.service.DirectRecall', side_effect=AssertionError('retired automatic route')), \
-                patch('ember.service.EntityRecall', side_effect=AssertionError('retired automatic route')), \
+        with patch.object(svc, 'legacy_event_recall_pipeline', wraps=svc.legacy_event_recall_pipeline) as legacy, \
                 patch.object(svc, '_observe_extra_hit', side_effect=AssertionError('retired automatic route')), \
                 patch.object(SliceEmbeddingClient, 'embed', return_value=[1., 0.]) as embed:
             first = svc.hook_turn_start('s', 'beacon', user_message_id=100, recall_id='rid')
             retry = svc.hook_turn_start('s', 'beacon', user_message_id=100, recall_id='rid')
         self.assertEqual(first, retry)
         self.assertEqual(embed.call_count, 1)
-        self.assertFalse(first['injected'])
-        self.assertIsNone(first['injected_text'])
-        self.assertEqual(first['recall_refs']['events'], [])
+        legacy.assert_called_once()
+        self.assertTrue(first['injected'])
+        self.assertIn('old body', first['injected_text'])
+        self.assertEqual(first['recall_refs']['events'][0]['event_id'], 'old')
         self.assertEqual(first['slice_recall']['ranked_count'], 1)
-        self.assertEqual(svc.recall_ledger.event_recall_count, {})
+        self.assertIn('old', svc.recall_ledger.event_recall_count)
         snapshot = svc.sidecar_recall_snapshot('rid')['snapshot']
         self.assertEqual(snapshot['slice_recall'], first['slice_recall'])
 

@@ -1,7 +1,7 @@
 """Raw-slice automatic recall: fresh query embeddings and complete diagnostic ranks.
 
 Candidates require cosine similarity >= 0.6. Complete rankings and the candidate
-pool are durable; final presentation rules have not been chosen.
+pool are durable. The hybrid caller adds reranking and source ownership presentation.
 """
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -45,11 +45,12 @@ class SliceRecall:
         finally:
             db.close()
 
-    def match(self, text, session_id=None, turn=None, anchor_message_id=None, context_start_id=None):
+    def match(self, text, session_id=None, turn=None, anchor_message_id=None, context_start_id=None, purpose='preview'):
         if not isinstance(text, str) or not text.strip():
             raise ValueError('A nonempty input is required')
         trace_id = uuid.uuid4().hex
         metadata = {'trace_id': trace_id, 'instance': self.instance,
+            'purpose': purpose,
             'session_id': session_id, 'turn': turn,
             'input_hash': hashlib.sha256(text.encode()).hexdigest(),
             'anchor_message_id': message_seq(anchor_message_id),
@@ -75,7 +76,10 @@ class SliceRecall:
                         ON s.slice_id=e.slice_id AND s.content_hash=e.content_hash
                         WHERE s.instance=? AND e.space=? AND e.state='ready'
                         ORDER BY s.slice_id''', (self.instance, config.space)).fetchall()
-            if not rows:
+            from .knowledge import KnowledgeStore, knowledge_space
+            knowledge_ready = any(not r['pinned'] and r['vector'] and r['space']==knowledge_space(config)
+                                  for r in KnowledgeStore(self.root,self.instance).all())
+            if not rows and not knowledge_ready:
                 metadata['status'] = 'no_vectors'
             else:
                 # Exactly one fresh embedding for this whole input; no old Cue/Direction calls.
@@ -123,7 +127,7 @@ class SliceRecall:
                         'hit_entry': 'raw_slice_vector', 'direct': True,
                         'span_memberships': [m for m in memberships.get(row['slice_id'], []) if m['membership_kind']=='span'],
                         'maintenance_relations': relations.get(row['slice_id'], []),
-                        'source_memberships': [m for m in memberships.get(row['slice_id'], []) if m['membership_kind']=='added_source']})
+                        'source_memberships': [m for m in memberships.get(row['slice_id'], []) if m['membership_kind']!='span']})
                 ranked.sort(key=lambda r: (-r['score'], r['slice_id']))
                 for index, item in enumerate(ranked, 1):
                     item['rank'] = index
@@ -139,6 +143,12 @@ class SliceRecall:
                 (trace_id, self.instance, json.dumps(metadata, ensure_ascii=False),
                  json.dumps(query_vector, allow_nan=False) if query_vector is not None else None,
                  json.dumps(ranked, allow_nan=False), datetime.now(timezone.utc).isoformat()))
+        if purpose == 'automatic':
+            try:
+                from .pool_maintenance import PoolQueue
+                PoolQueue(self.root).enqueue(metadata)
+            except (OSError, sqlite3.Error):
+                pass  # Worker discovers the durable pool after recovery.
         # Hook responses stay compact; full candidate identities are available in the trace.
         return {key: value for key, value in metadata.items() if key != 'candidate_pool'}
 
@@ -170,7 +180,7 @@ def automatic_slice_recall(service, session, turn, text, context_start_id=None):
         matched = SliceRecall(service.store.root, service.source_instance).match(text,
             session_id=session.session_id, turn=turn,
             anchor_message_id=service.turn_ledger.user_msg.get((session.session_id, turn)),
-            context_start_id=context_start_id)
+            context_start_id=context_start_id, purpose='automatic')
     except (OSError, sqlite3.Error, ValueError):
         matched = {'status': 'unavailable', 'error_code': 'slice_recall_storage_unavailable',
                    'ranked_count': 0, 'candidate_threshold': CANDIDATE_MIN_SCORE,
