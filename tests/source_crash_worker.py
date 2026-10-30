@@ -4,7 +4,7 @@ import sys
 import time
 from pathlib import Path
 from unittest.mock import patch
-from ember.service import EmberService
+from tests.legacy_event_fixture import LegacyEventService as EmberService
 from ember.store import EmberStore
 from ember.llm import MockLLMClient
 from tests.test_generations import TEXT

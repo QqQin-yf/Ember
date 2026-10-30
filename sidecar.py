@@ -53,6 +53,7 @@ load_env(os.path.dirname(os.path.abspath(__file__)))
 from ember.instances import InstanceRegistry, parse_instances, resolve_root
 from ember.tool_validation import validate_tool_input
 from ember.slice_pipeline import SlicePipeline, IngestionJobs, complete_turn, complete_run
+from ember.slice_recall import SliceRecall
 from ember.writer import (PIN_TOOL_NAME, UNPIN_TOOL_NAME,
                           READ_SOURCE_TOOL_NAME, REVISE_TOOL_NAME,
                           SEARCH_TOOL_NAME, TOOL_NAME,
@@ -373,6 +374,31 @@ async def _slice_ingestion_status(request: Request) -> JSONResponse:
     return JSONResponse(result)
 
 
+async def _slice_recall_preview(request: Request) -> JSONResponse:
+    svc = _service_or_404(request)
+    if isinstance(svc, JSONResponse):
+        return svc
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    if not isinstance(body, dict) or not isinstance(body.get("input"), str) or not body["input"].strip():
+        return JSONResponse({"code": "invalid_arguments", "error": "input must be nonempty text"}, status_code=400)
+    recall = SliceRecall(svc.store.root, svc.source_instance)
+    result = await asyncio.to_thread(recall.match, body["input"])
+    return JSONResponse(result)
+
+
+async def _slice_recall_trace(request: Request) -> JSONResponse:
+    svc = _service_or_404(request)
+    if isinstance(svc, JSONResponse):
+        return svc
+    result = await asyncio.to_thread(SliceRecall(svc.store.root, svc.source_instance).trace,
+        request.path_params["trace_id"], request.query_params.get("view") == "sources")
+    return JSONResponse(result if result is not None else {"code": "slice_recall_not_found"},
+                        status_code=200 if result is not None else 404)
+
+
 # ---------- 挂关系（2026-10-14 设计稿 v2：借窗口跑，app 编排） ----------
 
 async def _sleep_link_batches(request: Request) -> JSONResponse:
@@ -514,6 +540,8 @@ app = BearerAuthMiddleware(Starlette(
         Route("/ember/hooks/turn_start", _hook_turn_start, methods=["POST"]),
         Route("/ember/hooks/turn_end", _hook_turn_end, methods=["POST"]),
         Route("/ember/slices/jobs/{job_id}", _slice_ingestion_status, methods=["GET"]),
+        Route("/ember/recall/slices/preview", _slice_recall_preview, methods=["POST"]),
+        Route("/ember/recall/slices/{trace_id}", _slice_recall_trace, methods=["GET"]),
         Route("/ember/sleep/link/batches", _sleep_link_batches,
               methods=["GET"]),
         Route("/ember/sleep/link/submit", _sleep_link_submit,

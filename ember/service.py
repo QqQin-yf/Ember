@@ -615,10 +615,19 @@ class EmberService:
                             context_start_id: int | None = None,
                             deferred_entries: list[dict] | None = None
                             ) -> dict[str, Any]:
-        """本地召回全流水线：Cue/Entity 双路 → Sleep 过滤 → 窗口过滤
+        """Automatic recall uses raw slices only; selection remains diagnostic."""
+        from .slice_recall import automatic_slice_recall
+        return automatic_slice_recall(self, session, turn, user_text, context_start_id)
+
+    def legacy_event_recall_pipeline(self, session: Session, turn: int,
+                            user_text: str,
+                            context_start_id: int | None = None,
+                            deferred_entries: list[dict] | None = None
+                            ) -> dict[str, Any]:
+        """历史 Event 召回（不用于自动轮前）：Cue/Entity 双路 → Sleep 过滤 → 窗口过滤
         → Relation 展开 → 召回记账 → 前缀块构建。
 
-        两条入口（chat_completion / hook_turn_start）共用同一实现。
+        仅供显式历史检索和协议回归；普通轮前 hook 不再调用此路。
         记账失败不阻断（旁路只观察）。返回：
         {prefix, recalled_count, entity_recalled, entity_names,
          filtered_by_sleep, filtered_by_window, resolved_brought,
@@ -1806,9 +1815,11 @@ class EmberService:
                         "events": rec["recall_refs"]["events"]}
                 out = {"injected": bool(rec["prefix"]), "injected_text": rec["prefix"] or None,
                        "session_id": sid, "turn": turn, "memory": stats, "recall_id": rid,
-                       "presentations": rec["presentations"], "recall_refs": refs}
+                       "presentations": rec["presentations"], "recall_refs": refs,
+                       "slice_recall": rec.get("slice_recall")}
                 metadata = {"session_id": sid, "turn": turn, "request_context": request_context,
-                            "presentations": rec["presentations"], "recall_refs": refs}
+                            "presentations": rec["presentations"], "recall_refs": refs,
+                            "slice_recall": rec.get("slice_recall")}
                 start_entry = {"ember_session": sid, "ember_turn": turn,
                                "user_message_id": int(seq), "recorded_at": _now_iso()}
                 if heart_turn_id:
@@ -2071,6 +2082,7 @@ class EmberService:
             "turn": turn,
             "memory": stats,
             "presentations": rec["presentations"],
+            "slice_recall": rec.get("slice_recall"),
             "recall_refs": {"session_id": session.session_id,
                             "anchor_message_id": message_seq(user_message_id),
                             "events": rec["recall_refs"]["events"]},

@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from ember.llm import MockLLMClient, LLMError
 from ember.recall import DirectRecall
-from ember.service import EmberService
+from tests.legacy_event_fixture import LegacyEventService as EmberService
 from ember.store import EmberStore
 
 PASS = 0

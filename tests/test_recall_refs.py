@@ -10,7 +10,7 @@ from ember.entity import Entity
 from ember.llm import MockLLMClient
 from ember.models import Event, PresentationContext, RecallRoute, RecallTrace
 from ember.recall import EntityHit
-from ember.service import EmberService
+from tests.legacy_event_fixture import LegacyEventService as EmberService
 from ember.source_refs import EventSourceStore, SOURCE_REFS_FILE, message_seq
 from ember.store import EmberStore
 from tests.test_sidecar import write_args

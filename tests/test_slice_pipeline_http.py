@@ -127,3 +127,26 @@ class PipelineHTTPTests(unittest.TestCase):
             result = client.post('/ember/hooks/turn_end', json={'user_is_system': 'false'})
             self.assertEqual(result.status_code, 400)
         self.assertFalse(self.provider.reads)
+
+    def test_raw_recall_preview_and_next_hook_use_slice_vector_without_injection(self):
+        self.provider.allow_embedding.set()
+        with TestClient(self.sidecar.app) as client:
+            job_id = self.finish_turn(client)
+            self.await_ready(client, job_id)
+            preview = client.post('/ember/recall/slices/preview', json={'input': 'fresh preview query'})
+            self.assertEqual(preview.status_code, 200, preview.text)
+            metadata = preview.json()
+            self.assertEqual(metadata['ranked_count'], 1)
+            self.assertFalse(metadata['injected'])
+            trace = client.get('/ember/recall/slices/' + metadata['trace_id'] + '?view=sources')
+            self.assertEqual(trace.status_code, 200)
+            self.assertEqual(trace.json()['rankings'][0]['messages'][0]['content'], 'original user')
+            self.assertEqual(client.get('/ember/recall/slices/' + metadata['trace_id'],
+                headers={'X-Heart-Instance': 'other'}).status_code, 404)
+            start = client.post('/ember/hooks/turn_start', json={
+                'session_id': 's', 'message': 'fresh hook query', 'user_message_id': 3, 'recall_id': 'next'})
+            self.assertEqual(start.status_code, 200, start.text)
+            self.assertEqual(start.json()['slice_recall']['ranked_count'], 1)
+            self.assertFalse(start.json()['injected'])
+            self.assertIsNone(start.json()['injected_text'])
+            self.assertEqual(self.provider.inputs[-1]['input'], 'fresh hook query')

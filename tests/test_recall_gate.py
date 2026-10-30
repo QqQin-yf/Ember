@@ -26,7 +26,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from ember.llm import MockLLMClient
 from ember.models import (Event, PresentationContext, RecallTrace, RouteHit)
 from ember.recall import EntityHit, EntityRecall
-from ember.service import EmberService, select_recall_units
+from ember.service import select_recall_units
+from tests.legacy_event_fixture import LegacyEventService as EmberService
 from ember.store import EmberStore
 from ember.direction import DirectionMatcher, DirectionVectorStore
 from ember.entity import Direction, Entity, EntityStore

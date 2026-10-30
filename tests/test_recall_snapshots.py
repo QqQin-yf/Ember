@@ -14,7 +14,7 @@ from ember.instances import InstanceRegistry
 from ember.llm import MockLLMClient
 from ember.models import Event, RecallRoute
 from ember.recall_ledger import RecallLedger
-from ember.service import EmberService
+from tests.legacy_event_fixture import LegacyEventService as EmberService
 from ember.store import EmberStore
 from ember.turn_ledger import TurnLedger
 

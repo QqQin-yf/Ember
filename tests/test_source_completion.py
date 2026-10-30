@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from ember.generations import SNAPSHOT_TTL_SECONDS
 from ember.llm import MockLLMClient
-from ember.service import EmberService
+from tests.legacy_event_fixture import LegacyEventService as EmberService
 from ember.store import EmberStore
 from tests.test_generations import TEXT
 from tests.test_sidecar import write_args
