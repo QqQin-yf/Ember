@@ -19,15 +19,15 @@
 
 ```json
 {
-  "base_url": "https://服务商地址/v1",
-  "model": "生成模型名称",
+  "base_url": "https://open.bigmodel.cn/api/paas/v4",
+  "model": "glm-4.7",
   "api_key": "独立填写",
-  "timeout_seconds": 30,
+  "timeout_seconds": 90,
   "batch_size": 16
 }
 ```
 
-当前客户端采用 OpenAI 兼容的 `/chat/completions` 协议。没有默认服务商或模型，不借用前端对话模型或向量模型的配置。配置缺失时进入 `waiting_config`，不会发模型请求。也可通过 `EMBER_SLICE_MAINTENANCE_CONFIG` 指定配置路径。
+当前选择智谱 `glm-4.7`，客户端采用 OpenAI 兼容的 `/chat/completions` 协议。不借用前端对话模型或向量模型的配置。key 缺失时进入 `waiting_config`，不会发模型请求。也可通过 `EMBER_SLICE_MAINTENANCE_CONFIG` 指定配置路径。
 
 `MaintenanceQueue(root).statuses()` 可检查任务状态，`relations(instance)` 返回当前仍有效的联系。新 worker 使用原有 Event 写入接口，无需 App 新增维护调用。
 
