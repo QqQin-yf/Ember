@@ -52,6 +52,7 @@ load_env(os.path.dirname(os.path.abspath(__file__)))
 
 from ember.instances import InstanceRegistry, parse_instances, resolve_root
 from ember.tool_validation import validate_tool_input
+from ember.slice_pipeline import SlicePipeline, IngestionJobs, complete_turn, complete_run
 from ember.writer import (PIN_TOOL_NAME, UNPIN_TOOL_NAME,
                           READ_SOURCE_TOOL_NAME, REVISE_TOOL_NAME,
                           SEARCH_TOOL_NAME, TOOL_NAME,
@@ -206,9 +207,14 @@ async def _expire_recall_snapshots() -> None:
 async def _lifespan(app):
     async with session_manager.run():
         cleanup = asyncio.create_task(_expire_recall_snapshots())
+        pipeline = SlicePipeline(REGISTRY)
+        app.state.slice_pipeline = pipeline
+        ingestion = asyncio.create_task(pipeline.run())
         try:
             yield
         finally:
+            pipeline.stop_event.set()
+            await ingestion
             cleanup.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await cleanup
@@ -271,8 +277,12 @@ async def _run_lifecycle(request: Request) -> JSONResponse:
     except Exception:
         return _run_response({"status": "failed", "code": "invalid_arguments",
                               "field": "$", "error": "Expected JSON object"})
-    operation = svc.sidecar_run_start if request.url.path.endswith("/start") else svc.sidecar_run_finish
-    return _run_response(await asyncio.to_thread(operation, body))
+    if request.url.path.endswith("/start"):
+        result = await asyncio.to_thread(svc.sidecar_run_start, body)
+    else:
+        result = await asyncio.to_thread(complete_run, svc,
+            getattr(request.app.state, "slice_pipeline", None), body)
+    return _run_response(result)
 
 
 async def _recall_snapshot(request: Request) -> JSONResponse:
@@ -341,10 +351,26 @@ async def _hook_turn_end(request: Request) -> JSONResponse:
     if "recall_id" in body and (not isinstance(body["recall_id"], str) or not body["recall_id"].strip()):
         return _generation_response({"status": "failed", "code": "invalid_identity",
                                      "error": "Invalid recall_id"})
-    return _generation_response(await asyncio.to_thread(svc.hook_turn_end,
+    if type(body.get("user_is_system", False)) is not bool:
+        return _generation_response({"status": "failed", "code": "invalid_arguments",
+                                     "error": "user_is_system must be boolean"})
+    return _generation_response(await asyncio.to_thread(complete_turn, svc,
+        getattr(request.app.state, "slice_pipeline", None),
         body.get("session_id"), str(body.get("assistant_reply") or ""),
         turn, assistant_message_id=_opt_int(body, "assistant_message_id"),
-        recall_id=body.get("recall_id"), status=body.get("status", "done")))
+        recall_id=body.get("recall_id"), status=body.get("status", "done"),
+        user_is_system=body.get("user_is_system", False)))
+
+
+async def _slice_ingestion_status(request: Request) -> JSONResponse:
+    svc = _service_or_404(request)
+    if isinstance(svc, JSONResponse):
+        return svc
+    result = await asyncio.to_thread(IngestionJobs(svc.store.root).status,
+                                     request.path_params["job_id"])
+    if result is None:
+        return JSONResponse({"code": "slice_job_not_found"}, status_code=404)
+    return JSONResponse(result)
 
 
 # ---------- 挂关系（2026-10-14 设计稿 v2：借窗口跑，app 编排） ----------
@@ -487,6 +513,7 @@ app = BearerAuthMiddleware(Starlette(
         Route("/ember/generations/{recall_id}", _generation_status, methods=["GET"]),
         Route("/ember/hooks/turn_start", _hook_turn_start, methods=["POST"]),
         Route("/ember/hooks/turn_end", _hook_turn_end, methods=["POST"]),
+        Route("/ember/slices/jobs/{job_id}", _slice_ingestion_status, methods=["GET"]),
         Route("/ember/sleep/link/batches", _sleep_link_batches,
               methods=["GET"]),
         Route("/ember/sleep/link/submit", _sleep_link_submit,
