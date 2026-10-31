@@ -94,11 +94,11 @@ class RecallRefsTests(unittest.TestCase):
         self.assertEqual(refs[0]["presentation"], "event_excerpt")
         self.assertEqual(refs[0]["version_id"], "A-v1")
 
-    def test_observation_excerpt_and_retrieval_hint_do_not_add_dropped_events(self):
-        _, items, refs = self.render(units=[{"kind": "observe", "event_ids": ["A"]}],
+    def test_event_text_and_retrieval_hint_do_not_add_dropped_events(self):
+        _, items, refs = self.render(units=[{"kind": "event", "event_ids": ["A"]}],
                                      strong_dropped=5)
         self.assertEqual([p["presentation"] for p in items],
-                         ["event_excerpt", "retrieval_hint"])
+                         ["event_text", "retrieval_hint"])
         self.assertEqual([r["event_id"] for r in refs], ["A"])
 
     def test_duplicate_content_is_one_reference_and_keeps_text_granularity(self):
@@ -161,8 +161,7 @@ class RecallRefsTests(unittest.TestCase):
     def test_hook_returns_only_actual_event_identity_and_source_session(self):
         self.svc.store.write_route(RecallRoute(route_id="route-A", event_id="A",
             matcher="lexical", cue_type="lexical", cue="unique cue"))
-        with patch.object(self.svc, "_observe_extra_hit", return_value=None):
-            out = self.svc.hook_turn_start("trigger", "unique cue", user_message_id=104)
+        out = self.svc.hook_turn_start('trigger', 'unique cue', user_message_id=104)
         self.assertTrue(out["injected"])
         self.assertEqual(out["recall_refs"]["anchor_message_id"], "104")
         self.assertEqual([r["event_id"] for r in out["recall_refs"]["events"]], ["A"])

@@ -16,3 +16,30 @@ probe.txt
 test_out*.txt
 summary.txt
 _mount_llm_check.json
+
+# Local source backups; never commit or publish
+.local-backups/
+
+# Only necessary technical documentation is published. Discussions/handoffs stay local.
+*.md
+!/AGENTS.md
+!/API.md
+!/BRIEFING_SPEC.md
+!/EVENT_SLICE_MEMBERSHIPS.md
+!/KNOWLEDGE_RECALL.md
+!/MEMORY_HEALTH_CHECK.md
+!/MEMORY_LIFECYCLE_SPEC.md
+!/README.md
+!/RECALL_REFS_SPEC.md
+!/RECALL_SNAPSHOT_SPEC.md
+!/RUNS_SPEC.md
+!/SLICE_MAINTENANCE.md
+!/SLICE_PIPELINE.md
+!/SLICE_RECALL.md
+!/SOURCE_COMPLETION_SPEC.md
+!/TURN_END_RECOVERY_SPEC.md
+!/TURN_SLICES.md
+
+.local-notes/
+discussions/
+handoffs/

@@ -1,31 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Ember v3 — executor 配置持久化与公共 LLM 调用层。
-
-这个文件是干什么的：
-  1. 读 executors.json（各 LLM 任务点的默认 engine 配置）；
-  2. 提供公共 call_llm（glm API / qwen3 本地 docker 两个 engine），
-     供离线脚本与 service 的外包调用引用，取代重复实现。
-
-被谁调用：
-  - ember.service（任务点 observe / observe_merge，观察提炼与合并）
-  - scripts/split_directions.py（任务点 split，Direction 划分）
-  - scripts/mount_directions.py（任务点 mount，Direction 挂载）
-  - （judge 随独立判联管线 2026-10-15 退役；summary / structure
-    随归属与 summary 生产线收编窗口 2026-10-17 退役）
-
-executors.json 约定（momo 2026-10-09 拍板）：
-  - 位置：ember-v3-mvp 根目录（BASE），无密钥、入 git；
-  - 形态：{"judge": "glm", "split": "glm", "mount": "glm",
-    "observe": "glm", "observe_merge": "glm"}
-    键 = LLM 任务点；值 = engine 名（glm / qwen3）；
-  - 谁写：momo 手工编辑；谁读：离线脚本启动时（load_engine）；
-  - --engine 命令行参数保留为单次覆盖（显式给了就用它）；
-  - 配置文件缺失/任务点缺项/值非法 → 回落 glm（与历史默认行为一致）。
-
-"外包"口径（momo 2026-10-09）：凡不带记忆、上下文执行的 LLM 调用
-都归类为外包——glm API 与本地 qwen3 均为外包，与 Chat Model（本人，
-带完整对话上下文）相对。
-"""
+"""Offline Direction split/mount engines. Runtime maintenance uses maintenance_client."""
 from __future__ import annotations
 
 import json
@@ -36,21 +10,16 @@ import urllib.request
 EXECUTORS_FILE = "executors.json"
 
 ALLOWED_ENGINES = ("glm", "qwen3")
-KNOWN_TASKS = ("judge", "split", "mount", "observe", "observe_merge")
+KNOWN_TASKS = ("split", "mount")
 
 # 各任务点的调用差异（原先散在三个脚本里的常量，集中到这张表）：
 #   model_env   glm 模型的环境变量名（回退 EMBER_SLEEP_MODEL，再回退 glm-4.7）
 #   temperature 采样温度
 #   timeout     HTTP 超时秒数
 TASK_SPECS: dict[str, dict] = {
-    "judge": {"model_env": "EMBER_SLEEP_MODEL", "temperature": 0.2, "timeout": 120},
     "split": {"model_env": "EMBER_SPLIT_MODEL", "temperature": 0.3, "timeout": 180},
     "mount": {"model_env": "EMBER_MOUNT_MODEL", "temperature": 0.2, "timeout": 120},
-    # observe 输入是长对话原文（≤400 条），给长超时
-    "observe": {"model_env": "EMBER_OBSERVE_MODEL", "temperature": 0.3,
-                "timeout": 300},
-    "observe_merge": {"model_env": "EMBER_MERGE_MODEL", "temperature": 0.2,
-                      "timeout": 120},
+
 }
 
 
@@ -82,13 +51,15 @@ def load_engine(base_dir: str, task: str, override: str | None = None) -> str:
     return load_executors(base_dir).get(task, "glm")
 
 
-def call_llm(system: str, user: str, engine: str, task: str = "judge") -> str:
+def call_llm(system: str, user: str, engine: str, *, task: str) -> str:
     """公共 LLM 调用。engine=glm：智谱 OpenAI-compatible API；
     engine=qwen3：docker exec 进 ombre-ollama（本地兜底）。
 
     task 决定模型环境变量/temperature/timeout（TASK_SPECS）。
     失败抛异常（urllib.error / subprocess 异常 / ValueError），由调用方重试。
     """
+    if task not in TASK_SPECS:
+        raise ValueError(f"Unknown executor task: {task}")
     if engine == "qwen3":
         full = system + "\n\n" + user
         r = subprocess.run(
@@ -98,7 +69,7 @@ def call_llm(system: str, user: str, engine: str, task: str = "judge") -> str:
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=600)
         return r.stdout.decode("utf-8", errors="replace")
     if engine == "glm":
-        spec = TASK_SPECS.get(task, TASK_SPECS["judge"])
+        spec = TASK_SPECS[task]
         api_key = os.environ.get("ZHIPU_API_KEY", "")
         base = os.environ.get("EMBER_BASE_URL",
                               "https://open.bigmodel.cn/api/paas/v4")

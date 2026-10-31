@@ -24,15 +24,12 @@ def main():
     action, root, checkpoint = sys.argv[1:]
     if action == "prepare":
         svc = service(root)
-        with patch.object(svc, "_observe_extra_hit", return_value=None):
-            svc.hook_turn_start("source", TEXT, user_message_id=71, recall_id="writer")
-            result = svc.sidecar_call_tool("create_memory_event", write_args(),
-                                           recall_id="writer", tool_call_id="create")
-            assert result["status"] == "created", result
-            for rid in ("reader", "reader2"):
-                result = svc.hook_turn_start(rid, "Ember", user_message_id=101 if rid == "reader" else 103,
-                                            recall_id=rid)
-                assert len(result["recall_refs"]["events"]) == 1, result
+        svc.hook_turn_start('source', TEXT, user_message_id=71, recall_id='writer')
+        result = svc.sidecar_call_tool('create_memory_event', write_args(), recall_id='writer', tool_call_id='create')
+        assert result['status'] == 'created', result
+        for rid in ('reader', 'reader2'):
+            result = svc.hook_turn_start(rid, 'Ember', user_message_id=101 if rid == 'reader' else 103, recall_id=rid)
+            assert len(result['recall_refs']['events']) == 1, result
         print("prepared", flush=True)
         return
     svc = service(root)

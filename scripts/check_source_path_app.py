@@ -135,21 +135,18 @@ def main():
                         assert svc.hook_turn_end(sid, ("old-reply" if rid=="g1" else "old-followup-reply"),
                             turn=out["turn"], assistant_message_id=fixture[assistant]["seq"], recall_id=rid)["ok"]
                     corpus = svc._quote_corpus(svc.sessions[sid])
-                    assert [m["content"] for m in corpus] == ["old-user","old-reply","old-followup","old-followup-reply"]
+                    # Quote provenance includes historical rows and the current
+                    # user, but never treats the current assistant anchor as old evidence.
+                    assert [m["content"] for m in corpus] == ["old-user","old-reply","old-followup"]
+                    assert [m['_source_message_id'] for m in corpus] == ids('u2','a2','u3')
                     # Fetch only registered exact messages; no numeric gap/leaf expansion.
                     checks.append("quote_corpus_exact_generations")
                     svc.hook_turn_start(sid, "edited-user", user_message_id=fixture["ux"]["seq"], recall_id="g3")
                     svc.hook_turn_end(sid,"edited-reply",turn=3,assistant_message_id=fixture["ax"]["seq"],recall_id="g3")
-                    assert svc._fetched_corpus(sid) == []
-                    cursor = svc.observe_cursor.get(sid)
-                    try:
-                        svc._observe_session(sid)
-                    except source_client.SourceUnavailable:
-                        pass
-                    else:
-                        raise AssertionError("mixed observation accepted")
-                    assert svc.observe_cursor.get(sid) == cursor
-                    checks.append("mixed_observe_no_cursor_advance")
+                    assert [m['content'] for m in svc._fetched_corpus(sid)] == ['edited-user']
+                    corpus = svc._quote_corpus(svc.sessions[sid])
+                    assert [m['content'] for m in corpus] == ['edited-user']
+                    checks.append("mixed_path_does_not_launder_history")
                     with patch.object(source_client,"SOURCE_TOKEN","wrong-synthetic-token"):
                         try:
                             source_client.fetch_source_path(sid,ids("u1","a1"))

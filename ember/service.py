@@ -1,20 +1,7 @@
 # -*- coding: utf-8 -*-
-"""Ember v3 Phase 3 — 记忆写入自然嵌入对话流。
+"""Ember sidecar 编排：召回、显式记忆工具、来源核验与 sleep 维护。
 
-momo 2026-09-30 裁决（22:27，取代 Phase 2.5 的独立 writer 调用）：
-1. 不再每一轮单独调一次 writer 问"有没有可写的"。
-2. 模型在对话中自己觉得有需要写下的，就调 create_memory_event 写。
-   写记忆是自然嵌入对话里的，不是每句都拿过去审问一遍。
-3. 每轮 Ember 只在本地做 recall（毫秒级，无 LLM）：命中就把记忆
-   以结构化前缀块挂在用户消息前面发过去。
-4. 工具调用进模型上下文不变：模型调了工具、写入成败，下一轮自己能看到。
-5. 写作指令由 Ember 注入 system 末尾；客户端自己的 system prompt 不受影响。
-
-2026-10-12 拍板（MCP + hook 旁路化）：Ember 从对话主路径撤下，改以
-「MCP 工具 + 轮前/轮后钩子」接入（见 hook_turn_start / hook_turn_end /
-sidecar_* 一族，入口 sidecar.py）。chat_completion 代理路径保留至前端
-切换完成（B1）后退役；召回流水线与写入主路已抽为共用方法，两条入口
-一条实现，不养双轨。
+对话和模型工具循环由 App 持有；此模块不代理模型对话。
 """
 from __future__ import annotations
 
@@ -24,19 +11,16 @@ import os
 import threading
 import re
 import uuid
-from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from .llm import LLMError
 from .models import Event, PresentationContext, RecallRoute
 from .recall import (DirectRecall, EntityRecall, register_event_entity_refs,
                      _event_entity_refs)
-from .relation import EventRelation, RELATION_TYPES, RelationStore
+from .relation import RelationStore
 from .sleep_state import SleepStateStore
 from .store import EmberStore, EVENTS_FILE
-from .entity import Entity, EntityStore
-from .pair_seen import PairSeenStore
+from .entity import EntityStore
 from .sediment import SedimentStore
 from .direction import (DirectionMatcher, DirectionVectorStore,
                         embed_text)
@@ -46,17 +30,11 @@ from .turn_span import TurnSpanStore, spans_from_quotes
 from . import source_client
 from .source_paths import (generation_messages, read_messages, legacy_messages,
                            current_path_corpus, SourceCorpus, QuoteSourceError)
-from . import executors
-from .cue_tighten import CueTightener
 from .pin_store import PinStore
 from .source_refs import EventSourceStore, event_reference, message_seq
 from .generations import GenerationStore, fingerprint, identity
 from .runs import RunStore, failure as run_failure
 from .source_completion import SourceCompletions
-from .prompts import (OBSERVE_SYSTEM_PROMPT, build_observe_user_prompt,
-                      OBSERVE_MERGE_PROMPT, build_observe_merge_user_prompt)
-from . import observe as observe_mod
-from .observe import ObserveCursor, verify_quotes
 from .core_semantic import (CoreVectorStore, EntitySummaryVectorStore,
                             SEARCH_HIT_FLOOR, cosine)
 from .writer import (
@@ -65,7 +43,6 @@ from .writer import (
     READ_SOURCE_TOOL_NAME,
     build_revise_tool_spec,
     build_pin_tool_specs,
-    EMBEDDED_WRITER_PROMPT,
     build_tools_spec,
     validate_writer_arguments, writer_error_result,
     SEARCH_TOOL_NAME,
@@ -77,88 +54,10 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
 
 
-@dataclass
-class MemoryWriteStatus:
-    """本轮记忆活动的状态（给前端 Memory 面板）。
-
-    Phase 3 起：记忆写入由模型在对话流中自主触发（不再有独立 writer 调用），
-    另有 recall 注入信息（recalled_count）。
-    """
-    status: str = "skipped"          # created / skipped / failed
-    writer_called: bool = False      # 本轮模型是否发出了记忆工具调用
-    tool_called: str | None = None
-    validation: str | None = None    # passed / <error>
-    event_id: str | None = None
-    summary: str | None = None
-    route_count: int = 0
-    must_routes: list[dict[str, str]] = field(default_factory=list)  # 已废弃，保留兼容
-    may_routes: list[dict[str, str]] = field(default_factory=list)   # 已废弃，保留兼容
-    recall_cues: list[str] = field(default_factory=list)             # 全部触点 cue
-    raw_ref: str | None = None
-    error: str | None = None
-    model: str | None = None
-    tool_result_in_context: bool = False
-    recalled_count: int = 0          # 本轮 recall 命中并注入前缀的 Event 数
-    entity_recalled: int = 0         # Entity 通路命中的 Entity 数（最小闭环）
-    entity_names: list[str] = field(default_factory=list)  # 命中的 Entity 规范名
-    filtered_by_sleep: int = 0       # 本轮被 Sleep 过滤掉（未注入）的命中数
-    resolved_brought: list[str] = field(default_factory=list)  # 因过滤而带入的修正者 event_id
-    direction_focused: str | None = None   # Direction 聚焦命中的方向 id
-    direction_reason: str | None = None    # clear / ambiguous / low_score / no_vectors / embed_failed
-    summary_fallback: bool = False         # 是否走了 Entity 层 summary 回退
-    semantic_matched: int = 0              # 本轮 Cue 语义段命中的 route 数（§2.4 语义扩展）
-    semantic_reason: str | None = None     # ok / no_vectors / embed_failed / not_requested
-    dropped_quotes: list[dict[str, str]] = field(default_factory=list)  # r4：逐字核对被丢弃的原话
-
-    def merge(self, other: "MemoryWriteStatus") -> None:
-        """合并一次工具调用的结果进本轮总状态。"""
-        self.writer_called = other.writer_called or self.writer_called
-        self.tool_called = other.tool_called or self.tool_called
-        self.validation = other.validation or self.validation
-        self.event_id = other.event_id or self.event_id
-        self.summary = other.summary or self.summary
-        self.route_count += other.route_count
-        self.recall_cues += other.recall_cues
-        self.raw_ref = other.raw_ref or self.raw_ref
-        self.dropped_quotes = other.dropped_quotes or self.dropped_quotes
-        self.error = other.error or self.error
-        self.tool_result_in_context = self.tool_result_in_context or other.tool_result_in_context
-        if other.status != "skipped":
-            self.status = other.status
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "status": self.status,
-            "writer_called": self.writer_called,
-            "tool_called": self.tool_called,
-            "validation": self.validation,
-            "event_id": self.event_id,
-            "summary": self.summary,
-            "route_count": self.route_count,
-            "recall_cues": self.recall_cues,
-            "raw_ref": self.raw_ref,
-            "error": self.error,
-            "model": self.model,
-            "tool_result_in_context": self.tool_result_in_context,
-            "recalled_count": self.recalled_count,
-            "entity_recalled": self.entity_recalled,
-            "entity_names": self.entity_names,
-            "filtered_by_sleep": self.filtered_by_sleep,
-            "resolved_brought": self.resolved_brought,
-            "direction_focused": self.direction_focused,
-            "direction_reason": self.direction_reason,
-            "summary_fallback": self.summary_fallback,
-            "semantic_matched": self.semantic_matched,
-            "semantic_reason": self.semantic_reason,
-            "dropped_quotes": self.dropped_quotes,
-        }
-
-
 class Session:
-    """一个会话：完整 OpenAI 格式对话历史（含 tool_calls / tool 消息）+ turn 计数。
+    """一个会话的临时原文取材和 turn 计数。
 
-    这是唯一的上下文真相源：chat 与 memory writer 共用它；
-    换模型不换 session，历史原样延续。
+    对话上下文归 App；此处仅作 hooks、出处核验与恢复记账。
     """
 
     def __init__(self, session_id: str):
@@ -172,32 +71,6 @@ class Session:
 
     def raw_ref(self, turn: int) -> str:
         return f"conversation/session-{self.session_id}/turn-{turn}"
-
-    def wire_messages(self) -> list[dict[str, Any]]:
-        """转成 provider 可接受的 wire 格式：剥掉内部标记键（turn 等）。"""
-        out = []
-        for m in self.messages:
-            w = {"role": m["role"]}
-            if "content" in m and m["content"] is not None:
-                w["content"] = m["content"]
-            if "tool_calls" in m and m["tool_calls"]:
-                w["tool_calls"] = m["tool_calls"]
-            if "tool_call_id" in m:
-                w["tool_call_id"] = m["tool_call_id"]
-            out.append(w)
-        return out
-
-
-def _strip_internal(m: dict[str, Any]) -> dict[str, Any]:
-    """对外（provider）发送时剥掉内部键。"""
-    w = {"role": m["role"]}
-    if m.get("content") is not None:
-        w["content"] = m["content"]
-    if m.get("tool_calls"):
-        w["tool_calls"] = m["tool_calls"]
-    if m.get("tool_call_id"):
-        w["tool_call_id"] = m["tool_call_id"]
-    return w
 
 
 def _event_entity_of(store, eid: str) -> str | None:
@@ -219,18 +92,6 @@ def _event_ingest_ts(store, eid: str) -> float:
         return datetime.fromisoformat(store.get_event(eid).ingest_time).timestamp()
     except (KeyError, ValueError, TypeError):
         return 0.0
-
-
-def _parse_llm_json(text: str) -> dict:
-    """LLM 输出 → JSON 对象：剥代码围栏，取首个 { 到末个 }。"""
-    t = (text or "").strip()
-    if t.startswith("```"):
-        t = re.sub(r"^```[a-zA-Z]*\s*", "", t).strip()
-        t = re.sub(r"\s*```$", "", t).strip()
-    start, end = t.find("{"), t.rfind("}")
-    if start < 0 or end <= start:
-        raise ValueError(f"LLM 输出里没有 JSON 对象: {(text or '')[:120]}")
-    return json.loads(t[start:end + 1])
 
 
 def select_recall_units(recalled_events: list[str], anchors: list,
@@ -388,7 +249,7 @@ class EmberService:
     ):
         self.store = store
         self.source_instance = "default"
-        self.client = client          # chat 与 memory writer 共用
+        self.client = client          # 保留构造器调用兼容；sidecar 不调用对话模型
         self.model = model
         # 未来开关（本阶段文档已预留）：把 Recall Context 注入本轮对话
         self.recall_context = recall_context
@@ -402,8 +263,6 @@ class EmberService:
         # Relation 层 v1：resolves 边（被修正者 → 修正者），
         # 被过滤事件的修正者顶上（"旧观点被什么取代了"的入口）
         self.relation_store = RelationStore(getattr(store, "root", ""))
-        # PairSeen：判过的 (新, 旧) 对留痕——补跑/重跑不重复裁决（挂关系消费）
-        self.pair_seen = PairSeenStore(getattr(store, "root", ""))
         # 沉淀证据账本（10-14 设计稿第 4 步）：正文与版本号归 app，
         # ember 只收"某版 + 净新增证据 id"追加（app 存新版才调）
         self.sediment_store = SedimentStore(getattr(store, "root", ""))
@@ -423,8 +282,6 @@ class EmberService:
         self.event_sources = EventSourceStore(getattr(store, "root", ""))
         # 召回记账（10-08 定稿 §3.2）：候选组装与旧 Cue 收紧的共同前置，旁路只观察
         self.recall_ledger = RecallLedger(getattr(store, "root", ""))
-        # 观察游标（2026-10-16 ④observe）：每会话已检查到的后端 seq
-        self.observe_cursor = ObserveCursor(getattr(store, "root", ""))
         # 钉住登记（2026-10-17 设计夜：briefing 必带 + 自动召回不再浮现）
         self.pin_store = PinStore(getattr(store, "root", ""))
         # 会话原文存档已退役（2026-10-14 去原文化）：原文只存后端消息树
@@ -448,10 +305,7 @@ class EmberService:
 
     # ---------- session ----------
 
-    #: heart-chat 前端不传 session_id（OpenAI 兼容请求没有这个字段）。
-    #: 2026-10-11 透明工具拍板后，session 仅作旁路账本（turn 计数/原文
-    #: 存档/召回引用），不再是喂给模型的上下文来源——上下文一律以前端
-    #: 发来的 messages 为准。独立会话隔离等前端支持 session 字段后再启用。
+    #: 无 session_id 的旧 hook 调用保留默认会话名；正常请求使用显式会话身份。
     DEFAULT_SESSION_ID = "heart-chat-main"
 
     def get_or_create_session(self, session_id: str | None) -> Session:
@@ -469,144 +323,6 @@ class EmberService:
             self.sessions[sid] = sess
         return self.sessions[sid]
 
-    # ---------- chat ----------
-
-    def chat_completion(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """处理 OpenAI-compatible chat request，返回兼容 response。
-
-        主路径（momo 22:27 裁决）：
-        1. 本地 recall（无 LLM）——命中则把记忆以结构化前缀块挂在本轮
-           用户消息前面（仅注入 wire 层，session 历史里存用户原话）。
-        2. 一次 LLM 调用：对话照常 + tools 在场，模型自己决定是否写记忆。
-        3. 若模型发出 tool call：校验→写入→tool result 回传→再调一次让
-           模型接着说完。没写就是一次调用，延迟不翻倍。
-        """
-        session = self.get_or_create_session(
-            payload.get("session_id") or payload.get("user") or payload.get("ember_session"))
-        incoming = payload.get("messages") or []
-        user_msgs = [m for m in incoming if m.get("role") == "user"]
-        user_text = user_msgs[-1].get("content", "") if user_msgs else ""
-        model = payload.get("model") or self.model
-        turn = session.next_turn()
-
-        # heart 联动（10-06）：heart_meta.turn_id 管道层记账。
-        # 缺失不阻断——heart 侧 forward_turn_meta 默认关，打开前照常运行。
-        heart_meta = payload.get("heart_meta") or {}
-        self.turn_ledger.record(session.session_id, turn,
-                                heart_meta.get("turn_id"))
-
-        # 本地 recall：全流水线抽为 run_recall_pipeline（与轮前钩子共用，
-        # 2026-10-12 旁路化——两条入口一条召回，避免双轨漂移）
-        memory = MemoryWriteStatus()
-        memory.model = model
-        rec = self.run_recall_pipeline(session, turn, user_text)
-        memory.semantic_matched = rec["semantic_matched"]
-        memory.semantic_reason = rec["semantic_reason"]
-        memory.direction_focused = rec["direction_focused"]
-        memory.direction_reason = rec["direction_reason"]
-        memory.summary_fallback = rec["summary_fallback"]
-        memory.entity_recalled = rec["entity_recalled"]
-        memory.entity_names = rec["entity_names"]
-        memory.filtered_by_sleep = rec["filtered_by_sleep"]
-        memory.resolved_brought = rec["resolved_brought"]
-        recall_prefix = rec["prefix"]
-        if recall_prefix:
-            memory.recalled_count = rec["recalled_count"]
-
-        session.messages.append({"role": "user", "content": user_text, "turn": turn})
-
-        # wire 层（2026-10-11 透明工具拍板）：以前端发来的消息为准。
-        # 人设/历史/heart 注入属于已发生的上下文——Ember 原样透传，
-        # 不增不删不改；只做三件事：recall 前缀挂本轮用户消息、递记忆
-        # 工具、旁路记账。session.messages 降级为账本（供原文存档与
-        # 召回引用），不再作为喂给模型的上下文来源。
-        # 前端不发 messages 的独立 UI 形态：回落为单条本轮用户消息。
-        wire = [_strip_internal(dict(m)) for m in incoming] or \
-            [{"role": "user", "content": user_text}]
-        if recall_prefix:
-            for _m in reversed(wire):
-                if _m.get("role") != "user":
-                    continue
-                _c = _m.get("content")
-                if isinstance(_c, str):
-                    _m["content"] = recall_prefix + _c
-                elif isinstance(_c, list):
-                    for _p in _c:
-                        if isinstance(_p, dict) and _p.get("type") == "text":
-                            _p["text"] = recall_prefix + (_p.get("text") or "")
-                            break
-                break
-        wire = self._with_embedded_prompt(wire)
-
-        try:
-            assistant_msg = self.client.chat_completion(
-                model=model,
-                messages=list(wire),  # 传副本：工具循环会继续追加 wire，别污染调用记录
-                tools=build_tools_spec(),
-                tool_choice="auto",
-                temperature=payload.get("temperature"),
-            )
-        except LLMError as ex:
-            session.messages.pop()  # chat 失败则本轮不计入历史
-            raise
-
-        # 模型决定写记忆 / 翻原文：处理 tool call（可能多轮，上限 2 防失控）
-        followup_msg = assistant_msg
-        for _ in range(2):
-            tool_calls = followup_msg.get("tool_calls") or []
-            if not tool_calls:
-                break
-            history_mark = len(session.messages)
-            if any((c.get("function") or {}).get("name") == READ_SOURCE_TOOL_NAME
-                   for c in tool_calls):
-                write_result = self._handle_read_source_call(session, tool_calls)
-            else:
-                write_result = self._handle_memory_tool_call(session, turn, tool_calls)
-            memory.merge(write_result["status"])
-            if not write_result.get("handled"):
-                break
-            # 工具往返消息（assistant tool_calls + tool result）同步追加到
-            # wire 尾部，让模型接着说完（账本与 wire 各自追加，互不复读）
-            for m in session.messages[history_mark:]:
-                wire.append(_strip_internal(dict(m)))
-            followup_msg = self.client.chat_completion(
-                model=model,
-                messages=self._with_embedded_prompt(list(wire)),
-                tools=build_tools_spec(),
-                tool_choice="auto",
-                temperature=payload.get("temperature"),
-            )
-
-        content = followup_msg.get("content")
-        if not isinstance(content, str) or not content.strip():
-            content = "（空回复）"
-        session.messages.append({"role": "assistant", "content": content, "turn": turn})
-
-        # 原文存档已退役（2026-10-14）：原文只存后端消息树一份，
-        # ember 按 message_id 按需拉取（source_client），不再自存。
-
-        return {
-            "id": f"chatcmpl-{uuid.uuid4().hex[:24]}",
-            "object": "chat.completion",
-            "created": int(datetime.now(timezone.utc).timestamp()),
-            "model": model,
-            "choices": [{
-                "index": 0,
-                "message": {"role": "assistant", "content": content},
-                "finish_reason": "stop",
-            }],
-            "usage": followup_msg.get("usage") or {},
-            "ember": {
-                "session_id": session.session_id,
-                "turn": turn,
-                "model": model,
-                "memory": memory.to_dict(),
-                "heart_meta": {
-                    "turn_id": self.turn_ledger.heart_id_of(session.session_id, turn),
-                    "ledger_size": len(self.turn_ledger.mapping),
-                },
-            },
-        }
 
     # ---------- 召回流水线（chat 与轮前钩子共用，2026-10-12 抽取） ----------
 
@@ -624,13 +340,12 @@ class EmberService:
                             user_text: str,
                             context_start_id: int | None = None,
                             deferred_entries: list[dict] | None = None,
-                            allow_observe: bool = True,
                             context_message_ids: list[int] | None = None
                             ) -> dict[str, Any]:
         """保留的 Event 召回：Cue/Entity 双路 → Sleep 过滤 → 窗口过滤
         → Relation 展开 → 召回记账 → 前缀块构建。
 
-        普通轮前与显式历史检索共用此路；混合召回关闭观察附加席。
+        普通轮前与显式历史检索共用此路；观察附加席已删除。
         记账失败不阻断（旁路只观察）。返回：
         {prefix, recalled_count, entity_recalled, entity_names,
          filtered_by_sleep, filtered_by_window, resolved_brought,
@@ -753,24 +468,13 @@ class EmberService:
                 except ValueError:
                     pass
 
-        # ---- 观察附加席（2026-10-16 ④observe）：不占 3 席，输入向量
-        # × 观察层 core 向量宽松命中至多 1 条——「一旦被召回才谈印证」
-        observe_extra = (self._observe_extra_hit(
-            user_text, set(recalled_ctx.recalled_events)) if allow_observe else None)
         units_for_prefix = selected_units
-        if observe_extra:
-            recalled_ctx.recalled_events.append(observe_extra)
-            ev = self.store.get_event(observe_extra)
-            if ev.raw_ref not in recalled_ctx.source_refs:
-                recalled_ctx.source_refs.append(ev.raw_ref)
-            units_for_prefix = selected_units + [
-                {"kind": "observe", "event_ids": [observe_extra]}]
 
         # 召回记账（10-08 定稿 §3.2）：三段通路各记一行，供 Sleep 候选组装
         # 与旧 Cue 收紧消费。名额截断后记账——记的是真正注入前缀的 event。
         self._ledger_record(session, turn, recalled_ctx, entity_hits,
                             entity_event_ids, dir_result, excluded,
-                            resolved_brought, observe_extra=observe_extra,
+                            resolved_brought,
                             collector=deferred_entries)
 
         prefix = ""
@@ -797,7 +501,7 @@ class EmberService:
             "dropped_by_seats": gate_stats["dropped_by_seats"],
             "weak_pooled": gate_stats["weak_pooled"],
             "strong_dropped": gate_stats["strong_dropped"],
-            "observe_extra": observe_extra,
+            "observe_extra": None,
             "resolved_brought": [dst for dst, _ in resolved_brought],
             "direction_focused": direction_focused,
             "direction_reason": direction_reason,
@@ -814,8 +518,8 @@ class EmberService:
                               writer_tool_call_id: str | None = None) -> dict[str, Any]:
         """validated 参数 → Event 落库全流程（quotes 核对 / turn_span / Routes）。
 
-        代理工具循环与 MCP 旁路工具（2026-10-12 拍板）共用的写入主路。
-        异常由调用方处理（代理记历史，MCP 回错误回执）；返回回执 dict：
+        显式记忆工具共用的写入主路。
+        异常由调用方转换为 MCP 错误回执；返回回执 dict：
         {status, event_id, summary, raw_ref, route_count, recall_cues
          [, dropped_quotes]}。
         """
@@ -837,18 +541,20 @@ class EmberService:
         if not span_pairs:
             raise QuoteSourceError(getattr(corpus, "issue", None) or "quote_not_found")
 
-        self.event_sources.capture(
-            event.event_id, event.version_id, session.session_id, span_pairs, corpus,
-            writer_recall_id=writer_recall_id, writer_tool_call_id=writer_tool_call_id,
-            writer_turn=turn)
-        self.store.write_event(event)
-
         # key_quotes 逐字核对（r4 第 3.2 项，确定性代码侧）：
         # 每条 text 在本会话原文（session.messages 中对应 role 的
         # content；用户侧用原话，不含召回前缀——历史里存的就是原话）
         # 里逐字查找；对不上的条目丢弃（不拒绝整个 Event），
         # 丢弃清单写进 tool result 让模型知道哪句没对上
         dropped = self._verify_key_quotes(event, session, corpus=corpus)
+
+
+        self.event_sources.capture(
+            event.event_id, event.version_id, session.session_id, span_pairs, corpus,
+            writer_recall_id=writer_recall_id, writer_tool_call_id=writer_tool_call_id,
+            writer_turn=turn)
+        self.store.write_event(event)
+
 
         if span_pairs:
             self.turn_spans.fill(event.event_id, span_pairs,
@@ -881,7 +587,6 @@ class EmberService:
         if dropped:
             result["dropped_quotes"] = dropped
         # New writes use the independent slice-maintenance queue below.
-        # The historical link_pending queue is retained for legacy inspection only.
         try:
             from .event_slices import sync_from_files
             sync_from_files(self.store.root, self.source_instance)
@@ -894,79 +599,13 @@ class EmberService:
             pass  # Independent worker discovers unqueued committed Events after recovery.
         return result
 
-    def _handle_memory_tool_call(self, session: Session, turn: int,
-                                 tool_calls: list[dict[str, Any]]) -> dict[str, Any]:
-        """校验并执行模型在对话中发出的 create_memory_event 调用。
-
-        无论成败，assistant(tool_calls) + tool(result) 都追加进 session
-        历史——模型下一轮知道自己调用过工具、结果如何（momo Phase 2.5 裁决）。
-        返回 {handled, status(MemoryWriteStatus)}。
-        """
-        status = MemoryWriteStatus()
-        status.model = session and self.model
-        status.writer_called = True
-        status.tool_called = TOOL_NAME
-
-        raw_args = None
-        for call in tool_calls:
-            fn = (call or {}).get("function") or {}
-            if fn.get("name") == TOOL_NAME:
-                raw_args = fn.get("arguments") or "{}"
-                break
-        if raw_args is None:
-            # 调了别的工具：如实回执，不算 memory 事件
-            self._append_tool_record(session, tool_calls,
-                                     {"status": "ignored", "reason": "unknown tool"})
-            return {"handled": True, "status": status}
-
-        def _fail(err: str, validation_error: str | None = None) -> dict[str, Any]:
-            receipt = (writer_error_result(validation_error) if validation_error is not None
-                       else {"status": "failed", "error": err[:300]})
-            self._append_tool_record(session, tool_calls, receipt)
-            status.tool_result_in_context = True
-            status.status = "failed"
-            status.error = err
-            return {"handled": True, "status": status}
-
-        try:
-            from .writer import _loads_lenient
-            args = _loads_lenient(raw_args) if isinstance(raw_args, str) else raw_args
-        except ValueError as ex:
-            return _fail(f"tool arguments 解析失败: {ex}")
-
-        validated, err = validate_writer_arguments(args)
-        if err:
-            return _fail(f"validation failed: {err}", validation_error=err)
-        status.validation = "passed"
-
-        try:
-            result = self.write_validated_event(session, turn, validated)
-            self._append_tool_record(session, tool_calls, result)
-            status.tool_result_in_context = True
-            status.status = "created"
-            status.event_id = result["event_id"]
-            status.summary = result["summary"]
-            status.route_count = result["route_count"]
-            status.recall_cues = result["recall_cues"]
-            status.raw_ref = result["raw_ref"]
-            status.dropped_quotes = result.get("dropped_quotes") or []
-            return {"handled": True, "status": status}
-        except (LLMError, ValueError, KeyError, OSError) as ex:
-            # 失败也如实进上下文：模型知道自己这次没写成
-            self._append_tool_record(session, tool_calls,
-                                     ex.as_result() if isinstance(ex, QuoteSourceError)
-                                     else {"status": "failed", "error": str(ex)[:300]})
-            status.tool_result_in_context = True
-            status.status = "failed"
-            status.error = str(ex)[:300]
-            return {"handled": True, "status": status}
 
     # ---------- 翻原文工具（r4 第 4 项，只读） ----------
 
     READ_SOURCE_MAX_CHARS = 4000   # 单次返回总长上限（baseline）
 
     def read_source_event(self, event_id: str) -> dict[str, Any]:
-        """翻原文单事件实现（只读；代理工具循环与 MCP 旁路工具共用）。
+        """翻原文单事件实现（只读；MCP 与召回呈现共用）。
 
         Frozen provenance supplies exact message IDs; the provider checks the
         historical parent path. Missing identities, versions or provider support
@@ -1037,48 +676,6 @@ class EmberService:
             "truncated": truncated,
         }
 
-    def _handle_read_source_call(self, session: Session,
-                                 tool_calls: list[dict[str, Any]]) -> dict[str, Any]:
-        """执行模型发出的 read_memory_source 调用（单事件实现见
-        read_source_event，代理/MCP 共用）。只读：不写任何认知结构，
-        不产生 MemoryWriteStatus 记忆事件。"""
-        from .writer import _loads_lenient
-        results: list[dict[str, Any]] = []
-        for call in tool_calls:
-            fn = (call or {}).get("function") or {}
-            if fn.get("name") != READ_SOURCE_TOOL_NAME:
-                results.append({"status": "ignored", "reason": "unknown tool"})
-                continue
-            try:
-                args = _loads_lenient(fn.get("arguments") or "{}") \
-                    if isinstance(fn.get("arguments"), str) else (fn.get("arguments") or {})
-            except ValueError as ex:
-                results.append({"status": "failed", "error": f"arguments 解析失败: {ex}"})
-                continue
-            results.append(self.read_source_event((args or {}).get("event_id", "")))
-        self._append_tool_record(session, tool_calls, results[0] if results
-                                 else {"status": "ignored"})
-        status = MemoryWriteStatus()
-        status.tool_called = READ_SOURCE_TOOL_NAME
-        status.tool_result_in_context = True
-        return {"handled": True, "status": status}
-
-    def _with_embedded_prompt(self, wire: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """把写作指令注入 system 末尾（不改用户消息；无 system 则插入一条）。
-
-        2026-10-11 无感化拍板：EMBEDDED_WRITER_PROMPT 已退役为空串，
-        写作规则全部内嵌工具描述（writer.build_tools_spec）。常量为空时
-        跳过注入——TA 的 system 恢复零污染；恢复旧形态填回常量即可。
-        只注入 wire 层，session.messages 不存——避免历史膨胀与重复。
-        """
-        out = [dict(m) for m in wire]
-        if not EMBEDDED_WRITER_PROMPT.strip():
-            return out
-        for i, m in enumerate(out):
-            if m.get("role") == "system":
-                m["content"] = (m.get("content") or "") + "\n\n" + EMBEDDED_WRITER_PROMPT
-                return out
-        return [{"role": "system", "content": EMBEDDED_WRITER_PROMPT}] + out
 
     def _build_recall_prefix(self, ctx: PresentationContext,
                              entity_hits: list | None = None,
@@ -1272,15 +869,6 @@ class EmberService:
                     else:
                         _light_line(u["event_ids"][0])
                     continue
-                if u.get("kind") == "observe":
-                    # 观察附加席：不占 3 席的弱呈现（一句话信息点）
-                    oid = u["event_ids"][0]
-                    lines.append(f"- （印象浮现）"
-                                 f"{self.store.get_event(oid).summary}"
-                                 f"（{oid}）")
-                    presented("event_excerpt" if self.store.get_event(oid).summary.strip()
-                              else "retrieval_hint", oid)
-                    continue
                 if u["kind"] == "entity_block":
                     h = entity_by_id.get(u["entity_id"])
                     if h is not None:
@@ -1463,7 +1051,7 @@ class EmberService:
     def _quote_corpus(self, session: Session) -> list[dict[str, Any]]:
         """Use a provider-proven path plus the current real in-flight message.
 
-        Legacy local proxy conversations without source identities still use
+        Legacy hooks without source identities still use
         their own ephemeral text; they cannot produce trusted historical refs.
         """
         fetched = self._fetched_corpus(session.session_id)
@@ -1534,7 +1122,6 @@ class EmberService:
                        entity_event_ids: list[str], dir_result,
                        excluded: list[str],
                        resolved_brought: list[tuple[str, str]],
-                       observe_extra: str | None = None,
                        collector: list[dict] | None = None) -> None:
         """召回记账：三段通路各记一行（route=cue/entity/relation）。
 
@@ -1581,11 +1168,6 @@ class EmberService:
             for dst, src in resolved_brought:
                 record(
                     sid, turn, route="relation", event_ids=[dst], via=src)
-            # 观察附加席命中：route=observe（提取统一——刷新计时器与
-            # 注入去重；判联候选组装按 turn 不分 route，天然兼容）
-            if observe_extra:
-                record(sid, turn, route="observe",
-                                          event_ids=[observe_extra])
         except Exception:
             if collector is not None:
                 raise  # A durable snapshot cannot commit a partial effect plan.
@@ -1650,35 +1232,6 @@ class EmberService:
         ]
         return pres
 
-    def session_messages(self, session_id: str) -> list[dict[str, Any]] | None:
-        """调试观察：当前 session 的完整模型上下文（含工具调用记录）。"""
-        session = self.sessions.get(session_id)
-        if session is None:
-            return None
-        return session.wire_messages()
-
-    def view_event(self, event_id: str) -> dict[str, Any] | None:
-        """前端点击 Event 查看完整内容（只读观察，不是 memory editor）。"""
-        try:
-            event = self.store.get_event(event_id)
-        except KeyError:
-            return None
-        return {
-            "event": event.to_dict(),
-            "recall_routes": [r.to_dict() for r in self.store.routes_for_event(event_id)],
-        }
-
-    def list_events(self) -> list[dict[str, Any]]:
-        return [
-            {
-                "event_id": e.event_id,
-                "summary": e.summary,
-                "ingest_time": e.ingest_time,
-                "raw_ref": e.raw_ref,
-                "route_count": len(self.store.routes_for_event(e.event_id)),
-            }
-            for e in self.store.all_events()
-        ]
 
     # ---------- heart 联动 ----------
 
@@ -1686,20 +1239,10 @@ class EmberService:
     #   已于 2026-10-15 退役——新版设计里梦归 app 的 dream_submit 工具，
     #   ember 不再主动向 heart 推送；turn_ledger 观察保留）
 
-    def turn_ledger_status(self) -> dict[str, Any]:
-        """映射账本观察（含发号连续性缺口——重新生成/重发的排查料）。"""
-        return self.turn_ledger.to_dict()
-
-    def turn_span_status(self) -> dict[str, Any]:
-        return self.turn_spans.to_dict()
-
-    def recall_ledger_status(self) -> dict[str, Any]:
-        """召回记账观察（top cues / top events / 行数），排障用。"""
-        return self.recall_ledger.to_dict()
 
     # ---------- 旁路服务（2026-10-12 拍板：MCP 工具 + 轮前/轮后钩子） ----------
     #
-    # 接入形态（入口 sidecar.py，与 proxy.py 并存至前端切换完成）：
+    # 接入形态（入口 sidecar.py）：
     #   轮前钩子 → 前端自行注入召回文本（Ember 不再改写任何请求）
     #   MCP 工具 → 模型经前端工具循环调用，只提供「写什么」；
     #              出处（会话/轮次/heart 钉子）由轮前钩子记下的
@@ -2127,12 +1670,11 @@ class EmberService:
                       assistant_reply: str,
                       turn: int | None = None,
                       assistant_message_id: int | None = None) -> dict[str, Any]:
-        """轮后钩子：原文存档（用户原话 + 最终回复）并收掉进行中的一轮。
+        """轮后钩子：登记最终回复与来源编号，并收掉进行中的一轮。
 
         turn 校验（防串轮竞态）：用户连发两条时，前一轮的 turn_end 可能
         晚于后一轮的 turn_start 到达——对不上号的上报拒收（stale），
-        不污染新一轮的出处账。缺轮后钩子的轮次不存档——与代理形态
-        「chat 失败不计入历史」同语义；turn 计数允许留洞。
+        不污染新一轮的出处账。缺轮后钩子时不登记最终回复；turn 计数允许留洞。
 
         assistant_message_id（可选，2026-10-14 去原文化）：本轮回复在后端
         消息树的行 id——turn_ledger 补记（record_reply），供召回起点
@@ -2176,7 +1718,7 @@ class EmberService:
         """MCP 工具 create_memory_event 执行体：进行中的一轮 + 参数 → 落库。
 
         无进行中的一轮 → 如实回错（不打无出处之账）；校验失败 → failed
-        回执（与代理形态同一套 validate 规则）。
+        回执（使用工具字段的统一 validate 规则）。
         """
         live = self._live_turn
         if live is None:
@@ -2320,56 +1862,10 @@ class EmberService:
                 "revised_fields": revised}
 
     def sidecar_read_memory_source(self, event_id: str) -> dict[str, Any]:
-        """MCP 工具 read_memory_source 执行体（只读，同代理形态实现）。"""
+        """MCP 工具 read_memory_source 执行体（只读，共用来源核验）。"""
         return self.read_source_event(event_id)
 
-    # ---------- 挂关系（2026-10-14 设计稿 v2：借 Loism 的窗口跑） ----------
-    #
-    # 旧版：sleep_v2 脚本内 ember 自发 LLM 判联（JUDGE 管线，退役留参考）。
-    # 新版数据流：app 按钮进入 sleep → 接口 1 出材料（app 贴窗口末尾）→
-    # 正主 AI 强制调 link_relations → app 交卷（接口 2）→ 本体落库
-    # （三分支：relation 边 / superseded / 实体归属，与脚本同规则）→
-    # 断线恢复查进度（接口 3）。落库规则与 sleep_v2 逐条对齐。
-    #
-    # 待配对队列：link_pending.jsonl——write_validated_event 成功即记，
-    # 材料出队不扣减（等交卷成功才扣），断线重进材料照旧。
-
-    LINK_PENDING_FILE = "link_pending.jsonl"
-
-    def _link_pending_path(self) -> str:
-        return os.path.join(self.store.root, self.LINK_PENDING_FILE)
-
-    def link_pending_add(self, event_id: str) -> None:
-        with open(self._link_pending_path(), "a", encoding="utf-8") as f:
-            f.write(json.dumps({"event_id": event_id}) + "\n")
-
-    def _link_pending_list(self) -> list[str]:
-        p = self._link_pending_path()
-        if not os.path.exists(p):
-            return []
-        out: list[str] = []
-        with open(p, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    eid = json.loads(line).get("event_id")
-                except json.JSONDecodeError:
-                    continue
-                if eid and eid not in out:
-                    out.append(eid)
-        return out
-
-    def _link_pending_remove(self, event_ids: set[str]) -> None:
-        if not event_ids:
-            return
-        keep = [e for e in self._link_pending_list() if e not in event_ids]
-        tmp = self._link_pending_path() + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            for e in keep:
-                f.write(json.dumps({"event_id": e}) + "\n")
-        os.replace(tmp, self._link_pending_path())
+    # ---------- 共享Event行级维护 ----------
 
     def _patch_event_rows(self, updates: dict[str, dict],
                           whitelist: tuple[str, ...] = ("change",
@@ -2412,264 +1908,6 @@ class EmberService:
             if "entity_refs" in up:
                 _EVENT_ENTITY_REFS[eid] = list(up["entity_refs"])
 
-    def _assemble_link_material(self, eid: str) -> dict | None:
-        """单份挂关系材料（sleep_v2.assemble_materials 的 service 版）。
-
-        候选 = 该事件 turn_span 区间 ∩ 召回记账带出的旧事件；排除
-        superseded/outdated 与判过留痕 pair。候选空 ≠ 没活干（2026-10-16
-        方案 A，momo 拍板）：照出空材料（old_events=[]，窗口 AI 只做
-        归属动作）——否则空库冷启动/全新话题会卡死 pending。
-        仅数据异常（无 span / 无 session）→ None（诚实跳过）。
-        """
-        try:
-            ev = self.store.get_event(eid)
-        except KeyError:
-            return None
-        spans = self.turn_spans.span_of(eid)
-        if not spans:
-            return None
-        sess = re.match(r"conversation/session-([^/]+)",
-                        ev.source_ref or "")
-        if sess is None:
-            return None
-        sid = sess.group(1)
-        keys = [(sid, t) for span in spans for t in range(span[0], span[1] + 1)]
-        old_ids: list[str] = []
-        for oid in self.recall_ledger.events_recalled_in_turns(keys):
-            if oid == eid:
-                continue
-            if not self.sleep_state.recall_allowed(oid):
-                continue
-            if self.pair_seen.is_seen(eid, oid):
-                continue
-            old_ids.append(oid)
-        # 候选空照常出材料（方案 A）：pairs 给空，窗口 AI 只判归属
-
-        def _ent_info(oid: str) -> tuple[str, str, str]:
-            ref = _event_entity_of(self.store, oid)
-            if not ref:
-                return "", "", ""
-            try:
-                ent = self.entity_store.get(ref)
-                return ent.name, ref, (ent.summary or "").strip()
-            except KeyError:
-                return "", ref, ""
-
-        olds = []
-        for oid in old_ids:
-            try:
-                oe = self.store.get_event(oid)
-            except KeyError:
-                continue
-            name, ref, ent_summary = _ent_info(oid)
-            olds.append({"event_id": oid, "entity_name": name,
-                         "entity_id": ref, "entity_summary": ent_summary,
-                         "core": oe.core or "",
-                         "summary": oe.summary or ""})
-        ent_ref = _event_entity_of(self.store, eid)
-        try:
-            ent_name = (self.entity_store.get(ent_ref).name
-                        if ent_ref else "")
-        except KeyError:
-            ent_name = ""
-        return {"new_id": eid,
-                "new_event": {"event_id": eid, "core": ev.core or "",
-                              "summary": ev.summary or ""},
-                "entity_name": ent_name,
-                "old_events": olds}
-
-    def sidecar_link_batches(self) -> dict[str, Any]:
-        """接口 1（材料出队）：pending → 材料 → 均分 ≤5 批。
-
-        出队不扣 pending——交卷成功才扣；断线重进材料照旧（幂等）。
-        """
-        pending = self._link_pending_list()
-        materials = [m for m in
-                     (self._assemble_link_material(e) for e in pending) if m]
-        n = len(materials)
-        if n == 0:
-            return {"batches": [], "pending_total": len(pending),
-                    "materials_total": 0}
-        nbatch = min(5, n)
-        size = (n + nbatch - 1) // nbatch
-        batches = [{"batch_index": i // size,
-                    "materials": materials[i:i + size]}
-                   for i in range(0, n, size)]
-        return {"batches": batches, "pending_total": len(pending),
-                "materials_total": n}
-
-    def _validate_link_verdict(self, verdict: dict,
-                               material: dict) -> list[str]:
-        """sleep_v2.validate 的 service 版（同规则）。
-
-        校验基于**回传材料**：pair 只允许指向材料内旧事件（判联 AI
-        只能看到材料里的事，指向材料外=幻觉，整份拒绝）。
-        """
-        errs: list[str] = []
-        old_ids = {o["event_id"] for o in material.get("old_events", [])}
-        pairs = verdict.get("pairs")
-        if not isinstance(pairs, list):
-            return ["pairs 缺失或不是列表"]
-        seen_old: set[str] = set()
-        for p in pairs:
-            oid = p.get("old_event_id")
-            if oid not in old_ids:
-                errs.append(f"pair 指向材料外事件: {oid}")
-                continue
-            if oid in seen_old:
-                errs.append(f"pair 重复: {oid}")
-            seen_old.add(oid)
-            outcome = p.get("outcome")
-            if outcome not in ("relation", "neighbor", "none"):
-                errs.append(f"{oid} outcome 非法: {outcome}")
-                continue
-            if outcome == "relation":
-                if p.get("type") not in RELATION_TYPES:
-                    errs.append(f"{oid} relation type 非法: {p.get('type')}")
-                if p.get("confidence") not in ("high", "medium", "low"):
-                    errs.append(f"{oid} confidence 非法: {p.get('confidence')}")
-                if p.get("type") == "resolves":
-                    if not (p.get("change") or "").strip():
-                        errs.append(f"{oid} resolves 缺 change")
-                    if not (p.get("status_evidence") or "").strip():
-                        errs.append(f"{oid} resolves 缺 status_evidence")
-            elif outcome in ("neighbor", "none") and p.get("type"):
-                errs.append(f"{oid} {outcome} 不应带 type")
-
-        ent = verdict.get("entity") or {}
-        action = ent.get("action", "none")
-        if action not in ("extract", "attach", "none"):
-            errs.append(f"entity.action 非法: {action}")
-            return errs
-        new_id = material.get("new_id") or ""
-        if action == "extract":
-            if not (ent.get("name") or "").strip():
-                errs.append("extract 缺 name")
-            else:
-                try:
-                    existing = {e.name.strip().lower()
-                                for e in self.entity_store.all()}
-                except Exception:  # noqa: BLE001
-                    existing = set()
-                if ent["name"].strip().lower() in existing:
-                    errs.append(f"extract name 与已有 Entity 重复: {ent['name']}")
-            members = ent.get("member_event_ids") or []
-            if len(members) < 3:
-                errs.append(f"extract member 不足 3: {len(members)}")
-            for mid in members:
-                if _event_entity_of(self.store, mid):
-                    errs.append(f"member 已有归属（散事件才可入）: {mid}")
-        elif action == "attach":
-            target = ent.get("entity_id") or ""
-            valid_targets = {o.get("entity_id") for o in
-                             material.get("old_events", [])
-                             if o.get("entity_id")}
-            if target not in valid_targets:
-                errs.append(f"attach 目标不是材料内旧事件的实体: {target}")
-            if _event_entity_of(self.store, new_id):
-                errs.append("attach 目标新事件已有归属（单归属）")
-            close = ent.get("close", False)
-            if isinstance(close, str):
-                if close.lower() not in ("true", "false"):
-                    errs.append(f"close 非法: {close}")
-            if close and not (ent.get("close_reason") or "").strip():
-                errs.append("close=true 缺 close_reason")
-        return errs
-
-    def _apply_link_verdict(self, verdict: dict, material: dict,
-                            source_message_id: int | None = None) -> dict:
-        """sleep_v2.apply_verdict 的 service 版：三分支落库。
-
-        prov = sleep-link:window[:m<message_id>]——回指触发判联的窗口轮。
-        """
-        new_id = material.get("new_id") or ""
-        prov = "sleep-link:window"
-        if source_message_id:
-            prov += f":m{source_message_id}"
-        summary: dict[str, Any] = {"new_event": new_id, "relations": [],
-                                   "resolves": [], "entity_action": "none",
-                                   "marked_pairs": 0}
-
-        for p in verdict.get("pairs", []):
-            oid = p["old_event_id"]
-            outcome = p.get("outcome")
-            # 判过的 pair 全部留痕（含 relation）——补跑与首跑等价
-            self.pair_seen.mark(new_id, oid, verdict=str(outcome),
-                                decided_by=prov)
-            summary["marked_pairs"] += 1
-            if outcome != "relation":
-                continue
-            rel = EventRelation(
-                relation_id=f"rel_{uuid.uuid4().hex[:8]}",
-                src_event=oid,           # 方向固定：旧 → 新
-                dst_event=new_id,
-                type=p["type"],
-                confidence=p.get("confidence", "high"),
-                evidence_refs=[f"{prov}:{p.get('reason', '')}"],
-                provenance_refs=[prov],
-            )
-            self.relation_store.add(rel)
-            summary["relations"].append(f"{oid}--{p['type']}-->{new_id}")
-            if p["type"] == "resolves":
-                # 三处落盘之二三：status 标记 + change 补写
-                self.sleep_state.mark(oid, "superseded",
-                                      p.get("status_evidence", ""), prov)
-                self._patch_event_rows({oid: {"change": p.get("change", "")}})
-                summary["resolves"].append(oid)
-
-        ent = verdict.get("entity") or {}
-        summary.update(self._apply_entity_action(ent, [new_id], prov))
-
-        # 观察转正（2026-10-16 ④observe）：observe 事件在判联中判出
-        # 具体联系（relation）= 被印证 → origin 改 affirmed。
-        # 判 neighbor/none → 放着不动（无退场线，momo 拍板）。
-        if summary["relations"]:
-            try:
-                if (self.store.get_event(new_id).origin or "") == "observe":
-                    self._patch_event_rows({new_id: {"origin": "affirmed"}},
-                                           whitelist=("origin",))
-            except KeyError:
-                pass
-        return summary
-
-    def sidecar_link_submit(self, body: dict[str, Any]) -> dict[str, Any]:
-        """接口 2（交卷）：app 把窗口 AI 的 link_relations 结果转交。
-
-        每份 {material, verdict}：校验基于回传材料（防幻觉指向材料外）
-        → 落库三分支 → pending 扣减。整条拒绝不炸（回执 errors）。
-        """
-        results = (body or {}).get("results") or []
-        saved: list[dict] = []
-        rejected: list[dict] = []
-        done_ids: set[str] = set()
-        for r in results:
-            material = r.get("material") or {}
-            verdict = r.get("verdict") or {}
-            new_id = (material.get("new_event") or {}).get("event_id") \
-                or material.get("new_id") or ""
-            errs = self._validate_link_verdict(verdict, material)
-            if errs:
-                rejected.append({"new_id": new_id, "errors": errs})
-                continue
-            summary = self._apply_link_verdict(
-                verdict, material,
-                source_message_id=(body or {}).get("source_message_id"))
-            if new_id:
-                done_ids.add(new_id)
-            saved.append({"new_id": new_id, **summary})
-        self._link_pending_remove(done_ids)
-        return {"saved": saved, "rejected": rejected,
-                "remaining_pending": self._link_pending_list()}
-
-    def sidecar_link_progress(self) -> dict[str, Any]:
-        """接口 3（进度/断点续跑）：pending 剩余 + 可组材料 + 剩余批数。"""
-        pending = self._link_pending_list()
-        ready = [m for m in
-                 (self._assemble_link_material(e) for e in pending) if m]
-        return {"pending_total": len(pending),
-                "materials_ready": len(ready),
-                "batches_remaining": min(5, len(ready)) if ready else 0,
-                "pending_events": pending}
 
     def sidecar_sediment_evidence(self, body: dict[str, Any]) -> dict[str, Any]:
         """沉淀证据接收（10-14 设计稿第 4 步，10.15 分工对齐版）。
@@ -3019,326 +2257,6 @@ class EmberService:
             out["note"] = "；".join(notes)
         return out
 
-    def _apply_entity_action(self, ent: dict, attach_event_ids: list[str],
-                             prov: str) -> dict[str, Any]:
-        """归属动作落库（2026-10-17 起归属全在窗口判联——glm structure
-        归属退役，momo：散事主题延续时召回自举，无需全库扫兜底）。
-
-        extract：开新户（当场带 summary）+ 散事件入户新实体；attach：
-        事件单归属挂到已有实体 + 当场改写实体 summary（窗口 AI 一手
-        材料）+ 收尾判定/起算点重置。校验由调用方完成，这里只做幂等
-        兜底（已归属的跳过不重挂）。summary 宽松：未输出/空 → 保旧值。
-        """
-        action = ent.get("action", "none")
-        now = datetime.now(timezone.utc).astimezone().isoformat(
-            timespec="seconds")
-        new_summary = (ent.get("summary") or "").strip()
-        out: dict[str, Any] = {"entity_action": action}
-        if action == "extract":
-            e = Entity(
-                entity_id=f"ent_{uuid.uuid4().hex[:8]}",
-                name=(ent.get("name") or "").strip(),
-                aliases=[a.strip() for a in (ent.get("aliases") or [])
-                         if a.strip()],
-                summary=new_summary,
-                summary_at=now if new_summary else "",
-                provenance_refs=[prov],
-            )
-            self.entity_store.upsert(e)
-            self.entity_store.save()
-            members = list(dict.fromkeys(ent.get("member_event_ids") or []))
-            patch = {mid: {"entity_refs": [e.entity_id]} for mid in members
-                     if not _event_entity_of(self.store, mid)}
-            self._patch_event_rows(patch)
-            out["entity_action"] = (f"extract:{e.entity_id}({e.name})"
-                                    f" x{len(patch)}")
-            out["entity_id"] = e.entity_id
-        elif action == "attach":
-            target = ent.get("entity_id") or ""
-            ids = [eid for eid in dict.fromkeys(attach_event_ids)
-                   if not _event_entity_of(self.store, eid)]
-            if ids:
-                self._patch_event_rows(
-                    {eid: {"entity_refs": [target]} for eid in ids})
-            out["entity_action"] = f"attach:{target}"
-            out["members_patched"] = len(ids)
-            # attach 顺带判目标实体收尾（momo 2026-10-09 裁决，照脚本）
-            close = ent.get("close", False)
-            if isinstance(close, str):
-                close = close.lower() == "true"
-            try:
-                target_ent = self.entity_store.get(target)
-            except KeyError:
-                target_ent = None
-            if target_ent is not None:
-                # attach 当场改写实体 summary（2026-10-17 momo：夜批重算退役）
-                if new_summary:
-                    target_ent.summary = new_summary
-                    target_ent.summary_at = now
-                    self.entity_store.upsert(target_ent)
-                    self.entity_store.save()
-                    out["summary_rewritten"] = True
-                if close:
-                    if target_ent.status == "open":
-                        target_ent.close(now)
-                        out["attach_closed"] = target
-                    target_ent.closed_at = now
-                    self.entity_store.save()
-                    out["attach_reset_closed_at"] = target_ent.closed_at
-                elif target_ent.status == "closed":
-                    # 归入已 close 的实体且未判收尾 → 重置起算点
-                    target_ent.closed_at = now
-                    self.entity_store.save()
-                    out["attach_reset_closed_at"] = target_ent.closed_at
-        return out
-
-    def _observe_extra_hit(self, text: str,
-                           exclude: set[str]) -> str | None:
-        """观察附加席命中：输入向量 × 观察层 core 向量，宽松阈值，
-        至多 1 条（momo 2026-10-16：匹配宽松一点，被召回才谈印证）。
-
-        候选 = origin ∈ {observe, affirmed} 且未被 superseded 且不在
-        本轮主席里；向量缺失/失败 → 视为未命中，绝不阻断主对话。
-        """
-        cands = [ev for ev in self.store.all_events()
-                 if (getattr(ev, "origin", "") or "") in ("observe",
-                                                          "affirmed")
-                 and self.sleep_state.recall_allowed(ev.event_id)
-                 and not self.pin_store.is_pinned(ev.event_id)
-                 and ev.event_id not in exclude]
-        if not cands:
-            return None
-        try:
-            q = embed_text(text)
-        except Exception:  # noqa: BLE001 — 向量失败就当没命中
-            return None
-        best: str | None = None
-        best_sim = observe_mod.HIT_FLOOR
-        for ev in cands:
-            v = self.core_vectors.get(ev.event_id)
-            if not v:
-                continue
-            sim = cosine(q, v["vector"])
-            if sim >= best_sim:
-                best, best_sim = ev.event_id, sim
-        return best
-
-    # ---------- 观察式记忆（2026-10-16 设计夜定稿：④observe） ----------
-    #
-    # sleep 收尾三步：提炼（未覆盖区间 → 信息点）→ 判联转正（现成
-    # 管线零改动：判出 relation 即印证）→ 夜批合并（高相似聚 → LLM
-    # 定夺并写合并版，旧的标 superseded）。
-    # 观察事件落库时 fill turn_span = 证据区间对应轮次——判联材料
-    # 组装（span ∩ 召回记账）与 read_memory_source 因此零改动兼容。
-
-    def run_observe_pass(self) -> dict[str, Any]:
-        """观察提炼：逐会话查游标 → 未覆盖消息攒够门槛才调 LLM。"""
-        if not source_client.configured():
-            return {"status": "unconfigured", "created": 0}
-        sids = sorted({s for (s, _t) in self.turn_ledger.user_msg})
-        report: dict[str, Any] = {"status": "ok", "created": 0,
-                                  "sessions": []}
-        for sid in sids:
-            try:
-                out = self._observe_session(sid)
-            except source_client.SourceUnavailable as exc:
-                out = {"session": sid, "status": "unavailable",
-                       "error": str(exc), "created": 0}
-            except Exception as exc:  # noqa: BLE001 — 单会话失败不牵连
-                out = {"session": sid, "status": "failed",
-                       "error": str(exc), "created": 0}
-            report["sessions"].append(out)
-            report["created"] += out.get("created", 0)
-        return report
-
-    def _observe_session(self, sid: str) -> dict[str, Any]:
-        """单会话观察：拉增量 → 过滤 span 已覆盖 → 门槛 → 提炼。"""
-        cursor = self.observe_cursor.get(sid)
-        identities = generation_messages(self.generations, sid, completed_only=True)
-        # Validate even consumed anchors; a numeric cursor is not a path proof.
-        rows = [m for m in read_messages(sid, identities, self.source_instance)
-                if m["message_id"] > cursor]
-        if not rows:
-            return {"session": sid, "status": "empty", "created": 0}
-        covered = self._covered_turns(sid)
-        unc: list[tuple[dict, int | None]] = []
-        for m in rows:
-            t = m["turn"]
-            if t is None or t not in covered:
-                unc.append((m, t))
-        if len(unc) < observe_mod.MIN_UNCOVERED:
-            return {"session": sid, "status": "below_threshold",
-                    "new_rows": len(rows), "uncovered": len(unc),
-                    "created": 0}
-        batch = unc[: observe_mod.MAX_BATCH]
-        user = build_observe_user_prompt(
-            os.environ.get("EMBER_OWNER_NAME", "user"),
-            observe_mod.dialogue_lines([m for m, _t in batch]))
-        engine = executors.load_engine(self.store.root, "observe")
-        raw = executors.call_llm(OBSERVE_SYSTEM_PROMPT, user, engine,
-                                 task="observe")
-        verdict = _parse_llm_json(raw)
-        obs_list = verdict.get("observations")
-        if not isinstance(obs_list, list):
-            obs_list = []
-        created: list[str] = []
-        for item in obs_list[: observe_mod.MAX_OUTPUT]:
-            eid = self._observe_create_event(sid, item, batch)
-            if eid:
-                created.append(eid)
-        # 游标推进：提炼成功即推进（0 条观察也算消化完毕）
-        self.observe_cursor.set(
-            sid, max(m["message_id"] for m, _t in batch))
-        return {"session": sid, "status": "ok", "uncovered": len(unc),
-                "processed": len(batch), "created": len(created),
-                "event_ids": created}
-
-    def _covered_turns(self, sid: str) -> set[int]:
-        """该会话已被任一事件的 turn_span 覆盖的 turn 集合。"""
-        covered: set[int] = set()
-        for ev in self.store.all_events():
-            m = re.match(r"conversation/session-([^/]+)", ev.source_ref or "")
-            if not m or m.group(1) != sid:
-                continue
-            for lo, hi in self.turn_spans.span_of(ev.event_id):
-                covered.update(range(lo, hi + 1))
-        return covered
-
-    def _observe_create_event(self, sid: str, item: Any,
-                              batch: list[tuple[dict, int | None]]
-                              ) -> str | None:
-        """一条观察 → Event 落库（origin=observe）+ span + 向量 + pending。"""
-        if not isinstance(item, dict):
-            return None
-        summary = str(item.get("summary", "")).strip()
-        if not summary:
-            return None
-        msgs = [m for m, _t in batch]
-        seqs = [m["message_id"] for m in msgs]
-        turns = sorted({t for _m, t in batch if t is not None})
-        eid = f"EVT-{len(self.store.all_events()) + 1:03d}-{uuid.uuid4().hex[:6]}"
-        first = batch[0][0]
-        event_time = _now_iso()
-        created = first.get("created_at")
-        if isinstance(created, (int, float)) and created > 0:
-            ts = created / 1000 if created > 10 ** 12 else created
-            event_time = datetime.fromtimestamp(
-                ts, tz=timezone.utc).astimezone().isoformat(timespec="seconds")
-        ev = Event(
-            event_id=eid, version_id=f"{eid}-v1",
-            source_ref=f"conversation/session-{sid}",
-            raw_ref=f"conversation/session-{sid}/seq-{min(seqs)}-{max(seqs)}",
-            event_time=event_time, ingest_time=_now_iso(),
-            turn_refs=[f"turn-{t}" for t in range(turns[0], turns[-1] + 1)]
-            if turns else [],
-            summary=summary, origin="observe",
-            key_quotes=verify_quotes(item.get("quotes"), msgs),
-            provenance_refs=["observe"],
-        )
-        if turns:
-            self.event_sources.capture(eid, ev.version_id, sid,
-                [(turns[0], turns[-1])], msgs)
-        self.store.write_event(ev)
-        if turns:
-            self.turn_spans.fill(eid, [(turns[0], turns[-1])],
-                                 filled_by="observe")
-        self.link_pending_add(eid)
-        try:
-            model = os.environ.get("EMBER_EMBED_MODEL",
-                                   "Qwen/Qwen3-Embedding-8B")
-            self.core_vectors.upsert(eid, summary, embed_text(summary), model)
-        except Exception:  # noqa: BLE001 — 向量失败不拦落库（夜批 backfill 兜底）
-            pass
-        return eid
-
-    def _merge_observations(self) -> dict[str, Any]:
-        """夜批合并：观察向量两两比对 → 高相似组 → LLM 判定并写合并版。"""
-        obs = [ev for ev in self.store.all_events()
-               if (getattr(ev, "origin", "") or "") == "observe"
-               and self.sleep_state.recall_allowed(ev.event_id)]
-        if len(obs) < 2:
-            return {"candidates": len(obs), "groups": 0, "merged": 0}
-        parent = list(range(len(obs)))
-
-        def find(i: int) -> int:
-            while parent[i] != i:
-                parent[i] = parent[parent[i]]
-                i = parent[i]
-            return i
-
-        for i in range(len(obs)):
-            for j in range(i + 1, len(obs)):
-                vi = self.core_vectors.get(obs[i].event_id)
-                vj = self.core_vectors.get(obs[j].event_id)
-                if not vi or not vj:
-                    continue
-                if (cosine(vi["vector"], vj["vector"])
-                        >= observe_mod.SIM_THRESHOLD):
-                    parent[find(i)] = find(j)
-        groups: dict[int, list[int]] = {}
-        for i in range(len(obs)):
-            groups.setdefault(find(i), []).append(i)
-        report: dict[str, Any] = {"candidates": len(obs), "groups": 0,
-                                  "merged": 0, "skipped": 0}
-        engine = executors.load_engine(self.store.root, "observe_merge")
-        for members in groups.values():
-            if len(members) < 2:
-                continue
-            members = members[: observe_mod.MAX_MERGE_GROUP]
-            report["groups"] += 1
-            items = [{"summary": obs[i].summary,
-                      "quotes": obs[i].key_quotes} for i in members]
-            try:
-                raw = executors.call_llm(
-                    OBSERVE_MERGE_PROMPT,
-                    build_observe_merge_user_prompt(items), engine,
-                    task="observe_merge")
-                v = _parse_llm_json(raw)
-            except Exception:  # noqa: BLE001 — 单组失败不牵连
-                report["skipped"] += 1
-                continue
-            merged_summary = str(v.get("summary", "")).strip()
-            if not v.get("merge") or not merged_summary:
-                continue
-            if self._observe_merged_event(obs, members, merged_summary):
-                report["merged"] += 1
-        return report
-
-    def _observe_merged_event(self, obs: list, members: list[int],
-                              summary: str) -> str | None:
-        """合并版落库：证据继承，旧观察标 superseded（召回自动不再带出）。"""
-        order = sorted(members, key=lambda i: obs[i].event_time)
-        oldest = obs[order[0]]
-        eid = f"EVT-{len(self.store.all_events()) + 1:03d}-{uuid.uuid4().hex[:6]}"
-        quotes: list[dict] = []
-        for i in order:
-            for q in obs[i].key_quotes or []:
-                if q not in quotes:
-                    quotes.append(dict(q))
-        ev = Event(
-            event_id=eid, version_id=f"{eid}-v1",
-            source_ref=oldest.source_ref, raw_ref=oldest.raw_ref,
-            event_time=oldest.event_time, ingest_time=_now_iso(),
-            turn_refs=list(oldest.turn_refs or []),
-            summary=summary, origin="observe", key_quotes=quotes[:3],
-            provenance_refs=["observe-merge"]
-                            + [obs[i].event_id for i in order],
-        )
-        self.store.write_event(ev)
-        spans = self.turn_spans.span_of(oldest.event_id)
-        if spans:
-            self.turn_spans.fill(eid, spans, filled_by="observe-merge")
-        self.link_pending_add(eid)
-        for i in order:
-            self.sleep_state.mark(obs[i].event_id, "superseded",
-                                  f"被合并观察 {eid} 取代", "observe-merge")
-        try:
-            model = os.environ.get("EMBER_EMBED_MODEL",
-                                   "Qwen/Qwen3-Embedding-8B")
-            self.core_vectors.upsert(eid, summary, embed_text(summary), model)
-        except Exception:  # noqa: BLE001
-            pass
-        return eid
 
     # ---------- 简报（2026-10-17 设计夜定稿：截断驱动，拼装式零 LLM） ----------
     #
@@ -3596,54 +2514,3 @@ class EmberService:
         removed = self.pin_store.remove(eid)
         return {"status": "ok", "event_id": eid, "pinned": False,
                 "was_pinned": removed}
-
-    def run_structure_maintenance(self) -> dict[str, Any]:
-        """睡眠收尾维护：cue 收紧 + 向量补建；观察条目已退役。
-
-        归属判定（extract/attach + entity summary 当场写改）已全部
-        收编窗口判联（momo：散事主题延续时召回自举，glm 全库扫兜底
-        退役；夜批 summary 重算与脏标记一并退役）。
-        app 编排在挂关系清完之后调用（顺序契约见 API.md）。幂等。
-        """
-        report: dict[str, Any] = {"cue_tighten": None}
-        report["vector_backfill"] = self._backfill_vectors()
-        report["cue_tighten"] = CueTightener(
-            self.store, self.recall_ledger,
-            self.store._path(EVENTS_FILE),  # noqa: SLF001
-            self.entity_store).tighten()
-        # Pool grouping now feeds App-authored knowledge. Keep response keys
-        # for callers, but never create or merge retired observation entries.
-        report["observe"] = {"status": "retired"}
-        report["observe_merge"] = {"status": "retired"}
-        return report
-
-    def _backfill_vectors(self) -> dict[str, Any]:
-        """夜批增量补向量：无 core 向量的新事件、无向量且 summary 非空
-        的新实体——search 与实体卡的索引保持新鲜。单条失败不牵连。"""
-        model = os.environ.get("EMBER_EMBED_MODEL",
-                               "Qwen/Qwen3-Embedding-8B")
-        added = {"events": 0, "entities": 0, "failed": 0}
-        for ev in self.store.all_events():
-            if self.core_vectors.has(ev.event_id):
-                continue
-            text = (ev.core or ev.summary or "").strip()
-            if not text:
-                continue
-            try:
-                self.core_vectors.upsert(ev.event_id, text,
-                                         embed_text(text), model)
-                added["events"] += 1
-            except Exception:  # noqa: BLE001 — 单条失败不牵连
-                added["failed"] += 1
-        for e in self.entity_store.all():
-            summary = (e.summary or "").strip()
-            if not summary or self.entity_vectors.has(e.entity_id):
-                continue
-            try:
-                self.entity_vectors.upsert(e.entity_id, summary,
-                                           embed_text(summary), model)
-                added["entities"] += 1
-            except Exception:  # noqa: BLE001 — 单条失败不牵连
-                added["failed"] += 1
-        return added
-

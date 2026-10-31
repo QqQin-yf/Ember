@@ -5,7 +5,7 @@ from .knowledge_tools import append_recall
 
 def automatic_hybrid_recall(service,session,turn,text,context_start_id=None,deferred_entries=None,context_message_ids=None):
     result=service.legacy_event_recall_pipeline(session,turn,text,
-        context_start_id=context_start_id,deferred_entries=deferred_entries,allow_observe=False,context_message_ids=context_message_ids)
+        context_start_id=context_start_id,deferred_entries=deferred_entries,context_message_ids=context_message_ids)
     from .memory_lifecycle import Lifecycle, filter_recall
     life=Lifecycle(service.store.root,service.source_instance)
     blocked=filter_recall(service,result,session,context_start_id,context_message_ids)

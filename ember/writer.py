@@ -1,25 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Ember v3 Phase 3 — 记忆工具定义（MCP 化：说明书全住工具里）。
-
-2026-10-11 Loism 拍板「记忆系统无感化」：原 EMBEDDED_WRITER_PROMPT（system
-注入的写作课文）整体退役——它以第二人称描述存在状态（"你随身带着长期记忆"），
-在新会话（无人设无历史）里会稀释模型自我认同（事故：TA 自称"我是 Ember"）。
-全部写作规则迁移进 Tool Description 与各参数字段的 description；模型只在
-决定是否调用工具时才读它们，不再常驻 system。
-
-EMBEDDED_WRITER_PROMPT 保留为空常量兼容既有导入；service._with_embedded_prompt
-遇空串直接跳过注入，欲恢复旧形态把课文填回常量即可。
-"""
+"""记忆工具定义与字段校验；写作说明仅在工具 description 中。"""
 from __future__ import annotations
 
-import json
 import re
 from typing import Any
-
-# 2026-10-11 退役（无感化拍板）：写作规则已全部内嵌工具描述与字段说明，
-# 不再向 system 注入任何第二人称机制叙述。保留空常量兼容既有导入；
-# 欲恢复旧形态，把课文填回此常量即可（service 端注入逻辑仍在）。
-EMBEDDED_WRITER_PROMPT = ""
 
 TOOL_NAME = "create_memory_event"
 READ_SOURCE_TOOL_NAME = "read_memory_source"
@@ -374,7 +358,7 @@ REVISE_TOOL_DESCRIPTION = (
 
 
 def build_revise_tool_spec() -> list[dict[str, Any]]:
-    """revise_memory_event 的 MCP 工具 schema（旁路专用，代理循环不挂）。"""
+    """revise_memory_event 的 MCP 工具 schema（旁路工具）。"""
     props: dict[str, Any] = {
         "event_id": {"type": "string",
                      "description": "要修改的记忆 id"},
@@ -469,7 +453,7 @@ UNPIN_TOOL_DESCRIPTION = (
 
 
 def build_pin_tool_specs() -> list[dict[str, Any]]:
-    """钉住/取消钉住的 MCP 工具 schema（旁路专用，代理循环不挂）。"""
+    """钉住/取消钉住的 MCP 工具 schema（旁路工具）。"""
     def _spec(name: str, desc: str) -> dict[str, Any]:
         return {
             "type": "function",
@@ -491,68 +475,3 @@ def build_pin_tool_specs() -> list[dict[str, Any]]:
         }
     return [_spec(PIN_TOOL_NAME, PIN_TOOL_DESCRIPTION),
             _spec(UNPIN_TOOL_NAME, UNPIN_TOOL_DESCRIPTION)]
-
-
-def parse_tool_call(message: dict[str, Any]) -> dict[str, Any] | None:
-    """从 writer 返回的 message 中提取 create_memory_event 调用。
-
-    返回 None 表示 writer 决定不创建 Event。arguments 解析失败抛 LLMError 由上层隔离。
-    """
-    calls = message.get("tool_calls") or []
-    for call in calls:
-        fn = (call or {}).get("function") or {}
-        if fn.get("name") == TOOL_NAME:
-            raw = fn.get("arguments") or "{}"
-            args = _loads_lenient(raw) if isinstance(raw, str) else raw
-            return args
-    return None
-
-
-def _loads_lenient(raw: str) -> dict[str, Any]:
-    """宽容解析 writer 的 tool arguments。
-
-    背景：部分 provider（如 glm-4.7）偶发截断长 JSON arguments。
-    策略（baseline，不是已证明设计）：
-    1. 直接 loads；
-    2. 失败则逐层补全未闭合的 { [ 与悬挂字符串，尝试修复；
-    3. 修不了一点截断内容就抛 ValueError，宁可丢弃也不写入残缺 Event。
-    """
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        pass
-
-    text = raw.strip()
-    # 去掉悬挂的引号/逗号尾巴
-    while text and text[-1] in ',"':
-        text = text[:-1]
-
-    # 若当前处于字符串内部，先补一个结束引号
-    in_str = False
-    escape = False
-    for ch in text:
-        if escape:
-            escape = False
-        elif ch == "\\":
-            escape = True
-        elif ch == '"':
-            in_str = not in_str
-    if in_str:
-        text += '"'
-
-    stack = []
-    for ch in text:
-        if ch in "{[":
-            stack.append(ch)
-        elif ch in "}]":
-            if stack:
-                stack.pop()
-    text += "".join("}" if c == "{" else "]" for c in reversed(stack))
-
-    try:
-        args = json.loads(text)
-    except json.JSONDecodeError as ex:
-        raise ValueError(
-            f"tool arguments 不是合法 JSON 且无法修复: {ex}; 原始长度 {len(raw)}") from ex
-    # 修复产物仍要走完整校验，字段残缺会被 validate_writer_arguments 拒绝
-    return args

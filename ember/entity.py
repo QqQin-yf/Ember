@@ -43,16 +43,9 @@ class Direction:
 
 @dataclass
 class Entity:
-    """长期稳定认知锚点（第 6 认知对象）。
+    """Entity名片及持久身份。App在Sleep正式提取；后台合并同一对象并保留别名。
 
-    手动提取阶段（momo 2026-10-03 裁决，方案 A）：
-    - "Ember" 的三个指称（记忆系统 / 助手 / 测试前端）暂合为一个 Entity，
-      别名归并（canonicalization）留给后续 Sleep/挂载层，不现在拆。
-
-    生命周期（架构文档 §2.1，2026-10-08 定稿）：
-    - status: open / closed
-    - open 期间：其下任何 Event 的 Cue 都不参与 Sleep 收紧（活跃豁免）
-    - 收紧起算点 = closed_at（Entity 被 close 的时刻）
+    open/closed及closed_at保留为历史数据字段；不再触发自动cue收紧。
     """
     entity_id: str
     name: str                 # 规范名（canonical name）

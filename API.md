@@ -1,6 +1,6 @@
 # ember 接口文档
 
-> ember：旁路记忆系统。职责边界：记忆写入（模型自主+校验）、召回注入、sleep 夜间维护（挂关系/结构维护）、沉淀证据账本；
+> ember：旁路记忆系统。职责边界：记忆写入（模型自主+校验）、召回注入、异步维护与 Sleep 正式产出、沉淀证据账本；
 > **不管**对话主路径——ember 挂了/未部署，聊天照常，只损失记忆能力。
 > 消费方：app（钩子组 + sleep 编排 + 沉淀证据转交）、模型的工具循环（MCP 工具组）。
 > （梦已归 app 的 dream_submit 工具，ember 不再向 heart 推送——旧梦通道 2026-10-15 退役。）
@@ -83,7 +83,7 @@
 
 ### 4.1.1 普通生成显式绑定（2026-10-20 本段）
 
-turn_start 可传 recall_id，MCP 随后逐请求带 X-Ember-Recall-Id 和 X-Ember-Tool-Call-Id，turn_end 必须带回同一 recall_id。新调用按活动生成校验，完成工具回执可持久重试；不再借共享当前槽。新增 GET /ember/generations/{recall_id} 及其 /tools/{tool_call_id} 查询。完整字段、错误码、重启与工具读取回执不持久保存规则见 [GENERATION_BINDING_SPEC.md](GENERATION_BINDING_SPEC.md)。
+turn_start 可传 recall_id，MCP 随后逐请求带 X-Ember-Recall-Id 和 X-Ember-Tool-Call-Id，turn_end 必须带回同一 recall_id。新调用按活动生成校验，完成工具回执可持久重试；不再借共享当前槽。新增 GET /ember/generations/{recall_id} 及其 /tools/{tool_call_id} 查询。完整字段、错误码、重启与工具读取回执不持久保存规则见 GENERATION_BINDING_SPEC.md（本地历史记录）。
 
 ### 4.1.2 召回快照查询及 24 小时正文留存
 
@@ -155,7 +155,7 @@ MCP 的 schema 校验失败，以及业务返回 `status=failed`、`status=rejec
 
 层级放错会指明 `event.recall_routes` 应移到顶层，不自动搬移或补全模型参数。原文读取失败保留各自的 `source_*` code 并提供处理建议；只有可用原文中的摘录不匹配才返回 `quote_not_found`，其 `field=quote_spans`。未配置、鉴权失败、会话/路径不明均不能通过改写摘录来绕过。
 
-验收记录见 [TOOL_ERROR_RELIABILITY.md](TOOL_ERROR_RELIABILITY.md)。
+验收记录见 TOOL_ERROR_RELIABILITY.md（本地历史记录）。
 
 ### 5.2 read_memory_source
 
@@ -199,122 +199,25 @@ MCP 的 schema 校验失败，以及业务返回 `status=failed`、`status=rejec
 
 回执：`{"status": "ok", "event_id", "pinned": true/false [, "already"|"was_pinned"]}`
 
-## 6. Sleep 夜间维护（消费方：app 编排）
+## 6. Sleep正式产出与后台维护
 
-用户在 app 侧按键进入 sleep（人为编排，与 heart 入睡档同构）后，app 按固定顺序编排两个阶段：**挂关系**（link，借窗口跑——2026-10-17 起归属判定 extract/attach 与 entity summary 当场写改也全在此处）与**收尾维护**（structure/run，ember 本地+轻活：cue 收紧 + 向量补建 + 观察提炼与合并）。
+关系判断、归类、资格标注由独立后台处理，不由App Sleep重复执行。Sleep读取冻结待办，App AI正式提取Entity、写Event/认知/规律，审阅合并/补写/维持并评分，以及pin/unpin；之后继续沉淀与dream。
 
-> **编排顺序（务必对 app 讲清）**：挂关系清完**不等于没活儿了**——之后还有一步 `structure/run`。必须等 link 交卷清零（progress 归零）后再调 structure/run；漏调会漏掉 cue 收紧、向量补建与观察提炼。
+### 6.1 POST /ember/sleep/knowledge/start
 
-```
-进入 sleep（app 按键）
-  ① GET  /ember/sleep/link/batches     → 材料出队（≤5 批）
-  ②    app 把材料贴进窗口末尾，正主 AI 判联（link_relations）
-  ③ POST /ember/sleep/link/submit      → 交卷落库（pending 扣减）
-       （断线重进：GET /ember/sleep/link/progress 查进度，材料照旧）
-  ④ ①-③ 循环到 progress 归零
-  ⑤ POST /ember/sleep/structure/run    → 收尾维护（cue 收紧 + 向量补建
-       + 观察提炼与合并，见下注）
-  ⑥    app 判 dream / 沉淀（走 app 自己的工具与库）
-       → app 真的存下一版新沉淀时：POST /ember/sleep/sediment/evidence
-```
+请求`{sleep_id,session_id}`，返回冻结的`groups`、`knowledge`、`existing_outputs`和工具schema。开始前统一聚合待办，普通补充不重开已处理方向。完整材料格式见[MEMORY_LIFECYCLE_SPEC.md](MEMORY_LIFECYCLE_SPEC.md)。
 
-> **归属与 entity summary 的生产线（10.17 重构）**：归属判定（extract/attach）与 entity summary 的写/改**全部在窗口判联当场完成**——窗口 AI 手里是一手材料，extract 立户当场写第一版描述（3-6 句名片式），attach 当场对照名下全部成员改写。glm 的散事件归属全库扫兜底与夜批 summary 重算**退役**（散事主题延续时召回自举，无需全库扫；verdict 的 entity 段新增 `summary` 字段，宽松校验：未输出/空 → 保旧值）。呈现层随之调整：entity summary 打头，成员事件的 summary 不再单独展示（数据层保留）。structure/run 报告里不再有 `strays_total` / `saved` / `rejected` / `summary` 字段。
+### 6.2 POST /ember/sleep/knowledge/tool
 
-> **观察式记忆（10.16 定稿）**：`structure/run` 收尾内置两步——**观察提炼**（每个会话查游标，未被事件 span 覆盖的消息攒够 300 条才调第三方 LLM，产 0-N 条「信息点」：只收行为模式，不收个人档案/具体事件，不硬挖，0 条合法；上限单次 400 条切片）与**高相似合并**（观察向量 ≥0.90 聚组 → LLM 判定并写合并版，旧的标 superseded）。观察事件 `origin=observe`、无 cue、**自动召回走附加席**（每轮拿输入向量比对观察层 core 向量，宽松阈值 ≥0.35 命中至多 1 条，不占 3 席，渲染为「（印象浮现）」弱标注，记账 route=observe）；**判联判出 relation = 印证 → 自动转正**（`origin=affirmed`），判 neighbor/none 放着不动。观察落库即 fill turn_span，判联材料组装与翻原文零改动兼容。配置：`EMBER_OWNER_NAME`（用户称呼，注入提炼 prompt）、`executors.json` 的 `observe` / `observe_merge` 任务点。
+请求`{sleep_id,session_id,call_id,name,arguments}`。按call_id幂等；必须先读原文再正式写入，来源变动拒绝。普通MCP不提供正式提炼、认知/规律评分及pin管理工具。
 
-> **沉淀分工（10.15 对齐）**：`dream_submit` / `sediment_submit` 都是 **app 的工具**，正文与版本号存 app 自己的库；ember 只收证据 id 追加（6.5）。**证据为空时 app 不调 6.5，什么信号都不发**；「sleep 结束」信号也由 app 自己记，ember / heart 均无感知。
+### 6.3 POST /ember/sleep/knowledge/finish
 
-### 6.1 GET /ember/sleep/link/batches
+请求`{sleep_id,session_id,state:completed|stopped}`。completed要求本批处理完；中断保留未处理材料。Sleep期间后台新证据暂存，结束后归组；旧Sleep重放不会拿到未来的新待办。
 
-材料出队。pending 里的新事件逐份组装材料（turn_span 区间 ∩ 召回带出的旧事件；superseded 与判过留痕的候选剔除），均分为 ≤5 批。
+### 6.4 退役入口
 
-响应 200：
-
-```json
-{
-  "batches": [
-    {"batch_index": 0,
-     "materials": [
-       {"new_id": "EVT-…",
-        "new_event": {"event_id": "EVT-…", "core": "…", "summary": "…"},
-        "entity_name": "",
-        "old_events": [
-          {"event_id": "EVT-…", "entity_name": "…", "entity_id": "ent_…",
-           "entity_summary": "…", "core": "…", "summary": "…"}
-        ]}
-    ]}
-  ],
-  "pending_total": 3,
-  "materials_total": 3
-}
-```
-
-- `old_events` 的实体标注（entity_name/entity_id）是 attach 校验的依据，`entity_summary` 是该实体当前的名片描述（attach 当场改写 summary 的底稿），判联材料必读
-- **出队幂等**：不扣 pending——只有交卷成功才扣；断线重进材料照旧
-- 无活儿：`batches: []` 且 `materials_total: 0`（诚实返回，不凑数）
-
-### 6.2 POST /ember/sleep/link/submit
-
-交卷。app 把窗口 AI 的 link_relations 结果按材料原样转交。
-
-请求体：
-
-```json
-{"source_message_id": 123,
- "results": [
-   {"material": {"…出队时的材料，原样回传…"},
-    "verdict": {"pairs": [...], "entity": {...}}}
- ]}
-```
-
-- `verdict` 契约 = 窗口判联 prompt 的输出格式（pairs 逐条 + entity 三分支 extract/attach/none）
-- 校验基于**回传材料**：pair 指向材料外事件 → 整份拒绝（防幻觉）；attach 目标必须是材料内旧事件标注的实体
-- `source_message_id`（可选）：触发判联的窗口轮，落库留痕 `sleep-link:window:m<id>`
-
-响应 200：
-
-```json
-{"saved": [{"new_id": "EVT-…", "relations": ["EVT-A--related_to-->EVT-B"],
-            "resolves": [], "entity_action": "attach:ent_…"}],
- "rejected": [{"new_id": "EVT-…", "errors": ["pair 指向材料外事件: …"]}],
- "remaining_pending": ["EVT-…"]}
-```
-
-- 落库三分支：relation 落边（resolves 额外标 superseded + change 补写）；extract 开新户挂散事件；attach 单归属挂入 + 顺带判目标实体收尾
-- 整条拒绝不炸整批：单份材料校验失败进 `rejected`，其余照常落库
-
-### 6.3 GET /ember/sleep/link/progress
-
-进度/断点续跑。响应 200：
-
-```json
-{"pending_total": 2, "materials_ready": 2,
- "batches_remaining": 2, "pending_events": ["EVT-…", "EVT-…"]}
-```
-
-断线恢复：按 `pending_events` 从 6.1 重新出队即可，判过的 pair 有留痕不会重复落库。
-
-### 6.4 POST /ember/sleep/structure/run
-
-收尾维护（无请求体，幂等）。**2026-10-17 重构后四步全在 ember 本地**：向量补建（新事件/新实体的 core 向量）→ cue 收紧（闲置旧 cue）→ 观察提炼（逐会话查游标，未覆盖消息攒够门槛才调第三方 LLM，产 0-N 条观察）→ 观察合并（高相似观察聚类判重写）。归属判定（extract/attach）**不在本步**——已收编窗口判联（见 §6 开头注记）。
-
-> **线程模型（2026-10-19）**：这步是几十秒的重活，ember 在工作线程上跑——**其他实例的钩子请求照常被接待，不再排队**。但本请求本身仍等到跑完才返回（sleep 是顺序编排，sediment 依赖本步完成——等待是契约，排队不是）。失败如实回执 5xx，不静默重试——重试决定权在 app（幂等，直接重试安全）。
-
-响应 200：
-
-```json
-{"vector_backfill": {"events": 3, "entities": 1, "failed": 0},
- "cue_tighten": {"checked_events": 10, "retired": [], "skipped": [],
-                  "kept": [], "kept_zero_use_event": []},
- "observe": {"status": "ok", "created": 2,
-              "sessions": [{"session": "main", "status": "ok",
-                             "uncovered": 320, "processed": 300,
-                             "created": 2, "event_ids": ["EVT-…"]}]},
- "observe_merge": {"candidates": 4, "groups": 1, "merged": 1}}
-```
-
-- `observe.status`：`ok` / `unconfigured`（未配 `EMBER_SOURCE_URL`，此时无 `sessions` 字段）；单会话失败不牵连整批（session 级 `failed` / `unavailable` 如实上报）
-- 观察提炼的第三方 LLM 调用/解析失败会 5xx，直接重试即可（幂等：已提炼会话的游标已推进，不重复产观察）
+`GET /ember/sleep/link/batches`、`GET /ember/sleep/link/progress`、`POST /ember/sleep/link/submit`和`POST /ember/sleep/structure/run`均返回HTTP 410及`legacy_sleep_step_retired`，没有写入副作用。
 
 ### 6.5 POST /ember/sleep/sediment/evidence
 
@@ -371,7 +274,7 @@ X-Heart-Instance: <Ember 实例名>
 
 写记忆引文/定位和观察/sleep 通过同一精确客户端：历史语料取自实例内已持久生成的原始开轮/终态身份，不从旧区间账本推断。整份身份集合须由提供方校验在同一路径；若包含重新生成/编辑后的混合路径或重复编号归属不明，历史读取降级。写入只可使用仍能核验的当前真实用户原文；观察不推进游标、不制造事件。恢复混合会话的增量观察需要额外明确路径输入，暂不猜测。
 
-未配置、超时、401/404/409/其他非 200、响应残缺/错序/角色冲突均视为不可用；不重试轰炸，不回退 `/api/source`。旧无编号 Event/只有最大回复号的账本不自动升级成可信来源。遗留本地代理仍可核对自身易失文本，但这不能成为可解析的历史路径证据。
+未配置、超时、401/404/409/其他非 200、响应残缺/错序/角色冲突均视为不可用；不重试轰炸，不回退 `/api/source`。旧无编号 Event/只有最大回复号的账本不自动升级成可信来源。旧无编号 hook 仍可核对自身易失文本，但这不能成为可解析的历史路径证据。
 
 配置仍为 `EMBER_SOURCE_URL`、`EMBER_SOURCE_TOKEN`、`EMBER_SOURCE_TIMEOUT`（秒，默认 8）。生产提供方必须核验实例与会话/库的归属；仅发送 `X-Heart-Instance` 不等于源端已经执行隔离。当前 App 接口忽略该头，真实多实例生产验收尚未关闭，配合清单见 PRODUCTION_PREREQUISITES.md。
 
@@ -407,4 +310,4 @@ X-Heart-Instance: <Ember 实例名>
 
 ## 主动 run 隔离接入（ember-runs/1）
 
-新增 `POST /ember/runs/start`、`POST /ember/runs/finish`、`GET /ember/runs/{run_id}`。严格字段、幂等/终态/重启与 MCP 绑定见 [RUNS_SPEC.md](RUNS_SPEC.md)，App 接线回执见 [APP_WAKE_RUNS_REPLY.md](APP_WAKE_RUNS_REPLY.md)。首版仅开放 read_memory_source；不支持写入工具或有副作用的 search_memory。当前仅工作区实现和隔离验收，不代表日常主动发送已开启。
+新增 `POST /ember/runs/start`、`POST /ember/runs/finish`、`GET /ember/runs/{run_id}`。严格字段、幂等/终态/重启与 MCP 绑定见 [RUNS_SPEC.md](RUNS_SPEC.md)，App 接线回执见 APP_WAKE_RUNS_REPLY.md（本地历史记录）。首版仅开放 read_memory_source；不支持写入工具或有副作用的 search_memory。当前仅工作区实现和隔离验收，不代表日常主动发送已开启。

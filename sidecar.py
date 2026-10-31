@@ -420,7 +420,7 @@ async def _slice_recall_trace(request: Request) -> JSONResponse:
                         status_code=200 if result is not None else 404)
 
 
-# ---------- 挂关系（2026-10-14 设计稿 v2：借窗口跑，app 编排） ----------
+# ---------- Sleep材料交付与退役入口 ----------
 
 async def _sleep_knowledge(request: Request) -> JSONResponse:
     from ember.sleep_knowledge import SleepKnowledge
@@ -444,22 +444,6 @@ async def _retired_sleep_step(request: Request) -> JSONResponse:
         return svc
     return JSONResponse({'status':'retired','code':'legacy_sleep_step_retired',
                          'hint':'Use Sleep knowledge materials; judgment and slice/knowledge indexing run independently.'}, status_code=410)
-
-
-async def _sleep_link_batches(request: Request) -> JSONResponse:
-    return await _retired_sleep_step(request)
-
-
-async def _sleep_link_submit(request: Request) -> JSONResponse:
-    return await _retired_sleep_step(request)
-
-
-async def _sleep_link_progress(request: Request) -> JSONResponse:
-    return await _retired_sleep_step(request)
-
-
-async def _sleep_structure_run(request: Request) -> JSONResponse:
-    return await _retired_sleep_step(request)
 
 
 async def _sleep_sediment_evidence(request: Request) -> JSONResponse:
@@ -555,13 +539,13 @@ app = BearerAuthMiddleware(Starlette(
         Route("/ember/recall/slices/preview", _slice_recall_preview, methods=["POST"]),
         Route("/ember/recall/slices/{trace_id}", _slice_recall_trace, methods=["GET"]),
         Route("/ember/sleep/knowledge/{operation}", _sleep_knowledge, methods=["POST"]),
-        Route("/ember/sleep/link/batches", _sleep_link_batches,
+        Route("/ember/sleep/link/batches", _retired_sleep_step,
               methods=["GET"]),
-        Route("/ember/sleep/link/submit", _sleep_link_submit,
+        Route("/ember/sleep/link/submit", _retired_sleep_step,
               methods=["POST"]),
-        Route("/ember/sleep/link/progress", _sleep_link_progress,
+        Route("/ember/sleep/link/progress", _retired_sleep_step,
               methods=["GET"]),
-        Route("/ember/sleep/structure/run", _sleep_structure_run,
+        Route("/ember/sleep/structure/run", _retired_sleep_step,
               methods=["POST"]),
         Route("/ember/sleep/sediment/evidence", _sleep_sediment_evidence,
               methods=["POST"]),

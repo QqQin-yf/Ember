@@ -98,7 +98,7 @@ class EmberStore:
         return route
 
     def retire_route(self, route_id: str) -> None:
-        """退休一条 route（收紧判据由 CueTightener 决定）。"""
+        """持久化 route 退役状态；兼容既有数据和显式维护操作。"""
         route = self._routes[route_id]
         route.status = "retired"
         self._append(ROUTES_FILE, route)
@@ -115,9 +115,6 @@ class EmberStore:
         self._rebuild_index()
         return True
 
-    def retired_routes_for_event(self, event_id: str) -> list[RecallRoute]:
-        return [r for r in self._routes.values()
-                if r.event_id == event_id and r.status == "retired"]
 
     # ---------- 读取 ----------
 

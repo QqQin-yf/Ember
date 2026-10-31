@@ -35,9 +35,6 @@ class RecallSnapshotTests(unittest.TestCase):
         self.svc.event_sources.capture("A", "v1", "old", [(1, 1)], [
             {"turn": 1, "role": "user", "_source_session_id": "old", "_source_message_id": "30"},
             {"turn": 1, "role": "assistant", "_source_session_id": "old", "_source_message_id": "31"}])
-        self.no_observe = patch.object(self.svc, "_observe_extra_hit", return_value=None)
-        self.no_observe.start()
-        self.addCleanup(self.no_observe.stop)
 
     def start(self, rid="r1", **kwargs):
         return self.svc.hook_turn_start("s", "remember beacon", user_message_id=101,

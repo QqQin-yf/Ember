@@ -14,15 +14,19 @@ from datetime import datetime, timezone
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE)
 
+from ember.llm import MockLLMClient
 from ember.store import EmberStore  # noqa: E402
 from ember.models import Event  # noqa: E402
 from ember.writer import validate_writer_arguments  # noqa: E402
-from ember.service import EmberService, MemoryWriteStatus  # noqa: E402
+from ember.service import EmberService  # noqa: E402
 
 failures = []
+checks = 0
 
 
 def check(name, cond, detail=""):
+    global checks
+    checks += 1
     if cond:
         print(f"PASS - {name}")
     else:
@@ -34,38 +38,14 @@ def _now_iso():
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
 
 
-class FakeClient:
-    """最小 mock：第一轮触发 key_quotes 写入，之后普通回复。"""
 
-    def __init__(self, writer_args=None, fail_first=False):
-        self.writer_args = writer_args
-        self.fail_first = fail_first
-        self.calls = 0
-
-    def chat_completion(self, model, messages, tools=None, **kw):
-        self.calls += 1
-        if self.fail_first and self.calls == 1:
-            from ember.llm import LLMError
-            raise LLMError("provider down")
-        has_tool = bool(tools)
-        if has_tool and self.writer_args and self.calls == 1:
-            return {"role": "assistant", "content": None, "tool_calls": [{
-                "id": "call_1", "type": "function",
-                "function": {"name": "create_memory_event",
-                             "arguments": json.dumps(self.writer_args,
-                                                     ensure_ascii=False)},
-            }]}
-        if has_tool and self.writer_args and self.calls > 1:
-            # tool result 后的续跑
-            last = messages[-1]
-            if last.get("role") == "tool":
-                return {"role": "assistant", "content": "（mock）好的，继续。"}
-        return {"role": "assistant", "content": f"回复#{self.calls}"}
 
 
 def _mk_service(root):
-    store = EmberStore(root)
-    return EmberService(store, FakeClient(), model="mock")
+    service = EmberService(EmberStore(root), MockLLMClient(), model="sidecar")
+    service._fetched_corpus = lambda session: []
+    return service
+
 
 
 GOOD_WRITER_ARGS = {
@@ -89,56 +69,33 @@ GOOD_WRITER_ARGS = {
 }
 
 
-def test_chat_archives_and_failure():
+def test_hooks_do_not_archive_or_call_model():
     with tempfile.TemporaryDirectory() as root:
         svc = _mk_service(root)
-        payload = {"session_id": "sA", "model": "mock",
-                   "messages": [{"role": "user", "content": "就按这个方案定稿吧。"}]}
-        resp = svc.chat_completion(payload)
-        # 2026-10-14 transcripts 退役：chat 不再落原文存档，
-        # 轮次持久账 = turn_ledger（原文按 message_id 按需拉取）
-        check("成功轮不再写存档",
-              not os.path.exists(os.path.join(root, "transcripts.jsonl")))
-        check("轮次落账本（无条件记账）",
-              svc.turn_ledger.max_turn("sA") == 1)
-        check("user 行不含召回前缀",
-              all(not m["content"].startswith("[Ember")
-                  for m in svc.sessions["sA"].messages
-                  if m.get("role") == "user"))
-        # chat 失败：LLM 抛错 → 不记账不存档
-        svc2 = EmberService(EmberStore(root), FakeClient(fail_first=True))
-        try:
-            svc2.chat_completion({"session_id": "sB", "model": "mock",
-                                  "messages": [{"role": "user", "content": "x"}]})
-            raised = False
-        except Exception:
-            raised = True
-        check("chat 失败抛 LLMError", raised)
-        check("失败轮不写存档",
-              not os.path.exists(os.path.join(root, "transcripts.jsonl")))
+        svc.hook_turn_start("sA", "就按这个方案定稿吧。", user_message_id=1)
+        svc.hook_turn_end("sA", "确认。", assistant_message_id=2)
+        check("成功轮不再写存档", not os.path.exists(os.path.join(root, "transcripts.jsonl")))
+        check("轮次落账本", svc.turn_ledger.max_turn("sA") == 1)
+        check("user 行不含召回前缀", svc.sessions["sA"].messages[0]["content"] == "就按这个方案定稿吧。")
+        check("hooks 不调用聊天模型", svc.client.calls == [])
+        check("收轮后工具不能冒写", svc.sidecar_create_memory_event(GOOD_WRITER_ARGS)["status"] == "failed")
+
 
 
 def test_restart_resume_counter():
     with tempfile.TemporaryDirectory() as root:
         svc = _mk_service(root)
         for i in range(1, 4):
-            svc.chat_completion({"session_id": "sR", "model": "mock",
-                                 "messages": [{"role": "user",
-                                               "content": f"第{i}轮"}]})
-        # 模拟重启：全新 EmberService 读同一目录
-        svc2 = EmberService(EmberStore(root), FakeClient(), model="mock")
-        sess = svc2.get_or_create_session("sR")
-        check("重启后计数恢复到最大 turn（账本恢复）",
-              sess.turn_counter == 3, f"counter={sess.turn_counter}")
-        check("重启后 messages 为空（上下文恢复=独立项）",
-              sess.messages == [])
-        resp = svc2.chat_completion({"session_id": "sR", "model": "mock",
-                                     "messages": [{"role": "user",
-                                                   "content": "重启后第一句"}]})
-        check("重启后下一轮 turn = 原最大 + 1", resp["ember"]["turn"] == 4,
-              str(resp["ember"]["turn"]))
-        check("重启后轮次账本接续",
-              svc2.turn_ledger.max_turn("sR") == 4)
+            svc.hook_turn_start("sR", f"第{i}轮", user_message_id=2*i-1)
+            svc.hook_turn_end("sR", "收到。", assistant_message_id=2*i)
+        restored = _mk_service(root)
+        sess = restored.get_or_create_session("sR")
+        check("重启后计数恢复到最大 turn", sess.turn_counter == 3)
+        check("重启后 messages 为空", sess.messages == [])
+        started = restored.hook_turn_start("sR", "重启后第一句", user_message_id=7)
+        check("重启后下一轮 turn = 原最大 + 1", started["turn"] == 4)
+        check("重启后轮次账本接续", restored.turn_ledger.max_turn("sR") == 4)
+
 
 
 def test_key_quotes_validation():
@@ -167,116 +124,48 @@ def test_key_quotes_validation():
 
 def test_verify_and_presentation():
     with tempfile.TemporaryDirectory() as root:
-        store = EmberStore(root)
-        client = FakeClient(writer_args=GOOD_WRITER_ARGS)
-        svc = EmberService(store, client, model="mock")
-        resp = svc.chat_completion({
-            "session_id": "sV", "model": "mock",
-            "messages": [{"role": "user",
-                          "content": "就按这个方案定稿吧。\n怎么都行，就按这个方案定稿吧。"}]})
-        # 第一轮 assistant 回复是 mock 的"回复#1"——AI 原话对不上会被丢
-        mem = resp["ember"]["memory"]
-        ev = store.all_events()[-1]
-        kept_speakers = [q["speaker"] for q in ev.key_quotes]
-        check("对得上的保留（user 句在原文）",
-              "user" in kept_speakers, str(ev.key_quotes))
-        check("对不上的丢弃（ai 句不在原文）",
-              "ai" not in kept_speakers, str(ev.key_quotes))
-        check("编造句被丢弃", all("编造" not in q["text"]
-                                  for q in ev.key_quotes))
-        check("dropped_quotes 进 tool result（memory 状态可见）",
-              len(mem.get("dropped_quotes", [])) >= 1,
-              str(mem.get("dropped_quotes")))
-        # 事件落盘的 key_quotes 与丢弃后一致
-        check("Event 落盘的是核对后的子集",
-              len(ev.key_quotes) == 3 - len(mem.get("dropped_quotes", [])))
+        svc = _mk_service(root)
+        svc.hook_turn_start("sV", "就按这个方案定稿吧。")
+        result = svc.sidecar_call_tool("create_memory_event", GOOD_WRITER_ARGS)
+        check("显式 MCP 写入成功", result["status"] == "created")
+        ev = svc.store.get_event(result["event_id"])
+        check("真 user 原话保留", ev.key_quotes == [{"speaker": "user", "text": "就按这个方案定稿吧。"}])
+        check("不在原文的 AI 和编造句丢弃", len(result["dropped_quotes"]) == 2)
+        reloaded = EmberStore(root).get_event(ev.event_id)
+        check("落盘只保留核验后的原话", reloaded.key_quotes == ev.key_quotes)
+
 
 
 def test_read_memory_source():
+    from unittest.mock import patch
+    from ember import source_client
     with tempfile.TemporaryDirectory() as root:
-        store = EmberStore(root)
-        client = FakeClient(writer_args=GOOD_WRITER_ARGS)
-        svc = EmberService(store, client, model="mock")
-        svc.chat_completion({
-            "session_id": "sQ", "model": "mock",
-            "messages": [{"role": "user", "content": "就按这个方案定稿吧。"}]})
-        ev = store.all_events()[-1]
-        # 直接调用处理函数（绕过 LLM 工具循环）
-        call = {"function": {"name": "read_memory_source",
-                             "arguments": json.dumps({"event_id": ev.event_id})}}
-        out = svc._handle_read_source_call(svc.get_or_create_session("sQ"), [call])
-        r = store.root  # 占位避免 lint
-        # 从 session 历史里取 tool 结果
-        tool_msg = [m for m in svc.sessions["sQ"].messages
-                    if m.get("role") == "tool"][-1]
-        content = json.loads(tool_msg["content"])
-        check("旧本地语料无精确出处 → not_archived",
-              content["status"] == "not_archived",
-              str(content)[:120])
-        # 无存档（旧事件）
-        old = Event(event_id="EVT-098-yyyy", version_id="v",
-                    source_ref="conversation/session-ghost",
-                    raw_ref="r", event_time=_now_iso(),
-                    ingest_time=_now_iso(), summary="旧", core="旧")
-        store.write_event(old)
-        call2 = {"function": {"name": "read_memory_source",
-                              "arguments": json.dumps({"event_id": "EVT-098-yyyy"})}}
-        svc._handle_read_source_call(svc.get_or_create_session("sQ"), [call2])
-        tool_msg2 = [m for m in svc.sessions["sQ"].messages
-                     if m.get("role") == "tool"][-1]
-        content2 = json.loads(tool_msg2["content"])
-        check("无存档 → not_archived 不报错",
-              content2["status"] == "not_archived", str(content2)[:120])
-        # 超长截断（2026-10-14 改源：语料经 source_client 拉取）
-        with tempfile.TemporaryDirectory() as root2:
-            long_text = "很长的原文" * 2000
-            store2 = EmberStore(root2)
-            ev2 = Event(event_id="EVT-097-xxxx", version_id="v",
-                        source_ref="conversation/session-sL",
-                        raw_ref="r", event_time=_now_iso(),
-                        ingest_time=_now_iso(), summary="长", core="长",
-                        turn_refs=["turn-1"])
-            store2.write_event(ev2)
-            # 出处区间显式回填（2026-10-12 裁决移除锚点代答后，翻原文
-            # 依赖真实 span；本测试意图是截断行为，区间给 (1,1) 即可）
-            from ember.turn_span import TurnSpanStore
-            TurnSpanStore(root2).fill("EVT-097-xxxx", [(1, 1)])
-            svc3 = EmberService(store2, FakeClient(), model="mock")
-            # mock 拉取：账本登记第 1 轮的 message_id，原文接口返回长文本
-            svc3.turn_ledger.record("sL", 1, None, user_message_id=500)
-            svc3.turn_ledger.record_reply("sL", 1, assistant_message_id=501)
-            svc3.event_sources.capture("EVT-097-xxxx", "v", "sL", [(1, 1)], [
-                {"turn": 1, "role": role, "_source_session_id": "sL", "_source_message_id": seq}
-                for role, seq in (("user", "500"), ("assistant", "501"))])
-            from ember import source_client as sc
-            orig_fetch = sc.fetch_source_path
-            sc.fetch_source_path = lambda sid, ids, **kw: [
-                {"message_id": 500, "role": "user", "content": long_text},
-                {"message_id": 501, "role": "assistant", "content": long_text},
-            ]
-            try:
-                call3 = {"function": {"name": "read_memory_source",
-                                      "arguments": json.dumps(
-                                          {"event_id": "EVT-097-xxxx"})}}
-                svc3._handle_read_source_call(svc3.get_or_create_session("sL"),
-                                              [call3])
-            finally:
-                sc.fetch_source_path = orig_fetch
-            tool_msg3 = [m for m in svc3.sessions["sL"].messages
-                         if m.get("role") == "tool"][-1]
-            content3 = json.loads(tool_msg3["content"])
-            check("超长截断并注明",
-                  content3["status"] == "ok" and content3["truncated"] is True
-                  and len(content3["transcript"])
-                  <= EmberService.READ_SOURCE_MAX_CHARS)
-        # unknown id
-        call4 = {"function": {"name": "read_memory_source",
-                              "arguments": json.dumps({"event_id": "EVT-000-nope"})}}
-        svc._handle_read_source_call(svc.get_or_create_session("sQ"), [call4])
-        tool_msg4 = [m for m in svc.sessions["sQ"].messages
-                     if m.get("role") == "tool"][-1]
-        content4 = json.loads(tool_msg4["content"])
-        check("未知 id → not_found", content4["status"] == "not_found")
+        svc = _mk_service(root)
+        svc.hook_turn_start("sQ", "就按这个方案定稿吧。")
+        result = svc.sidecar_call_tool("create_memory_event", GOOD_WRITER_ARGS)
+        ev = svc.store.get_event(result["event_id"])
+        content = svc.sidecar_call_tool("read_memory_source", {"event_id": ev.event_id})
+        check("旧本地语料无精确出处 → not_archived", content["status"] == "not_archived")
+        svc.store.write_event(Event(event_id="EVT-098-yyyy", version_id="v",
+            source_ref="conversation/session-ghost", raw_ref="r", event_time=_now_iso(),
+            ingest_time=_now_iso(), summary="旧", core="旧"))
+        check("无存档 → not_archived", svc.sidecar_call_tool("read_memory_source", {"event_id": "EVT-098-yyyy"})["status"] == "not_archived")
+        long_text = "很长的原文" * 2000
+        svc.store.write_event(Event(event_id="EVT-097-xxxx", version_id="v",
+            source_ref="conversation/session-sL", raw_ref="r", event_time=_now_iso(),
+            ingest_time=_now_iso(), summary="长", core="长", turn_refs=["turn-1"]))
+        svc.turn_spans.fill("EVT-097-xxxx", [(1, 1)])
+        svc.event_sources.capture("EVT-097-xxxx", "v", "sL", [(1, 1)], [
+            {"turn": 1, "role": role, "_source_session_id": "sL", "_source_message_id": seq}
+            for role, seq in (("user", "500"), ("assistant", "501"))])
+        with patch.object(source_client, "fetch_source_path", return_value=[
+            {"message_id": 500, "role": "user", "content": long_text},
+            {"message_id": 501, "role": "assistant", "content": long_text}]):
+            content = svc.sidecar_call_tool("read_memory_source", {"event_id": "EVT-097-xxxx"})
+        check("超长截断并注明", content["status"] == "ok" and content["truncated"]
+              and len(content["transcript"]) <= EmberService.READ_SOURCE_MAX_CHARS)
+        check("未知 id → not_found", svc.sidecar_call_tool("read_memory_source", {"event_id": "EVT-000-nope"})["status"] == "not_found")
+
 
 
 def test_presentation_lines():
@@ -290,7 +179,7 @@ def test_presentation_lines():
                    key_quotes=[{"speaker": "user", "text": "你说的那句"},
                                {"speaker": "ai", "text": "我说的这句"}])
         store.write_event(ev)
-        svc = EmberService(store, FakeClient(), model="mock")
+        svc = EmberService(store, MockLLMClient(), model="mock")
         from ember.models import PresentationContext, RecallTrace
         ctx = PresentationContext(recalled_events=["EVT-096-wwww"],
                                   recall_trace=RecallTrace(input_text="x"))
@@ -346,7 +235,7 @@ def test_inline_source_high_match():
         return svc._build_recall_prefix(ctx)
 
     with tempfile.TemporaryDirectory() as root:
-        svc = EmberService(EmberStore(root), FakeClient(), model="mock")
+        svc = EmberService(EmberStore(root), MockLLMClient(), model="mock")
         _mk(svc)
         # 正例：双线索（其一语义 0.65 ≥ 0.62 门槛）+ sig 9 → 内联当时对话
         p = _prefix(svc, [_hit("追剧"), _hit("更新", "semantic", score=0.65)])
@@ -357,7 +246,7 @@ def test_inline_source_high_match():
         check("内联后无深挖提示", "需要原话时" not in p, p[:300])
 
         # 反例 1：sig 6（低于 8）
-        svc2 = EmberService(EmberStore(root), FakeClient(), model="mock")
+        svc2 = EmberService(EmberStore(root), MockLLMClient(), model="mock")
         _mk(svc2, "EVT-098")
         ev = svc2.store.get_event("EVT-098")
         ev.significance = "6：背景级"
@@ -390,14 +279,14 @@ def test_inline_source_high_match():
 
 
 def main():
-    test_chat_archives_and_failure()
+    test_hooks_do_not_archive_or_call_model()
     test_restart_resume_counter()
     test_key_quotes_validation()
     test_verify_and_presentation()
     test_read_memory_source()
     test_presentation_lines()
     test_inline_source_high_match()
-    total = 36
+    total = checks
     if failures:
         print(f"\n{total - len(failures)}/{total} checks passed，失败：{failures}")
         sys.exit(1)

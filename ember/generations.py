@@ -130,10 +130,6 @@ class GenerationStore:
                 db.execute("UPDATE generations SET state='superseded' "
                            "WHERE state IN ('starting','running')")
 
-    def activate(self, recall_id: str, turn: int) -> None:
-        with self._db() as db:
-            db.execute("UPDATE generations SET turn=?, state='running' WHERE recall_id=?",
-                       (turn, recall_id))
 
     def interrupt(self, recall_id: str) -> None:
         with self._db() as db:

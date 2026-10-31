@@ -262,8 +262,6 @@ class TurnSpanStore:
         return any(s <= turn <= e
                    for s, e in self.spans.get(event_id, []))
 
-    def filled_ids(self) -> list[str]:
-        return sorted(self.spans)
 
     def to_dict(self) -> dict[str, Any]:
         return {

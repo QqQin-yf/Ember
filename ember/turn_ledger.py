@@ -260,9 +260,6 @@ class TurnLedger:
         """ember 坐标 -> heart turn_id；未登记返回 None。"""
         return self.mapping.get((ember_session, ember_turn))
 
-    def ember_turns_of(self, heart_turn_id: str) -> list[tuple[str, int]]:
-        """heart turn_id -> ember 坐标（可能多值：重发场景）。"""
-        return list(self.reverse.get(str(heart_turn_id), []))
 
     def gaps(self) -> list[str]:
         """发号连续性观察：已见 heart id 里序数缺失的段（重开/丢弃轮的痕迹）。

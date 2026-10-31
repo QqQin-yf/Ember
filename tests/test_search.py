@@ -193,18 +193,17 @@ class SearchMemoryTests(unittest.TestCase):
         self.assertEqual(card["name"], "子夜阁项目")
         self.assertEqual(card["member_count"], 0)   # 事件未归户
 
-    def test_night_backfill(self) -> None:
-        """夜批补向量：无向量的新事件被补上，已有的不重复。"""
-        _add(self.svc, "EVT-009", "夜里新写的记忆内容")
-        with mock.patch("ember.service.embed_text",
-                        return_value=[0.5, 0.5, 0.0]):
-            report = self.svc.run_structure_maintenance()
-        self.assertEqual(report["vector_backfill"]["events"], 1)
-        self.assertTrue(self.svc.core_vectors.has("EVT-009"))
-        with mock.patch("ember.service.embed_text",
-                        return_value=[0.5, 0.5, 0.0]):
-            report2 = self.svc.run_structure_maintenance()
-        self.assertEqual(report2["vector_backfill"]["events"], 0)
+    def test_background_content_index_refresh(self) -> None:
+        from ember.memory_maintenance import catalog, legacy_backfill
+        from ember.slice_embedding import SliceEmbeddingConfig
+        _add(self.svc, "EVT-009", "A newly written experience")
+        rows = [r for r in catalog(self.svc) if r['id'] == 'EVT-009']
+        config = SliceEmbeddingConfig('test-key')
+        with mock.patch.object(self.svc.core_vectors, 'upsert', wraps=self.svc.core_vectors.upsert) as write:
+            legacy_backfill(self.svc, rows, {'EVT-009': [0.5, 0.5, 0.0]}, config)
+            legacy_backfill(self.svc, rows, {'EVT-009': [0.5, 0.5, 0.0]}, config)
+            self.assertEqual(write.call_count, 1)
+        self.assertEqual(self.svc.core_vectors.get('EVT-009')['model'], 'vl:' + config.space)
 
 
 def _rel(src: str, dst: str):

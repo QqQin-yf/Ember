@@ -192,7 +192,7 @@ def _run_tests():
         check("映射账本重启后在位",
               service2.turn_ledger.heart_id_of("sc1", 1) == "t-900001")
 
-        print("== S10 工具清单与代理形态同源 ==")
+        print("== S10 MCP 工具清单完整 ==")
         names = {s["function"]["name"] for s in service2.sidecar_tool_specs()}
         check("原工具与切片检索下钻工具齐全",
               names == {"create_memory_event", "read_memory_source",
@@ -200,21 +200,14 @@ def _run_tests():
                         "pin_memory", "unpin_memory", "read_memory_slices", "search_memory_slices"},
               str(names))
 
-        print("== S11 代理形态回归：chat 流程仍走同一召回/写入实现 ==")
-        r11 = service2.chat_completion({
-            "messages": [{"role": "user",
-                          "content": "今天我们决定把 Ember 的传播模型改成 Route Search。"}],
-            "ember_session": "s_regress"})
-        check("chat 仍正常出回复", r11["choices"][0]["message"]["content"] != "")
-        check("chat 内写入仍 created",
-              r11["ember"]["memory"]["status"] == "created",
-              str(r11["ember"]["memory"])[:160])
-        r11b = service2.chat_completion({
-            "messages": [{"role": "user", "content": "我们继续聊 Ember 吧。"}],
-            "ember_session": "s_regress"})
-        check("chat 召回仍注入（共用流水线）",
-              r11b["ember"]["memory"]["recalled_count"] >= 1,
-              str(r11b["ember"]["memory"])[:160])
+        print("== S11 hooks 与 MCP 共用召回/写入主路 ==")
+        started = service2.hook_turn_start("s_regress", "今天我们决定把 Ember 的传播模型改成 Route Search。")
+        check("hook 正常开轮", started["turn"] == 1)
+        r11 = service2.sidecar_call_tool("create_memory_event", write_args())
+        check("MCP 显式写入 created", r11["status"] == "created", str(r11)[:160])
+        service2.hook_turn_end("s_regress", "确认。")
+        r11b = service2.hook_turn_start("s_regress", "我们继续聊 Ember 吧。")
+        check("hook 召回返回可注入内容", r11b["injected"] and r11b["memory"]["recalled_count"] >= 1)
 
         print("== S12 跨重启语料（去原文化 2026-10-14）：未配置拉取 → 如实拒绝 ==")
         # sc1 的 turn-1 原话已不在本地（transcripts 退役，原文只存后端）；

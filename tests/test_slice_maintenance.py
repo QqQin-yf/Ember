@@ -152,7 +152,7 @@ class SliceMaintenanceTests(unittest.TestCase):
         jobs = MaintenanceQueue(root).statuses()
         self.assertEqual(len(jobs), 1)
         self.assertEqual(jobs[0]['event_id'], result['event_id'])
-        self.assertEqual(service._link_pending_list(), [])
+        self.assertFalse(hasattr(service, "link_pending_add"))
 
     def test_discovery_recovers_missing_enqueue_idempotently(self):
         self.worker.discover()

@@ -1,7 +1,4 @@
 {
-  "judge": "glm",
   "split": "glm",
-  "mount": "glm",
-  "observe": "glm",
-  "observe_merge": "glm"
+  "mount": "glm"
 }

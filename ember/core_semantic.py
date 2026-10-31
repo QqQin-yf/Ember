@@ -8,9 +8,7 @@
   - entity summary 向量：实体卡（search 命中先出印象层）的匹配依据。
     summary 为空的实体跳过（如实：还没夜批过的实体不出卡）。
 
-文件均由 scripts/build_core_vectors.py 离线重建（换 embedding 模型
-全量重算，新旧模型向量绝不能混比）；夜间 structure/run 收尾对新
-事件/新 summary 增量补算（service 侧调用 upsert）。
+现行索引由memory_maintenance后台按内容及向量空间刷新；主动检索按模型/空间匹配查询向量。旧索引及手动构建工具仍可读取，新旧空间不能混比。
 """
 from __future__ import annotations
 

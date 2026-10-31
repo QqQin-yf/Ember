@@ -1,5 +1,5 @@
 # 旁路服务（sidecar.py）依赖：MCP 官方 Python SDK（自带 starlette/uvicorn）。
-# 其余模块（proxy/service/store…）保持纯标准库，无第三方依赖。
+# 其余模块（service/store…）保持纯标准库，无第三方依赖。
 # 安装：pip install -r requirements.txt
 # 上界 <2 是硬约束：mcp 2.x 改掉了 lowlevel Server API（list_tools 装饰器
 # 不复存在），sidecar.py 按 1.x API 编写——2026-10-15 VPS 部署实测踩坑

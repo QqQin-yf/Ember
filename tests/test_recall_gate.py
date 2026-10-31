@@ -8,7 +8,7 @@
 - 弱信号池：席位富余才补（weak=True），不足落选（weak_pooled）
 - 实体块：块级资格（成员并集源数 ≥2），整块 1 席
 - stats 三计数：dropped_by_seats / weak_pooled / strong_dropped
-- 在场去重（chat 全链路）：首注全量 → 2h 内轻量续注 → 超时重新全量
+- 在场去重（hooks 全链路）：首注全量 → 2h 内轻量续注 → 超时重新全量
 - 前缀渲染：轻量行 / 弱标注 / 尾部检索提示（构造 ctx 直测）
 """
 from __future__ import annotations
@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from ember.llm import MockLLMClient
 from ember.models import (Event, PresentationContext, RecallTrace, RouteHit)
+from tests.test_sidecar import write_args
 from ember.recall import EntityHit, EntityRecall
 from ember.service import select_recall_units
 from tests.legacy_event_fixture import LegacyEventService as EmberService
@@ -267,7 +268,7 @@ class GateTests(unittest.TestCase):
 
 
 class InjectionDedupTests(unittest.TestCase):
-    """⑧ 在场去重：首注全量 → 2h 内轻量续注 → 超时重新全量（chat 全链路）。"""
+    """⑧ 在场去重：首注全量 → 2h 内轻量续注 → 超时重新全量（hooks 全链路）。"""
 
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -278,44 +279,32 @@ class InjectionDedupTests(unittest.TestCase):
     def tearDown(self) -> None:
         self._tmp.cleanup()
 
-    def _chat(self, text: str, sid: str) -> dict:
-        return self.svc.chat_completion(
-            {"messages": [{"role": "user", "content": text}],
-             "ember_session": sid})
-
-    def _main_call(self, marker: str) -> dict:
-        return next(c for c in reversed(self.client.calls)
-                    if c["messages"] and c["messages"][-1].get("role") == "user"
-                    and marker in (c["messages"][-1].get("content") or ""))
-
     def test_full_then_light_then_full_again(self) -> None:
         sid = "s_dedup"
-        r1 = self._chat("今天我们决定把 Ember 的传播模型改成 Route Search。", sid)
-        eid = r1["ember"]["memory"]["event_id"]
+        self.svc.hook_turn_start(sid, "今天我们决定把 Ember 的传播模型改成 Route Search。")
+        written = self.svc.sidecar_call_tool("create_memory_event", write_args())
+        self.assertEqual(written["status"], "created")
+        eid = written["event_id"]
         full_mark = f'read_memory_source("{eid}")'
+        self.svc.hook_turn_end(sid, "已确认。")
 
-        # 第 2 轮：首次召回 → 该事件全量注入（有触点行与深挖指引）
-        self._chat("我们继续聊 Ember 吧。", sid)
-        full = self._main_call("我们继续聊 Ember 吧。")["messages"][-1]["content"]
+        full = self.svc.hook_turn_start(sid, "我们继续聊 Ember 吧。")["injected_text"]
         self.assertIn("[记忆浮现]", full)
         self.assertIn("触点：", full)
         self.assertIn(full_mark, full)
         self.assertNotIn("（此前已浮现）", full)
+        self.svc.hook_turn_end(sid, "继续。")
 
-        # 第 3 轮：2h 内再次召回 → 该事件轻量续注一行
-        # （本轮可能混入其他新事件的全量行，按事件粒度断言）
-        self._chat("再聊聊 Ember。", sid)
-        light = self._main_call("再聊聊 Ember。")["messages"][-1]["content"]
+        light = self.svc.hook_turn_start(sid, "再聊聊 Ember。")["injected_text"]
         self.assertIn("（此前已浮现）", light)
         self.assertNotIn(full_mark, light)
+        self.svc.hook_turn_end(sid, "继续。")
 
-        # 拨回 3h 前（超过 2h 时效）→ 第 4 轮该事件恢复全量
-        stale = (datetime.now(timezone.utc).astimezone()
-                 - timedelta(hours=3)).isoformat(timespec="seconds")
+        stale = (datetime.now(timezone.utc).astimezone() - timedelta(hours=3)).isoformat(timespec="seconds")
         self.svc.recall_ledger.last_injected[(sid, eid)] = stale
-        self._chat("还想聊 Ember。", sid)
-        again = self._main_call("还想聊 Ember。")["messages"][-1]["content"]
+        again = self.svc.hook_turn_start(sid, "还想聊 Ember。")["injected_text"]
         self.assertIn(full_mark, again)
+        self.assertEqual(self.client.calls, [])
 
 
 class PrefixRenderTests(unittest.TestCase):

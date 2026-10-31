@@ -21,8 +21,7 @@ sys.path.insert(0, BASE)
 from ember import executors  # noqa: E402
 
 
-GLM_ALL = {"judge": "glm", "split": "glm", "mount": "glm",
-           "observe": "glm", "observe_merge": "glm"}
+GLM_ALL = {"split": "glm", "mount": "glm"}
 
 
 class TestLoadExecutors(unittest.TestCase):
@@ -36,11 +35,10 @@ class TestLoadExecutors(unittest.TestCase):
             return executors.load_executors(td)
 
     def test_normal_read(self):
-        out = self._read(json.dumps({"judge": "qwen3", "split": "glm",
+        out = self._read(json.dumps({"split": "qwen3",
                                      "mount": "qwen3", "observe": "glm"}))
-        self.assertEqual(out, {"judge": "qwen3", "split": "glm",
-                               "mount": "qwen3",
-                               "observe": "glm", "observe_merge": "glm"})
+        self.assertEqual(out, {"split": "qwen3",
+                               "mount": "qwen3"})
 
     def test_missing_file_falls_back_to_glm(self):
         out = self._read(None)
@@ -51,17 +49,16 @@ class TestLoadExecutors(unittest.TestCase):
         self.assertEqual(out, GLM_ALL)
 
     def test_illegal_value_falls_back_per_task(self):
-        out = self._read(json.dumps({"judge": "gpt4", "split": "GLM",
+        out = self._read(json.dumps({"split": "GLM",
                                      "mount": "qwen3"}))
-        self.assertEqual(out["judge"], "glm")   # 未知 engine → glm
         self.assertEqual(out["split"], "glm")   # 大小写敏感 → glm
         self.assertEqual(out["mount"], "qwen3") # 合法值保留
-        self.assertEqual(out["observe"], "glm") # 缺项 → glm
+        self.assertNotIn("observe", out) # 缺项 → glm
 
     def test_extra_tasks_ignored(self):
-        out = self._read(json.dumps({"judge": "glm", "chat": "qwen3"}))
+        out = self._read(json.dumps({"split": "glm", "judge": "qwen3", "chat": "qwen3"}))
         self.assertNotIn("chat", out)
-        self.assertEqual(out["judge"], "glm")
+        self.assertNotIn("judge", out)
 
 
 class TestLoadEngine(unittest.TestCase):
@@ -70,16 +67,16 @@ class TestLoadEngine(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             with open(os.path.join(td, "executors.json"), "w",
                       encoding="utf-8") as f:
-                json.dump({"judge": "glm"}, f)
+                json.dump({"split": "glm"}, f)
             self.assertEqual(
-                executors.load_engine(td, "judge", "qwen3"), "qwen3")
+                executors.load_engine(td, "split", "qwen3"), "qwen3")
 
     def test_config_used_when_no_override(self):
         with tempfile.TemporaryDirectory() as td:
             with open(os.path.join(td, "executors.json"), "w",
                       encoding="utf-8") as f:
-                json.dump({"judge": "qwen3"}, f)
-            self.assertEqual(executors.load_engine(td, "judge"), "qwen3")
+                json.dump({"split": "qwen3"}, f)
+            self.assertEqual(executors.load_engine(td, "split"), "qwen3")
 
     def test_missing_config_defaults_glm(self):
         with tempfile.TemporaryDirectory() as td:
@@ -124,15 +121,25 @@ class TestCallLLM(unittest.TestCase):
     def test_glm_model_fallback_chain(self):
         captured: dict = {}
         env = {"ZHIPU_API_KEY": "k"}   # 无任何模型变量
-        with mock.patch.dict(os.environ, env, clear=False), \
+        with mock.patch.dict(os.environ, env, clear=True), \
              mock.patch("urllib.request.urlopen",
                         self._fake_urlopen(captured)):
-            executors.call_llm("sys", "user", "glm", task="judge")
+            executors.call_llm("sys", "user", "glm", task="mount")
         self.assertEqual(captured["body"]["model"], "glm-4.7")     # 最终兜底
+
+    def test_retired_or_unknown_task_rejected_before_any_engine(self):
+        for task in ("judge", "observe", "observe_merge", "unknown"):
+            for engine in ("glm", "qwen3"):
+                with self.subTest(task=task, engine=engine), \
+                     mock.patch("urllib.request.urlopen") as remote, \
+                     mock.patch("subprocess.run") as local, self.assertRaises(ValueError):
+                    executors.call_llm("sys", "user", engine, task=task)
+                remote.assert_not_called()
+                local.assert_not_called()
 
     def test_unknown_engine_raises(self):
         with self.assertRaises(ValueError):
-            executors.call_llm("sys", "user", "gpt4", task="judge")
+            executors.call_llm("sys", "user", "gpt4", task="mount")
 
 
 if __name__ == "__main__":

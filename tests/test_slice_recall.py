@@ -149,11 +149,11 @@ class SliceRecallTests(unittest.TestCase):
         svc.store.write_route(RecallRoute(route_id='cue', event_id='old', matcher='lexical',
                                          cue_type='lexical', cue='beacon'))
         with patch.object(svc, 'legacy_event_recall_pipeline', wraps=svc.legacy_event_recall_pipeline) as legacy, \
-                patch.object(svc, '_observe_extra_hit', side_effect=AssertionError('retired automatic route')), \
                 patch.object(SliceEmbeddingClient, 'embed', return_value=[1., 0.]) as embed:
             first = svc.hook_turn_start('s', 'beacon', user_message_id=100, recall_id='rid')
             retry = svc.hook_turn_start('s', 'beacon', user_message_id=100, recall_id='rid')
         self.assertEqual(first, retry)
+        self.assertFalse(hasattr(svc, '_observe_extra_hit'))
         self.assertEqual(embed.call_count, 1)
         legacy.assert_called_once()
         self.assertTrue(first['injected'])

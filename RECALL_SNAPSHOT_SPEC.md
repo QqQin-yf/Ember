@@ -6,7 +6,7 @@
 
 ## 1. 开轮和重试
 
-沿用 `POST /ember/hooks/turn_start`，提供真实 `session_id`、`message`、`user_message_id` 和稳定 `recall_id`。普通工具头和收轮要求见 [GENERATION_BINDING_SPEC.md](GENERATION_BINDING_SPEC.md)。不带 recall_id 的旧模式不获得快照幂等能力。
+沿用 `POST /ember/hooks/turn_start`，提供真实 `session_id`、`message`、`user_message_id` 和稳定 `recall_id`。普通工具头和收轮要求见 GENERATION_BINDING_SPEC.md（本地历史记录）。不带 recall_id 的旧模式不获得快照幂等能力。
 
 新增可选请求字段：
 
@@ -104,6 +104,6 @@ source_candidates 初始等于冻结 recall_refs.events 的独立副本，source
 
 2026-10-21 更新：App d62aad1 已报告本地接入 turnEnd.recall_id、逐请求普通 MCP 两个身份头及恢复分支，假服务验证通过，尚未真实联调。迟到 ready 的原轮次 turn_end 需要补发，持久时机、状态和幂等规则见 [TURN_END_RECOVERY_SPEC.md](TURN_END_RECOVERY_SPEC.md)；正文到期但 refs ready 时仍可补。由 app 唯一驱动迟到解析；原始 Heart revision=0 登记持久确认后，解析变化才另发 resolution 操作，原始包不改。Ember 不直推 Heart、不定时替 app 补解析。
 
-Heart 可查看本文及 [APP_交接回复.md](APP_交接回复.md)；快照补取不新增用户刺激、不复活旧唤醒周期。原文读取 `/api/source/path` 客户端迁移、独立主动 run、工具结果证据与显式 pending 核验仍未完成。临时提醒不入档、不自动召回；整个唤醒链路不训练耳朵，不新增每次唤醒自动写记忆。
+Heart 可查看本文及 APP_交接回复.md（本地历史记录）；快照补取不新增用户刺激、不复活旧唤醒周期。原文读取 `/api/source/path` 客户端迁移、独立主动 run、工具结果证据与显式 pending 核验仍未完成。临时提醒不入档、不自动召回；整个唤醒链路不训练耳朵，不新增每次唤醒自动写记忆。
 
 验证：191 项 unittest 通过，含快照重试、实例/鉴权隔离、真实 ASGI pending、精确 24 小时到期、数据库正文清除、并发单创建者、提交前后故障与 JSONL 恢复。真实三方联调尚未执行。

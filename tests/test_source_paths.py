@@ -108,9 +108,9 @@ class ExactPathTests(unittest.TestCase):
         rows = self.svc._fetched_corpus("source")
         self.assertEqual([m["_source_message_id"] for m in rows], ["71", "75"])
         self.assertEqual(len(self.server.requests), 1)
-        with self.assertRaises(source_client.SourceUnavailable):
-            self.svc._observe_session("source")
-        self.assertEqual(self.svc.observe_cursor.get("source"), 0)
+        self.server.status = 409
+        self.assertEqual(self.svc._fetched_corpus("source"), [])
+        self.assertEqual(len(self.server.requests), 2)
 
     def test_rejected_path_does_not_launder_local_history_into_quote_corpus(self):
         self.svc.hook_turn_start("source", "old user", user_message_id=71, recall_id="old")
