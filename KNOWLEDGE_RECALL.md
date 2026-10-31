@@ -10,19 +10,23 @@
 
 第三方仅输出 `same_information`、`pattern`、`same_event` 原文分组及逐字证据；分组只是供阅读的材料，不是已经成立的事实或记忆。后台不会创建认知/规律/Event，也不会 pin/unpin。
 
-App 的下一轮召回前缀会提示未处理分组。MCP 工具提供以下流程：
+分组等待 App 的 Sleep 阶段领取，普通对话不提示提炼、不消费待办。Sleep 专属接口交接材料和工具，提供以下流程：
 
 1. `list_memory_groups` 看分组，`read_memory_slices` 按 group_id 或 slice_ids 读取原文。
 2. 自主决定是否提炼。认知/规律用 `write_memory_knowledge`，需要正文、触点和 source_slice_ids；Event 用 `write_event_from_slices`，需要完整 Event 格式、recall_routes 和 source_slice_ids。
 3. 用 `finish_memory_group` 标为 reviewed 或 dismissed。同样的切片内容再次分到同一种组，不会让已处理任务反复出现。来源内容变化则使用新的分组身份。
 
-新工具仍经过普通 generation 的工具调用身份与幂等回执。原文读取结果保持易失，不把工具原文写入持久化回执。Wake 的工具权限没有改变。
+普通 MCP 只新增切片读取和主动搜索。列分组、正式写认知/规律/离散来源 Event、pin/unpin 和完成分组均要求 Sleep 专属上下文，普通 generation 即使持有旧工具缓存也不能执行。
+
+Sleep 交接使用 `POST /ember/sleep/knowledge/start`（sleep_id + session_id），`/tool`（另带 call_id、name、arguments）和 `/finish`（state=completed/stopped）。实例仍由请求头指定。start 冻结本次材料，写入必须引用材料中的来源、先读取原文并保持内容 hash 一致；不能把当前轮或材料外切片混进来。模型和提示均由 App 自己的 Sleep 编排负责，Ember 不替它生成正式记忆。
+
+Sleep 的工具回执持久化并按调用 ID 幂等；正文读取保持易失、缓存有上限。结果未知的写入不重新执行。取消及 App 重启会关闭旧材料会话，保留未处理分组，并将先前已保存的产出告知下次 Sleep。Wake 的工具权限没有改变。
 
 ## 认知／规律
 
 独立存储，不伪装成 Event 或观察条目。创建后默认尝试 pin 到 briefing，正文异步用已有 `Qwen/Qwen3-VL-Embedding-8B` 向量化，并保存单独的向量格式命名空间。
 
-固定部分预算为 **1000 tokens**。Ember 没有 App 模型的分词器，当前使用 **UTF-8 字节 token 上界**保守限额，返回 `count_method=utf8_bytes_upper_bound`；这会比实际模型 token 数多，中文可用量偏小。预算计算包含实际固定部分的条目 ID、类别和正文。它不是字符数或精确的 App 模型计数。
+固定部分预算为 **1000 tokens**。Ember 没有 App 模型的分词器，当前使用 **UTF-8 字节 token 上界**保守限额，返回 `count_method=utf8_bytes_upper_bound`；这会比实际模型 token 数多，中文可用量偏小。预算计算包含实际固定部分的条目 ID、类别和正文。它不是字符数或精确的 App 模型计数。Sleep 确认后的固定内容通过 App 的 Sleep 记录交给下一轮上下文，避免 briefing 缓存尚未刷新导致新 pin 内容不可见；取消/重启后的部分产出交付也按 sleep_id 幂等，正文不出现在进度接口。
 
 超预算时新内容仍保存，但不会强行 pin；回执返回现有条目及 `budget_review_required`，由 App AI 判断重要程度，使用 `set_knowledge_pin` 先取消部分 pin，再 pin 新条目。后台不自动淘汰。briefing refresh/get 始终读取当前 pin 状态，避免缓存保留已 unpin 的文本。
 
@@ -54,4 +58,4 @@ Entity 概览不等于成员 Event 已展示；不因归属推导其全文被呈
 
 验证包括离线回归、实际 HTTP/MCP 的发现/读取/写入/幂等/unpin 链路，以及 GLM-4.7 归类与 VL reranker 的构造样例真实请求。真实输入外发验证最初被自动审批拒绝；用户随后明确授权后，已用两条真实输入及其 79 个候选切片成功调用 VL reranker，结果保存在本地忽略报告 `data/vl-reranker-real-input-check.json`。该报告保留调用时使用的 0.5 门槛；随后用户暂定文本/图片/图文门槛为 0.7/0.5/0.55，未据此改写历史报告。
 
-文本后端链路已经接通，尚未在实际 App 会话中完成“后台分组送达 → App 模型自主阅读和提炼 → 写入/pin → 后续轮再次召回和下钻”的完整实用验收。App 工具缓存未主动刷新，原文浏览 UI 未改动。没有对真实记忆批量运行维护，没有修改 VPS。
+App Sleep 已接入“归类材料 → 当前窗口模型读原文、提炼并选择 pin → 原挂关系 → 结构维护 → 沉淀 → dream”。使用真实 App 模块、真实 Ember 和受控模型完成了工具循环、预算拒绝后的自主取舍、丢失回执重试、取消、重启与下一轮实际上下文可见性验证；原完整 App/Heart/Ember Sleep 流程也进行了回归。尚未让日常 App 模型整理真实记忆，原文浏览 UI 未改动，没有修改日常 8790 服务或 VPS。

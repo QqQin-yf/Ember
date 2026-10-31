@@ -4,14 +4,14 @@ import json
 from .knowledge import KnowledgeStore
 
 
-def tool_specs():
+def tool_specs(sleep=False):
     strings={'type':'array','items':{'type':'string'},'minItems':1,'maxItems':100,'uniqueItems':True}
     def spec(name,desc,properties,required=()):
         return {'type':'function','function':{'name':name,'description':desc,'parameters':{
             'type':'object','additionalProperties':False,'properties':properties,'required':list(required)}}}
     from .writer import build_tools_spec
     writer=build_tools_spec()[0]['function']['parameters']['properties']
-    return [
+    specs = [
         spec('list_memory_groups','读取后台对旧切片的分组。分组不是事实结论；由你阅读原文后自主决定是否提炼认知、规律或 Event。',
              {'include_reviewed':{'type':'boolean'}}),
         spec('read_memory_slices','按切片 ID 精确读取原文；也可按归类组或认知/规律/Event ID 下钻。保留分离来源，不扩展成连续区间。',
@@ -27,11 +27,15 @@ def tool_specs():
         spec('set_knowledge_pin','自主管理认知/规律的 briefing 常驻预算。超预算时先斟酌重要程度取消部分 pin，再 pin 新条目；取消后仍可正常召回。',
              {'memory_id':{'type':'string'},'pinned':{'type':'boolean'}},['memory_id','pinned']),
         spec('finish_memory_group','阅读并处理分组后标记 reviewed，或判断不值得提炼时 dismissed。不会删除原文。',
-             {'group_id':{'type':'string'},'state':{'enum':['reviewed','dismissed']}},['group_id','state'])]
+             {'group_id':{'type':'string'},'state':{'enum':['reviewed','dismissed']}},['group_id','state']),
+        spec('list_memory_knowledge','读取现有认知/规律与 pin 预算，供 Sleep 时自主取舍。',{})]
+    return ([s for s in specs if s['function']['name']!='search_memory_slices'] if sleep else
+            [s for s in specs if s['function']['name'] in ('read_memory_slices','search_memory_slices')])
 
 
 TOOL_NAMES={'list_memory_groups','read_memory_slices','search_memory_slices','write_memory_knowledge',
-            'write_event_from_slices','set_knowledge_pin','finish_memory_group'}
+            'write_event_from_slices','set_knowledge_pin','finish_memory_group','list_memory_knowledge'}
+SLEEP_ONLY_TOOLS=TOOL_NAMES-{'read_memory_slices','search_memory_slices'}
 VOLATILE_TOOLS={'read_memory_slices','search_memory_slices'}
 
 
@@ -95,6 +99,19 @@ def write_event(service, args, context):
 def dispatch(service,name,args,context=None):
     store=KnowledgeStore(service.store.root,service.source_instance)
     try:
+        if name in SLEEP_ONLY_TOOLS and (context is None or context.get('kind')!='sleep'):
+            return {'status':'failed','code':'sleep_context_required'}
+        if context and context.get('kind')=='sleep':
+            if name in ('write_memory_knowledge','write_event_from_slices') and 'source_ids' in context:
+                ids=args.get('source_slice_ids')
+                if not isinstance(ids,list) or not all(isinstance(s,str) and s in context['source_ids'] for s in ids):
+                    return {'status':'failed','code':'source_outside_sleep_materials'}
+                if 'read_source_ids' in context and not set(ids)<=context['read_source_ids']:
+                    return {'status':'failed','code':'source_not_read_in_sleep'}
+                if 'frozen_sources' in context:
+                    store.read_sources([context['frozen_sources'][sid] for sid in ids])
+            if name=='finish_memory_group' and 'group_ids' in context and args.get('group_id') not in context['group_ids']:
+                return {'status':'failed','code':'group_outside_sleep_materials'}
         if name=='list_memory_groups':
             return {'status':'ok','groups':store.groups(pending=not args.get('include_reviewed',False)),
                     'instruction':'这些是旧原文的分组，不是已成立的记忆；阅读后自行决定提炼或 dismiss。'}
@@ -166,13 +183,8 @@ def append_recall(service,result,text):
         result['presentations']=result.get('presentations',[])+[
             {'presentation':'knowledge','memory_id':r['memory_id'],'source_slice_ids':[s['slice_id'] for s in r['sources']],
              'cue_hit':r['cue_hit'],'score':r['score']} for r in hits]
-    groups=store.groups()
-    if groups:
-        ids=', '.join(r['group_id'] for r in groups[:3])
-        parts.append('【待整理原文组】'+ids+'。后台仅归类；可用 list_memory_groups / read_memory_slices 阅读，'
-                     '由你决定写认知、规律或 Event；不值得提炼可 finish_memory_group dismissed。')
     result['prefix']='\n\n'.join(p for p in parts if p)
     result['knowledge_extra']=[r['memory_id'] for r in hits]
     if result.get('slice_recall') is not None:
-        result['slice_recall']=dict(result['slice_recall'],knowledge_extra=result['knowledge_extra'],pending_groups=len(groups))
+        result['slice_recall']=dict(result['slice_recall'],knowledge_extra=result['knowledge_extra'])
     return result

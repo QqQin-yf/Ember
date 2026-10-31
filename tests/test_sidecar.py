@@ -194,12 +194,10 @@ def _run_tests():
 
         print("== S10 工具清单与代理形态同源 ==")
         names = {s["function"]["name"] for s in service2.sidecar_tool_specs()}
-        check("原工具与切片归类提炼工具齐全",
+        check("原工具与切片检索下钻工具齐全",
               names == {"create_memory_event", "read_memory_source",
                         "revise_memory_event", "search_memory",
-                        "pin_memory", "unpin_memory", "list_memory_groups", "read_memory_slices",
-                        "search_memory_slices", "write_memory_knowledge", "write_event_from_slices",
-                        "set_knowledge_pin", "finish_memory_group"},
+                        "pin_memory", "unpin_memory", "read_memory_slices", "search_memory_slices"},
               str(names))
 
         print("== S11 代理形态回归：chat 流程仍走同一召回/写入实现 ==")

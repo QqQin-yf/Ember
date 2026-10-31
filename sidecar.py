@@ -416,6 +416,22 @@ async def _slice_recall_trace(request: Request) -> JSONResponse:
 
 # ---------- 挂关系（2026-10-14 设计稿 v2：借窗口跑，app 编排） ----------
 
+async def _sleep_knowledge(request: Request) -> JSONResponse:
+    from ember.sleep_knowledge import SleepKnowledge
+    svc = _service_or_404(request)
+    if isinstance(svc, JSONResponse):
+        return svc
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({'status':'failed','code':'invalid_json'},status_code=400)
+    operation = request.path_params['operation']
+    method = {'start':'start','tool':'call','finish':'finish'}.get(operation)
+    if method is None:
+        return JSONResponse({'status':'failed','code':'unknown_operation'},status_code=404)
+    result = await asyncio.to_thread(getattr(SleepKnowledge(svc),method),body)
+    return JSONResponse(result)
+
 async def _sleep_link_batches(request: Request) -> JSONResponse:
     """接口 1：材料出队——app 贴进窗口末尾给正主 AI 判联。"""
     svc = _service_or_404(request)
@@ -445,13 +461,13 @@ async def _sleep_link_progress(request: Request) -> JSONResponse:
 
 
 async def _sleep_structure_run(request: Request) -> JSONResponse:
-    """结构维护：向量补建 + cue 收紧 + 观察提炼/合并。
+    """结构维护：向量补建 + cue 收紧；观察条目已退役。
 
     编排顺序：挂在 link/submit 清完之后——挂完关系不等于没活儿，
     还有这一步（契约见 API.md「编排顺序」）。
 
-    挪线程（2026-10-19）：这步是几十秒的重活（embedding 补建 +
-    两次 LLM），在事件循环上直跑会把**整个进程**卡住——其他实例
+    挪线程（2026-10-19）：向量补建可能耗时，在事件循环上直跑会把
+    **整个进程**卡住——其他实例
     的钩子全部排队。asyncio.to_thread 挪到工作线程，事件循环继续
     接待；app 的本请求仍然等到跑完才返回（sleep 是顺序编排，下一
     步 sediment 依赖本步完成——等待是契约，排队不是）。
@@ -557,6 +573,7 @@ app = BearerAuthMiddleware(Starlette(
         Route("/ember/slices/jobs/{job_id}", _slice_ingestion_status, methods=["GET"]),
         Route("/ember/recall/slices/preview", _slice_recall_preview, methods=["POST"]),
         Route("/ember/recall/slices/{trace_id}", _slice_recall_trace, methods=["GET"]),
+        Route("/ember/sleep/knowledge/{operation}", _sleep_knowledge, methods=["POST"]),
         Route("/ember/sleep/link/batches", _sleep_link_batches,
               methods=["GET"]),
         Route("/ember/sleep/link/submit", _sleep_link_submit,

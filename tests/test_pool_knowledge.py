@@ -99,14 +99,14 @@ class PoolKnowledgeTests(unittest.TestCase):
 
     def test_app_authors_knowledge_and_unpin_keeps_cues_and_sources(self):
         self.test_pool_is_enqueued_before_any_reply_or_event_and_excludes_current()
-        context={'session':self.service.get_or_create_session('current'),'turn':1}
+        context={'kind':'sleep','session':self.service.get_or_create_session('current'),'turn':1}
         result=dispatch(self.service,'write_memory_knowledge',{'kind':'pattern','content':'选择固定午饭以减少决策负担',
             'recall_cues':['黄焖鸡'],'source_slice_ids':[self.a['slice_id'],self.b['slice_id']]},context)
         self.assertEqual(result['status'],'created')
         mid=result['memory_id']
         self.assertIn(mid,self.service.sidecar_briefing_get()['knowledge']['memory_ids'])
         self.assertEqual(self.store.match('黄焖鸡'),[])
-        dispatch(self.service,'set_knowledge_pin',{'memory_id':mid,'pinned':False})
+        dispatch(self.service,'set_knowledge_pin',{'memory_id':mid,'pinned':False},context)
         hits=self.store.match('黄焖鸡')
         self.assertEqual(len(hits),1)
         read=dispatch(self.service,'read_memory_slices',{'memory_id':mid})
@@ -162,7 +162,7 @@ class PoolKnowledgeTests(unittest.TestCase):
         args=write_args()
         args.pop('quote_spans')
         args['source_slice_ids']=[self.a['slice_id'],self.b['slice_id']]
-        context={'session':self.service.get_or_create_session('current'),'turn':1}
+        context={'kind':'sleep','session':self.service.get_or_create_session('current'),'turn':1}
         result=dispatch(self.service,'write_event_from_slices',args,context)
         self.assertEqual(result['status'],'created',result)
         event=self.service.store.get_event(result['event_id'])
