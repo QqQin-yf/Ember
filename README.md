@@ -22,13 +22,10 @@ Event/Entity最多持续在场三轮，临时召回不写入持久聊天记录�
 
 ## 技术文档
 
-- [API.md](API.md)：HTTP/MCP入口、鉴权、错误与数据字段。
-- [MEMORY_LIFECYCLE_SPEC.md](MEMORY_LIFECYCLE_SPEC.md)：召回、分池维护、待办聚合与Sleep材料契约。
-- [TURN_SLICES.md](TURN_SLICES.md)、[SLICE_PIPELINE.md](SLICE_PIPELINE.md)：精确原文切片和异步入库。
-- [SLICE_MAINTENANCE.md](SLICE_MAINTENANCE.md)、[EVENT_SLICE_MEMBERSHIPS.md](EVENT_SLICE_MEMBERSHIPS.md)：关系维护与多对多来源。
-- [RECALL_SNAPSHOT_SPEC.md](RECALL_SNAPSHOT_SPEC.md)、[SOURCE_COMPLETION_SPEC.md](SOURCE_COMPLETION_SPEC.md)：幂等快照及出处补交。
-- [RUNS_SPEC.md](RUNS_SPEC.md)：独立主动run。
-- [MEMORY_HEALTH_CHECK.md](MEMORY_HEALTH_CHECK.md)：只读离线记忆库检查。
+- [API.md](API.md)：HTTP/MCP入口、鉴权、错误和数据字段。
+- [MEMORY_LIFECYCLE_SPEC.md](MEMORY_LIFECYCLE_SPEC.md)：当前召回、分池维护、待办聚合与Sleep材料契约，含切片实现细节。
+- [PROTOCOL_DETAILS.md](PROTOCOL_DETAILS.md)：briefing、召回引用/快照、主动run及来源恢复协议细节。
+- [OPERATIONS.md](OPERATIONS.md)：运行说明及只读离线检查。
 
 ## 验证与离线工具
 

@@ -77,7 +77,7 @@
 - `injected_text`：app **自行注入**当轮 system（ember 不改写任何请求）
 - `memory` 为观察统计，前端可不消费
 
-2026-10-20 本段新增 `presentations`（有序呈现粒度）和 `recall_refs`（触发会话、真实锚点 seq 字符串及实际输出事件的出处辅助）。只有事件正文/摘录进入 `recall_refs.events`；实体概览不展开隐藏成员。旧事件或缺可靠消息身份保持 unresolved，路径由 app 解析。完整字段及限制见 [RECALL_REFS_SPEC.md](RECALL_REFS_SPEC.md)。
+2026-10-20 本段新增 `presentations`（有序呈现粒度）和 `recall_refs`（触发会话、真实锚点 seq 字符串及实际输出事件的出处辅助）。只有事件正文/摘录进入 `recall_refs.events`；实体概览不展开隐藏成员。旧事件或缺可靠消息身份保持 unresolved，路径由 app 解析。完整字段及限制见 [RECALL_REFS_SPEC.md](PROTOCOL_DETAILS.md#recall-refs)。
 
 带 recall_id 的新模式已本地实现持久快照与 24 小时原响应重放，见下节。主动 run 未实现。原文客户端已迁移到精确路径，见 §7.1 与 SOURCE_PATH_VALIDATION.md；生产提供方配置和实例归属核验仍待完成，生产开关未批准。
 
@@ -87,9 +87,9 @@ turn_start 可传 recall_id，MCP 随后逐请求带 X-Ember-Recall-Id 和 X-Emb
 
 ### 4.1.2 召回快照查询及 24 小时正文留存
 
-同生成 done 后来源完成绑定已实现：原 snapshot/response 冻结；source_candidates 可含 generation_completed 与 completion_bindings，实际变化推进 sources_revision。App 核验证据再做父链解析，不把新辅助字段透传 Heart。具体字段、兼容边界和幂等见 [SOURCE_COMPLETION_SPEC.md](SOURCE_COMPLETION_SPEC.md)。
+同生成 done 后来源完成绑定已实现：原 snapshot/response 冻结；source_candidates 可含 generation_completed 与 completion_bindings，实际变化推进 sources_revision。App 核验证据再做父链解析，不把新辅助字段透传 Heart。具体字段、兼容边界和幂等见 [SOURCE_COMPLETION_SPEC.md](PROTOCOL_DETAILS.md#source-completion)。
 
-`GET /ember/recalls/{recall_id}` 默认只返回冻结的呈现/引用元数据；`?view=response` 另带首次完整开轮响应的 response 字段。沿用 Bearer 和实例路由。具体字段和恢复边界见 [RECALL_SNAPSHOT_SPEC.md](RECALL_SNAPSHOT_SPEC.md)。
+`GET /ember/recalls/{recall_id}` 默认只返回冻结的呈现/引用元数据；`?view=response` 另带首次完整开轮响应的 response 字段。沿用 Bearer 和实例路由。具体字段和恢复边界见 [RECALL_SNAPSHOT_SPEC.md](PROTOCOL_DETAILS.md#recall-snapshots)。
 
 同 recall_id 同业务内容的 start 在 24 小时内重放原响应，不重新选材或记账；异内容 409 id_conflict。计算/记账恢复中返回 202 recall_in_progress / recall_recovery_pending，Retry-After: 2；app 必须检查状态，不能把 202 当成成功空召回。未提交结果的中断返回 409 recall_outcome_unknown；旧版无快照登记返回 409 recall_snapshot_unavailable；未知 ID 返回 404 unknown_recall。
 
@@ -310,4 +310,4 @@ X-Heart-Instance: <Ember 实例名>
 
 ## 主动 run 隔离接入（ember-runs/1）
 
-新增 `POST /ember/runs/start`、`POST /ember/runs/finish`、`GET /ember/runs/{run_id}`。严格字段、幂等/终态/重启与 MCP 绑定见 [RUNS_SPEC.md](RUNS_SPEC.md)，App 接线回执见 APP_WAKE_RUNS_REPLY.md（本地历史记录）。首版仅开放 read_memory_source；不支持写入工具或有副作用的 search_memory。当前仅工作区实现和隔离验收，不代表日常主动发送已开启。
+新增 `POST /ember/runs/start`、`POST /ember/runs/finish`、`GET /ember/runs/{run_id}`。严格字段、幂等/终态/重启与 MCP 绑定见 [RUNS_SPEC.md](PROTOCOL_DETAILS.md#runs)，App 接线回执见 APP_WAKE_RUNS_REPLY.md（本地历史记录）。首版仅开放 read_memory_source；不支持写入工具或有副作用的 search_memory。当前仅工作区实现和隔离验收，不代表日常主动发送已开启。
