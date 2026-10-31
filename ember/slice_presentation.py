@@ -42,6 +42,9 @@ def append_slice_presentations(service,result,query):
                 if rank['relevance_score']<config.score_floor('text'):
                     continue
                 source=sources[rank['index']];candidate=candidates[rank['index']]
+                from .memory_lifecycle import Lifecycle
+                if not Lifecycle(service.store.root,service.source_instance).eligible(source['slice_id']):
+                    continue
                 try:
                     knowledge.read_sources([candidate])
                 except ValueError:

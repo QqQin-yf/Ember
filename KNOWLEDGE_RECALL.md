@@ -58,6 +58,8 @@ Entity 概览不等于成员 Event 已展示；不因归属推导其全文被呈
 
 验证包括离线回归、实际 HTTP/MCP 的发现/读取/写入/幂等/unpin 链路，以及 GLM-4.7 归类与 VL reranker 的构造样例真实请求。真实输入外发验证最初被自动审批拒绝；用户随后明确授权后，已用两条真实输入及其 79 个候选切片成功调用 VL reranker，结果保存在本地忽略报告 `data/vl-reranker-real-input-check.json`。该报告保留调用时使用的 0.5 门槛；随后用户暂定文本/图片/图文门槛为 0.7/0.5/0.55，未据此改写历史报告。
 
-App Sleep 只执行“归类材料 → 当前窗口模型读原文、正式产出及 pin/unpin → 沉淀 → dream”。旧挂关系与旧结构维护不再是后续步骤，旧 HTTP 入口返回 410，新 Event 也不再自动加入旧 link_pending 队列。判断、归类、连线由独立第三方任务完成；原文切片和认知/规律向量化沿用已有后台。没有新增旧 Event/Entity 全库向量扫描，也不自动重启旧 cue 收紧、观察提炼流程。
+App Sleep 只执行“归类材料 → 当前窗口模型读原文、正式产出及 pin/unpin → 沉淀 → dream”。旧挂关系与旧结构维护不再是后续步骤，旧 HTTP 入口返回 410，新 Event 也不再自动加入旧 link_pending 队列。判断、归类、连线由独立第三方任务完成；原文切片和认知/规律向量化沿用已有后台。后续维护已扩展为独立记忆池维护与旧内容索引补算，完整当前契约见 [MEMORY_LIFECYCLE_SPEC.md](MEMORY_LIFECYCLE_SPEC.md)。旧 cue 收紧、观察提炼不自动重启。
 
 使用真实 App 模块、真实 Ember 和受控模型验证了工具循环、预算拒绝后的自主取舍、丢失回执重试、取消、重启与醒后可见性，完整 Sleep 回归还检查不再请求旧挂关系/结构接口。尚未让日常 App 模型整理真实记忆，原文浏览 UI 未改动，没有修改日常 8790 服务或 VPS。
+
+当前维护、三轮在场、Entity提取及置信度契约，以 [MEMORY_LIFECYCLE_SPEC.md](MEMORY_LIFECYCLE_SPEC.md) 为准。

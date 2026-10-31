@@ -42,6 +42,8 @@ class KnowledgeStore:
                 CREATE TABLE IF NOT EXISTS memory_groups (
                 group_id TEXT PRIMARY KEY,instance TEXT NOT NULL,kind TEXT NOT NULL,
                 sources_json TEXT NOT NULL,reason TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'pending');''')
+            if 'confidence' not in {r[1] for r in db.execute('PRAGMA table_info(knowledge)')}:
+                db.execute('ALTER TABLE knowledge ADD COLUMN confidence INTEGER NOT NULL DEFAULT 8')
             with db:
                 yield db
         finally:
@@ -72,7 +74,7 @@ class KnowledgeStore:
 
     @staticmethod
     def line(item):
-        return f"[{item['memory_id']} {item['kind']}] {item['content']}"
+        return f"[{item['memory_id']} {item['kind']} 置信度{item.get('confidence',8)}/10] {item['content']}"
 
     def all(self):
         if not self.path.exists():
@@ -104,6 +106,9 @@ class KnowledgeStore:
     def pin(self, mid, pinned):
         if type(pinned) is not bool:
             raise ValueError('pinned must be a boolean')
+        from .memory_lifecycle import Lifecycle
+        if pinned and not Lifecycle(self.root,self.instance).eligible(mid):
+            raise ValueError('memory_not_recallable')
         with self.db() as db:
             db.execute('BEGIN IMMEDIATE')
             rows = [dict(r) for r in db.execute('SELECT * FROM knowledge WHERE instance=?',(self.instance,))]
@@ -124,7 +129,8 @@ class KnowledgeStore:
                 'token_upper_bound':used,'count_method':'utf8_bytes_upper_bound'}
 
     def briefing(self):
-        chosen = [r for r in self.all() if r['pinned']]
+        from .memory_lifecycle import Lifecycle
+        chosen = [r for r in self.all() if r['pinned'] and Lifecycle(self.root,self.instance).eligible(r['memory_id'])]
         text = '\n'.join(self.line(r) for r in chosen)
         return {'text':text,'memory_ids':[r['memory_id'] for r in chosen], 'budget_tokens':KNOWLEDGE_BUDGET,
                 'token_upper_bound':token_bound(text),'count_method':'utf8_bytes_upper_bound'}
@@ -150,6 +156,8 @@ class KnowledgeStore:
             if pending and row['state']!='pending':
                 continue
             row['sources']=json.loads(row.pop('sources_json'))
+            from .memory_lifecycle import Lifecycle
+            row['material']=Lifecycle(self.root,self.instance).material(row['group_id'])
             try:
                 self.read_sources(row['sources'])
             except ValueError:
@@ -167,9 +175,12 @@ class KnowledgeStore:
         return {'status':'ok','group_id':gid,'state':state}
 
     def match(self, text, vector=None, space=None):
+        from .memory_lifecycle import Lifecycle
+        life=Lifecycle(self.root,self.instance)
+        eligible=life.eligibility_checker()
         hits=[]
         for row in self.all():
-            if row['pinned']:
+            if row['pinned'] or not eligible(row['memory_id']):
                 continue
             cue=any(c.casefold() in text.casefold() for c in row['cues'])
             score=None

@@ -12,7 +12,7 @@ class MaintenancePending(Exception):
     pass
 
 
-EVENT_FIELDS = ('event_id', 'version_id', 'summary', 'core', 'affect', 'context',
+EVENT_FIELDS = ('event_id', 'version_id', 'event_time', 'ingest_time', 'summary', 'core', 'affect', 'context',
                 'outcome', 'details', 'state', 'significance', 'change', 'participants', 'objects')
 
 

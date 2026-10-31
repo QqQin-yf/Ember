@@ -22,7 +22,7 @@ class SleepKnowledgeTests(unittest.TestCase):
         return self.stage.call({**self.identity,'call_id':cid,'name':name,'arguments':args})
 
     def args(self):
-        return {'kind':'pattern','content':'固定午饭选择减少决策负担','recall_cues':['黄焖鸡'],
+        return {'confidence':8,'kind':'pattern','content':'固定午饭选择减少决策负担','recall_cues':['黄焖鸡'],
             'source_slice_ids':[self.fixture.a['slice_id'],self.fixture.b['slice_id']]}
 
     def read(self):

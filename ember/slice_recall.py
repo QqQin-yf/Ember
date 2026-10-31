@@ -45,7 +45,7 @@ class SliceRecall:
         finally:
             db.close()
 
-    def match(self, text, session_id=None, turn=None, anchor_message_id=None, context_start_id=None, purpose='preview'):
+    def match(self, text, session_id=None, turn=None, anchor_message_id=None, context_start_id=None, purpose='preview',context_message_ids=None):
         if not isinstance(text, str) or not text.strip():
             raise ValueError('A nonempty input is required')
         trace_id = uuid.uuid4().hex
@@ -97,7 +97,11 @@ class SliceRecall:
                 qnorm = math.hypot(*query_vector)
                 if not qnorm or not math.isfinite(qnorm):
                     raise SliceEmbeddingError('embedding_response_invalid')
+                from .memory_lifecycle import Lifecycle
+                eligible=Lifecycle(self.root,self.instance).eligibility_checker()
                 for row in rows:
+                    if not eligible(row['slice_id']):
+                        continue
                     messages = json.loads(row['messages_json'])
                     ids = [int(m['message_id']) for m in messages]
                     if row['session_id'] == session_id:
@@ -106,7 +110,8 @@ class SliceRecall:
                         if anchor and max(ids) >= int(anchor):
                             metadata['filtered_by_anchor'] += 1
                             continue
-                        if start and min(ids) >= int(start):
+                        if ((context_message_ids is not None and set(ids)<=set(context_message_ids)) or
+                                (context_message_ids is None and start and min(ids)>=int(start))):
                             metadata['filtered_by_window'] += 1
                             continue
                     vector = json.loads(row['vector_json'])
@@ -174,13 +179,13 @@ class SliceRecall:
         return result
 
 
-def automatic_slice_recall(service, session, turn, text, context_start_id=None):
+def automatic_slice_recall(service, session, turn, text, context_start_id=None,context_message_ids=None):
     """Keep the App hook contract; rankings stay separate from actual injection."""
     try:
         matched = SliceRecall(service.store.root, service.source_instance).match(text,
             session_id=session.session_id, turn=turn,
             anchor_message_id=service.turn_ledger.user_msg.get((session.session_id, turn)),
-            context_start_id=context_start_id, purpose='automatic')
+            context_start_id=context_start_id, purpose='automatic',context_message_ids=context_message_ids)
     except (OSError, sqlite3.Error, ValueError):
         matched = {'status': 'unavailable', 'error_code': 'slice_recall_storage_unavailable',
                    'ranked_count': 0, 'candidate_threshold': CANDIDATE_MIN_SCORE,

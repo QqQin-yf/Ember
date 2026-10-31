@@ -20,7 +20,9 @@ def tool_specs(sleep=False):
              {'query':{'type':'string','minLength':1},'k':{'type':'integer','minimum':1,'maximum':20}},['query']),
         spec('write_memory_knowledge','由你从原文提炼认知或规律。必须提供来源切片和触点。默认尝试 pin 至 briefing，1000 tokens 预算超限会要求你自主 unpin/pin 取舍；后台不替你提炼。',
              {'kind':{'enum':['cognition','pattern']},'content':{'type':'string','minLength':1},
-              'recall_cues':strings,'source_slice_ids':strings},['kind','content','recall_cues','source_slice_ids']),
+              'recall_cues':strings,'source_slice_ids':strings,
+              'confidence':{'type':'integer','minimum':0,'maximum':10},
+              'confidence_basis':{'enum':['recently_disproved','outdated']},'confidence_evidence':{'type':'string'}},['kind','content','recall_cues','source_slice_ids','confidence']),
         spec('write_event_from_slices','由你按正常 Event 格式把离散原文切片写成一件经历。来源可以跨会话，不能扩大区间或把同类经历强合成同一件事。',
              {'event':writer['event'],'recall_routes':writer['recall_routes'],'source_slice_ids':strings},
              ['event','recall_routes','source_slice_ids']),
@@ -29,17 +31,35 @@ def tool_specs(sleep=False):
         spec('finish_memory_group','阅读并处理分组后标记 reviewed，或判断不值得提炼时 dismissed。不会删除原文。',
              {'group_id':{'type':'string'},'state':{'enum':['reviewed','dismissed']}},['group_id','state']),
         spec('list_memory_knowledge','读取现有认知/规律与 pin 预算，供 Sleep 时自主取舍。',{})]
+    specs += [
+        spec('review_memory_knowledge','审阅相似认知/规律：维持、改写补写或合并。每条最终产出必须评分；只有近期经历明确打破或过时才能<=5，须提供逐字来源证据。',
+            {'group_id':{'type':'string'},'items':{'type':'array','minItems':1,'items':{'type':'object',
+              'additionalProperties':False,'required':['memory_id','action','confidence'],'properties':{
+                'memory_id':{'type':'string'},'action':{'enum':['keep','rewrite','merge']},
+                'content':{'type':'string'},'recall_cues':strings,'merge_ids':strings,
+                'source_slice_ids':strings,
+                'confidence':{'type':'integer','minimum':0,'maximum':10},
+                'confidence_basis':{'enum':['recently_disproved','outdated']},'confidence_evidence':{'type':'string'}}}}},['group_id','items']),
+        spec('extract_memory_entity','从Event主题材料中正式提取确定的Entity。先读原文；无法确定可dismiss，不必提取。',
+            {'group_id':{'type':'string'},'name':{'type':'string','minLength':1},'summary':{'type':'string','minLength':1},
+             'aliases':{'type':'array','items':{'type':'string'}},'event_ids':strings},['group_id','name','summary','event_ids']),
+        spec('set_slice_recall_state','阅读后标注过时或与当前上下文矛盾的切片，不删除原文。提供逐字证据。',
+            {'group_id':{'type':'string'},'slice_ids':strings,'reason':{'type':'string','minLength':1},
+             'evidence':{'type':'string','minLength':1}},['group_id','slice_ids','reason','evidence'])]
     return ([s for s in specs if s['function']['name']!='search_memory_slices'] if sleep else
             [s for s in specs if s['function']['name'] in ('read_memory_slices','search_memory_slices')])
 
 
 TOOL_NAMES={'list_memory_groups','read_memory_slices','search_memory_slices','write_memory_knowledge',
-            'write_event_from_slices','set_knowledge_pin','finish_memory_group','list_memory_knowledge'}
+            'write_event_from_slices','set_knowledge_pin','finish_memory_group','list_memory_knowledge',
+            'review_memory_knowledge','extract_memory_entity','set_slice_recall_state'}
 SLEEP_ONLY_TOOLS=TOOL_NAMES-{'read_memory_slices','search_memory_slices'}
 VOLATILE_TOOLS={'read_memory_slices','search_memory_slices'}
 
 
 def read_memory(service, memory_id):
+    from .memory_lifecycle import Lifecycle
+    memory_id=Lifecycle(service.store.root,service.source_instance).canonical(memory_id)
     store=KnowledgeStore(service.store.root,service.source_instance)
     sources=store.event_sources(memory_id)
     if sources is None:
@@ -119,7 +139,36 @@ def dispatch(service,name,args,context=None):
         if name=='write_memory_knowledge':
             if context is None and service._live_turn is None:
                 raise ValueError('A live App generation is required to author knowledge')
-            return store.create(args.get('kind'),args.get('content'),args.get('recall_cues'),args.get('source_slice_ids'))
+            from .sleep_review import score, set_confidence
+            score(args)
+            if args.get('confidence',8)<=5:
+                originals=store.read_sources(store.sources(args['source_slice_ids']))
+                if not any(args['confidence_evidence'] in m['content'] for s in originals for m in s['messages']):
+                    raise ValueError('confidence_evidence_not_in_sources')
+            result=store.create(args.get('kind'),args.get('content'),args.get('recall_cues'),args.get('source_slice_ids'))
+            result['confidence']=set_confidence(store,result['memory_id'],args)
+            if result['confidence']<=5:
+                result['pin']={'status':'ok','pinned':False,'reason':'low_confidence_no_recall'}
+            return result
+        if name=='review_memory_knowledge':
+            from .sleep_review import review_knowledge
+            return review_knowledge(service,args,context)
+        if name=='extract_memory_entity':
+            from .sleep_review import extract_entity
+            return extract_entity(service,args,context)
+        if name=='set_slice_recall_state':
+            from .sleep_review import group
+            item=group(service,args['group_id'],context)
+            selected=[s for s in item['sources'] if s['slice_id'] in args['slice_ids']]
+            if len(selected)!=len(args['slice_ids']):
+                raise ValueError('slice_outside_group')
+            from .memory_lifecycle import Lifecycle
+            for row in store.read_sources(selected):
+                if not any(args['evidence'] in m['content'] for m in row['messages']):
+                    raise ValueError('slice_evidence_invalid')
+            for s in selected:
+                Lifecycle(store.root,store.instance).mark(s['slice_id'],'no_recall',args['reason'],[args['evidence']])
+            return {'status':'ok','slice_ids':args['slice_ids'],'recall_state':'no_recall'}
         if name=='set_knowledge_pin':
             return store.pin(args.get('memory_id'),args.get('pinned'))
         if name=='write_event_from_slices':
@@ -130,7 +179,7 @@ def dispatch(service,name,args,context=None):
             if args.get('memory_id'):
                 return read_memory(service,args['memory_id']) or {'status':'failed','code':'memory_not_found'}
             if args.get('group_id'):
-                group=next((r for r in store.groups(False) if r['group_id']==args['group_id']),None)
+                group=(context or {}).get('snapshot_groups',{}).get(args['group_id']) or next((r for r in store.groups(False) if r['group_id']==args['group_id']),None)
                 if group is None:
                     raise ValueError('group_not_found')
                 sources=group['sources']
@@ -160,7 +209,7 @@ def append_briefing(service,report):
     return dict(report,knowledge=section)
 
 
-def append_recall(service,result,text):
+def append_recall(service,result,text,session_id=None,context_message_ids=None):
     from .slice_recall import SliceRecall
     store=KnowledgeStore(service.store.root,service.source_instance)
     vector=space=None
@@ -176,6 +225,9 @@ def append_recall(service,result,text):
             from .generations import fingerprint
             space=fingerprint(['knowledge-content-v1',metadata.get('space')])
     hits=store.match(text,vector,space)
+    if context_message_ids is not None:
+        from .memory_lifecycle import sources_in_context
+        hits=[r for r in hits if not sources_in_context(r['sources'],session_id,None,context_message_ids)]
     parts=[result.get('prefix','')]
     if hits:
         parts.append('【认知／规律浮现】\n'+'\n'.join(store.line(r) for r in hits))

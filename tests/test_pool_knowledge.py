@@ -46,17 +46,22 @@ class PoolKnowledgeTests(unittest.TestCase):
                 {'slice_id':self.a['slice_id'],'quote':'午饭经常吃黄焖鸡'},
                 {'slice_id':self.b['slice_id'],'quote':'黄焖鸡省去选午饭的麻烦'}]}]
 
+    def pool_judge(self):
+        old=self.judge()[0]
+        return [{'proposals':[{'kind':'pattern','ids':old['slice_ids'],'reason':old['reason'],
+            'evidence':[{'id':e['slice_id'],'quote':e['quote']} for e in old['evidence']]}]}]
+
     def test_pool_is_enqueued_before_any_reply_or_event_and_excludes_current(self):
         queue=PoolQueue(self.root)
         queue.enqueue(self.trace())
-        worker=PoolMaintenanceWorker(SimpleNamespace(names=['default'],dir_of=lambda n:str(self.root)))
+        worker=PoolMaintenanceWorker(SimpleNamespace(names=['default'],dir_of=lambda n:str(self.root),service=lambda n:self.service))
         worker.last_discover=float('inf')
         with patch('ember.pool_maintenance.MaintenanceConfig.load',return_value=MaintenanceConfig('https://example.invalid','test','test')), \
-                patch('ember.pool_maintenance.MaintenanceClient.judge',return_value=self.judge()) as judge:
+                patch('ember.pool_maintenance.MaintenanceClient.judge',return_value=self.pool_judge()) as judge:
             worker.process_one()
         payload=judge.call_args.args[1]
-        self.assertEqual(set(payload),{'phase','candidates'})
-        self.assertEqual(len(payload['candidates']),2)
+        self.assertEqual(set(payload),{'phase','subject','materials','known_groups'})
+        self.assertEqual(len(payload['materials']),2)
         self.assertNotIn('本轮禁止进入维护',json.dumps(payload,ensure_ascii=False))
         self.assertEqual(len(self.store.groups()),1)
         self.assertEqual(self.store.all(),[])
@@ -87,9 +92,9 @@ class PoolKnowledgeTests(unittest.TestCase):
 
     def test_forged_group_not_saved_and_no_memory_created(self):
         queue=PoolQueue(self.root);queue.enqueue(self.trace())
-        worker=PoolMaintenanceWorker(SimpleNamespace(names=['default'],dir_of=lambda n:str(self.root)))
+        worker=PoolMaintenanceWorker(SimpleNamespace(names=['default'],dir_of=lambda n:str(self.root),service=lambda n:self.service))
         worker.last_discover=float('inf')
-        decisions=self.judge();decisions[0]['slice_ids'][0]='forged'
+        decisions=self.pool_judge();decisions[0]['proposals'][0]['ids'][0]='forged'
         with patch('ember.pool_maintenance.MaintenanceConfig.load',return_value=MaintenanceConfig('https://example.invalid','test','test')), \
                 patch('ember.pool_maintenance.MaintenanceClient.judge',return_value=decisions):
             worker.process_one()
@@ -180,10 +185,10 @@ class PoolKnowledgeTests(unittest.TestCase):
         self.store.finish_group(group['group_id'],'dismissed')
         trace=self.trace();trace['trace_id']='another'
         queue=PoolQueue(self.root);queue.enqueue(trace)
-        job=queue.claim()
-        from ember.pool_maintenance import validate_groups
-        sources=json.loads(job['sources_json'])
-        queue.finish(job,'done',validate_groups(self.judge(),sources,self.store.read_sources(sources)))
+        worker=PoolMaintenanceWorker(SimpleNamespace(names=['default'],dir_of=lambda n:str(self.root),service=lambda n:self.service))
+        worker.last_discover=float('inf')
+        with patch('ember.pool_maintenance.MaintenanceConfig.load',return_value=MaintenanceConfig('https://example.invalid','test','test')), patch('ember.pool_maintenance.MaintenanceClient.judge',return_value=self.pool_judge()):
+            worker.process_one()
         self.assertEqual(self.store.groups(),[])
         self.assertEqual(len(self.store.groups(False)),1)
 

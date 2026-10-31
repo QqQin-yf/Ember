@@ -132,11 +132,31 @@ class PoolMaintenanceWorker:
                 sources=json.loads(job['sources_json'])
                 store=KnowledgeStore(root,job['instance'])
                 originals=store.read_sources(sources)
-                payload={'phase':'pool','candidates':[{'slice_id':r['slice_id'],'messages':r['messages']} for r in originals]}
-                decisions=MaintenanceClient(config).judge('pool',payload)
-                groups=validate_groups(decisions,sources,originals)
-                store.read_sources(sources)
-                queue.finish(job,'done',groups)
+                from .memory_maintenance import validate_result, apply_result
+                trace={}
+                trace_path=Path(root)/'slice_recall.sqlite3'
+                if trace_path.exists():
+                    with sqlite3.connect(trace_path) as db:
+                        record=db.execute('SELECT metadata_json FROM queries WHERE trace_id=?',(job['trace_id'],)).fetchone()
+                    trace=json.loads(record[0]) if record else {}
+                def historical(g):
+                    return not any(s['session_id']==trace.get('session_id') and trace.get('anchor_message_id') and
+                        int(s['assistant_message_id'])>=int(trace['anchor_message_id']) for s in g['sources'])
+                service=self.registry.service(name)
+                for offset in range(0,len(originals),config.batch_size):
+                    batch=originals[offset:offset+config.batch_size]
+                    payload={'phase':'memory_pool','subject':'recall:'+job['trace_id'],
+                        'materials':[{'id':r['slice_id'],'kind':'slice','document':{'messages':r['messages']},
+                           'sources':[next(s for s in sources if s['slice_id']==r['slice_id'])]} for r in batch],
+                        'known_groups':[g for g in store.groups(False) if historical(g)]}
+                    try:
+                        decisions=validate_result(MaintenanceClient(config).judge('memory_pool',payload),payload)
+                    except ValueError as exc:
+                        raise MaintenanceModelError(str(exc)) from None
+                    with service._generation_lock:
+                        store.read_sources(sources)
+                        apply_result(service,payload,decisions)
+                queue.finish(job,'done',[])
             except MaintenanceModelError as exc:
                 queue.finish(job,'waiting_config' if str(exc)=='maintenance_config_missing' else 'retry',error=str(exc))
             except ValueError:

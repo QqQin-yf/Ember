@@ -59,7 +59,7 @@ class SleepKnowledge:
 
     def knowledge(self):
         return {'briefing':self.store.briefing(),'items':[
-            {k:r[k] for k in ('memory_id','kind','content','cues','pinned','sources')}
+            {k:r[k] for k in ('memory_id','kind','content','cues','pinned','sources','confidence')}
             for r in self.store.all()]}
 
     def start(self,body):
@@ -71,6 +71,19 @@ class SleepKnowledge:
             if old:
                 return self.response(old) if old['session_id']==body['session_id'] else fail('sleep_context_conflict')
             groups=self.store.groups()
+            # Knowledge review needs recent experiences, not only the two old
+            # statements being compared. Freeze completed source IDs at Sleep start.
+            from .turn_slices import TurnSliceStore
+            slices=TurnSliceStore(str(self.store.root))
+            recent=[]
+            if slices.path.exists():
+                with slices._db() as db:
+                    ids=[r[0] for r in db.execute('SELECT slice_id FROM turn_slices WHERE instance=? ORDER BY CAST(assistant_message_id AS INTEGER) DESC LIMIT 12',(self.store.instance,))]
+                recent=self.store.sources(ids) if ids else []
+            for g in groups:
+                if g['kind']=='knowledge_review':
+                    g['material']['recent_sources']=recent
+                    g['sources']=list({s['slice_id']:s for s in g['sources']+recent}.values())
             with self.db() as db:
                 db.execute('BEGIN IMMEDIATE')
                 if db.execute("SELECT 1 FROM sleep_knowledge_runs WHERE instance=? AND state IN ('active','unknown')",(self.store.instance,)).fetchone():
@@ -120,6 +133,7 @@ class SleepKnowledge:
             context={'kind':'sleep','sleep_id':row['sleep_id'],
                 'session':self.service.get_or_create_session(row['session_id']),'turn':0,
                 'group_ids':{g['group_id'] for g in groups},
+                'snapshot_groups':{g['group_id']:g for g in groups},
                 'source_ids':{s['slice_id'] for g in groups for s in g['sources']},
                 'frozen_sources':{s['slice_id']:s for g in groups for s in g['sources']},
                 'read_source_ids':self.service._sleep_knowledge_read_ids.get(row['sleep_id'],set())}

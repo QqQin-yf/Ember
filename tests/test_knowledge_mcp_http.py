@@ -56,7 +56,7 @@ class KnowledgeMCPTests(unittest.TestCase):
                 read,error=call('read_memory_slices',{'slice_ids':[source['slice_id']]},'read')
                 self.assertFalse(error)
                 self.assertIn('午饭',read['slices'][0]['messages'][0]['content'])
-                args={'kind':'pattern','content':'倾向于固定午饭选择以减少决策负担','recall_cues':['黄焖鸡'],
+                args={'confidence':8,'kind':'pattern','content':'倾向于固定午饭选择以减少决策负担','recall_cues':['黄焖鸡'],
                       'source_slice_ids':[source['slice_id']]}
                 invalid,error=call('write_memory_knowledge',args,'ordinary-write')
                 self.assertTrue(error)

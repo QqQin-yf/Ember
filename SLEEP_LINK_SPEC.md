@@ -1,3 +1,5 @@
+> 历史规格：旧 Sleep 挂关系/结构维护入口已退出。当前职责、迁移及多余步骤说明见 [MEMORY_LIFECYCLE_SPEC.md](MEMORY_LIFECYCLE_SPEC.md)。
+
 # Sleep 挂关系（link）判联规格 —— 给窗口判联 AI
 
 > 消费方：app 侧编排（点 sleep → 出材料 → 贴窗口 → 判联 → 交卷）。

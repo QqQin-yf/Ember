@@ -56,6 +56,7 @@ from ember.slice_pipeline import SlicePipeline, IngestionJobs, complete_turn, co
 from ember.slice_recall import SliceRecall
 from ember.slice_maintenance import SliceMaintenanceWorker
 from ember.pool_maintenance import PoolMaintenanceWorker, KnowledgeEmbeddingWorker
+from ember.memory_maintenance import MemoryMaintenanceWorker
 from ember.knowledge_tools import tool_specs as knowledge_tool_specs
 from ember.writer import (PIN_TOOL_NAME, UNPIN_TOOL_NAME,
                           READ_SOURCE_TOOL_NAME, REVISE_TOOL_NAME,
@@ -223,6 +224,9 @@ async def _lifespan(app):
         app.state.knowledge_embedding = knowledge_worker
         pooling = asyncio.create_task(pool_worker.run())
         embedding_knowledge = asyncio.create_task(knowledge_worker.run())
+        memory_worker = MemoryMaintenanceWorker(REGISTRY)
+        app.state.memory_maintenance = memory_worker
+        memory_maintenance = asyncio.create_task(memory_worker.run())
         try:
             yield
         finally:
@@ -230,7 +234,8 @@ async def _lifespan(app):
             maintenance.stop_event.set()
             pool_worker.stop_event.set()
             knowledge_worker.stop_event.set()
-            await asyncio.gather(ingestion, maintaining, pooling, embedding_knowledge)
+            memory_worker.stop_event.set()
+            await asyncio.gather(ingestion, maintaining, pooling, embedding_knowledge, memory_maintenance)
             cleanup.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await cleanup
@@ -348,7 +353,8 @@ async def _hook_turn_start(request: Request) -> JSONResponse:
         user_message_id=_opt_int(body, "user_message_id"),
         context_start_id=_opt_int(body, "context_start_id"),
         recall_id=body.get("recall_id"), occurred_at=body.get("occurred_at"),
-        activity_revision=body.get("activity_revision"), window_revision=body.get("window_revision")))
+        activity_revision=body.get("activity_revision"), window_revision=body.get("window_revision"),
+        context_message_ids=body.get("context_message_ids")))
 
 
 async def _hook_turn_end(request: Request) -> JSONResponse:

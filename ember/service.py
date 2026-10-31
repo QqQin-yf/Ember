@@ -613,17 +613,19 @@ class EmberService:
     def run_recall_pipeline(self, session: Session, turn: int,
                             user_text: str,
                             context_start_id: int | None = None,
-                            deferred_entries: list[dict] | None = None
+                            deferred_entries: list[dict] | None = None,
+                            context_message_ids: list[int] | None = None
                             ) -> dict[str, Any]:
         """Retain Event/Entity recall; raw-slice retrieval is an independent branch."""
         from .hybrid_recall import automatic_hybrid_recall
-        return automatic_hybrid_recall(self, session, turn, user_text, context_start_id, deferred_entries)
+        return automatic_hybrid_recall(self, session, turn, user_text, context_start_id, deferred_entries, context_message_ids)
 
     def legacy_event_recall_pipeline(self, session: Session, turn: int,
                             user_text: str,
                             context_start_id: int | None = None,
                             deferred_entries: list[dict] | None = None,
-                            allow_observe: bool = True
+                            allow_observe: bool = True,
+                            context_message_ids: list[int] | None = None
                             ) -> dict[str, Any]:
         """保留的 Event 召回：Cue/Entity 双路 → Sleep 过滤 → 窗口过滤
         → Relation 展开 → 召回记账 → 前缀块构建。
@@ -666,10 +668,13 @@ class EmberService:
         # 两路命中合并前统一过滤；被排除的不进前缀块，计数照常上报。
         # 钉住的同样排除（2026-10-17 裁决：简报必带常驻在场，召回再浮
         # 就是复读）；search 主动检索不受影响。
+        from .memory_lifecycle import filter_recall, Lifecycle
+        lifecycle_excluded = filter_recall(self, {}, session, context_start_id, context_message_ids)
+        entity_hits = [h for h in entity_hits if Lifecycle(self.store.root,self.source_instance).eligible(h.entity_id)]
         excluded = [eid for eid in set(recalled_ctx.recalled_events)
                     | set(entity_event_ids)
                     if not self.sleep_state.recall_allowed(eid)
-                    or self.pin_store.is_pinned(eid)]
+                    or self.pin_store.is_pinned(eid) or eid in lifecycle_excluded]
         if excluded:
             recalled_ctx.recalled_events = [
                 eid for eid in recalled_ctx.recalled_events
@@ -680,7 +685,7 @@ class EmberService:
         # 窗口过滤（2026-10-14 去原文化）：来源全部在当前窗口内的候选
         # 滤掉——原文就在现场，召回只负责窗口外/被截断前的事。
         start_turn = None
-        if context_start_id is not None:
+        if context_message_ids is None and context_start_id is not None:
             start_turn = self.turn_ledger.turn_at_or_after(
                 session.session_id, context_start_id)
         window_excluded: list[str] = []
@@ -716,7 +721,7 @@ class EmberService:
                 dst = self._resolve_event_id(rel.dst_event)
                 if dst is None:
                     continue  # 修正者 id 无法解析（数据问题），跳过不炸
-                if dst in excluded or dst in recalled_ctx.recalled_events:
+                if dst in excluded or dst in lifecycle_excluded or dst in recalled_ctx.recalled_events:
                     continue
                 resolved_brought.append((dst, excluded_id))
                 recalled_ctx.recalled_events.append(dst)
@@ -1765,7 +1770,8 @@ class EmberService:
                         recall_id: str | None = None,
                         occurred_at: str | None = None,
                         activity_revision: int | None = None,
-                        window_revision: int | None = None) -> dict[str, Any]:
+                        window_revision: int | None = None,
+                        context_message_ids: list[int] | None = None) -> dict[str, Any]:
         """Persist the identity before work; commit response and effects together."""
         if recall_id is None:
             with self._generation_lock:
@@ -1790,10 +1796,14 @@ class EmberService:
                     raise ValueError("Timezone required")
             except (AttributeError, TypeError, ValueError):
                 return self._generation_error("invalid_arguments", "occurred_at must be an RFC3339 timestamp with timezone")
+        if context_message_ids is not None and (not isinstance(context_message_ids,list) or len(context_message_ids)>50000 or any(type(i) is not int or i<1 for i in context_message_ids)):
+            return self._generation_error("invalid_arguments", "Invalid context message IDs")
         request_context = {"session_id": sid, "heart_turn_id": heart_turn_id,
             "user_message_id": seq, "context_start_id": context_start_id,
             "occurred_at": occurred_at, "activity_revision": activity_revision,
             "window_revision": window_revision}
+        if context_message_ids is not None:
+            request_context["context_message_ids"] = sorted(set(context_message_ids))
         semantic_context = {k: v for k, v in request_context.items()
                             if k not in ("occurred_at", "activity_revision", "window_revision") or v is not None}
         request_hash = fingerprint(dict(semantic_context, message=message))
@@ -1825,7 +1835,7 @@ class EmberService:
             try:
                 entries: list[dict] = []
                 rec = self.run_recall_pipeline(session, turn, message,
-                    context_start_id=context_start_id, deferred_entries=entries)
+                    context_start_id=context_start_id, deferred_entries=entries,context_message_ids=context_message_ids)
                 stats = {k: rec[k] for k in (
                     "recalled_count", "entity_recalled", "entity_names", "filtered_by_sleep",
                     "filtered_by_window", "resolved_brought", "direction_focused",
@@ -2846,14 +2856,22 @@ class EmberService:
         # ---- 主模态：core 向量余弦；兜底：LIKE（embed 不可达）----
         scored: list[tuple[str, float]] = []
         try:
-            q_vec = embed_text(query)
+            from .memory_maintenance import content_query
+            content_rows = self.core_vectors.all() or self.entity_vectors.all()
+            first_vl = next((r for r in content_rows if r.get('model','').startswith('vl:')),None)
+            q_vec = content_query(first_vl,query,None,{}) if first_vl else embed_text(query)
         except Exception:  # noqa: BLE001 — 基础设施失败降级关键词
             q_vec = None
         in_range: dict[str, bool] = {}
         events = {ev.event_id: ev for ev in self.store.all_events()}
         if q_vec is not None:
+            from .memory_maintenance import content_query
+            content_queries = {first_vl['model']:q_vec} if first_vl else {}
             for row in self.core_vectors.all():
-                sim = cosine(q_vec, row["vector"])
+                candidate_query = content_query(row,query,None if first_vl else q_vec,content_queries)
+                if candidate_query is None or len(candidate_query)!=len(row['vector']):
+                    continue
+                sim = cosine(candidate_query, row["vector"])
                 if sim >= SEARCH_HIT_FLOOR:
                     scored.append((row["event_id"], sim))
             scored = [(eid, s) for eid, s in scored if eid in events]
@@ -2932,8 +2950,13 @@ class EmberService:
             q_vec2 = q_vec
             if q_vec2 is None:
                 q_vec2 = embed_text(query)
+            from .memory_maintenance import content_query
+            entity_queries = {first_vl['model']:q_vec} if first_vl and q_vec is not None else {}
             for row in self.entity_vectors.all():
-                sim = cosine(q_vec2, row["vector"])
+                candidate_query = content_query(row,query,None if first_vl else q_vec2,entity_queries)
+                if candidate_query is None or len(candidate_query)!=len(row['vector']):
+                    continue
+                sim = cosine(candidate_query, row["vector"])
                 if sim < SEARCH_HIT_FLOOR:
                     continue
                 try:
