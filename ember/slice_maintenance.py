@@ -168,8 +168,7 @@ def validate_decisions(phase, payload, decisions):
 class SliceMaintenanceWorker:
     def __init__(self, registry, config_path=None):
         self.registry = registry
-        self.config_path = Path(config_path or os.environ.get('EMBER_SLICE_MAINTENANCE_CONFIG') or
-                                Path(__file__).resolve().parents[1] / 'config/slice-maintenance.local.json')
+        self.config_path = config_path or os.environ.get('EMBER_SLICE_MAINTENANCE_CONFIG')
         self.stop_event = asyncio.Event()
         self._last_discover = 0
 

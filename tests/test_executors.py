@@ -19,20 +19,38 @@ BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE)
 
 from ember import executors  # noqa: E402
+from ember.model_config import registry, ModelConfigError
 
 
 GLM_ALL = {"split": "glm", "mount": "glm"}
+
+
+def write_registry(td, engines=None, split_model=None):
+    data=registry()
+    for task,engine in (engines or {}).items():
+        if task in executors.PURPOSES:
+            data['purposes'][executors.PURPOSES[task]]['provider']={
+                'glm':'zhipu_offline','qwen3':'ollama'}.get(engine,'unknown-provider')
+    if split_model:
+        data['purposes']['direction_split']['model']=split_model
+    path=os.path.join(td,'models.json')
+    with open(path,'w',encoding='utf-8') as stream:json.dump(data,stream)
+    return path
 
 
 class TestLoadExecutors(unittest.TestCase):
 
     def _read(self, content: str | None) -> dict:
         with tempfile.TemporaryDirectory() as td:
-            if content is not None:
-                with open(os.path.join(td, "executors.json"), "w",
-                          encoding="utf-8") as f:
-                    f.write(content)
-            return executors.load_executors(td)
+            try:
+                engines=json.loads(content) if content is not None else {}
+            except ValueError:
+                path=os.path.join(td,'models.json')
+                with open(path,'w',encoding='utf-8') as stream:stream.write(content)
+            else:
+                path=write_registry(td,engines)
+            with mock.patch.dict(os.environ,{'EMBER_MODELS_CONFIG':path}):
+                return executors.load_executors(td)
 
     def test_normal_read(self):
         out = self._read(json.dumps({"split": "qwen3",
@@ -44,16 +62,12 @@ class TestLoadExecutors(unittest.TestCase):
         out = self._read(None)
         self.assertEqual(out, GLM_ALL)
 
-    def test_bad_json_falls_back_to_glm(self):
-        out = self._read("{not json")
-        self.assertEqual(out, GLM_ALL)
+    def test_bad_json_fails_explicitly(self):
+        with self.assertRaises(ModelConfigError):self._read("{not json")
 
-    def test_illegal_value_falls_back_per_task(self):
-        out = self._read(json.dumps({"split": "GLM",
-                                     "mount": "qwen3"}))
-        self.assertEqual(out["split"], "glm")   # 大小写敏感 → glm
-        self.assertEqual(out["mount"], "qwen3") # 合法值保留
-        self.assertNotIn("observe", out) # 缺项 → glm
+    def test_illegal_provider_fails_explicitly(self):
+        with self.assertRaises(ModelConfigError):
+            self._read(json.dumps({'split':'GLM','mount':'qwen3'}))
 
     def test_extra_tasks_ignored(self):
         out = self._read(json.dumps({"split": "glm", "judge": "qwen3", "chat": "qwen3"}))
@@ -73,10 +87,9 @@ class TestLoadEngine(unittest.TestCase):
 
     def test_config_used_when_no_override(self):
         with tempfile.TemporaryDirectory() as td:
-            with open(os.path.join(td, "executors.json"), "w",
-                      encoding="utf-8") as f:
-                json.dump({"split": "qwen3"}, f)
-            self.assertEqual(executors.load_engine(td, "split"), "qwen3")
+            path=write_registry(td,{'split':'qwen3'})
+            with mock.patch.dict(os.environ,{'EMBER_MODELS_CONFIG':path}):
+                self.assertEqual(executors.load_engine(td, "split"), "qwen3")
 
     def test_missing_config_defaults_glm(self):
         with tempfile.TemporaryDirectory() as td:
@@ -108,11 +121,11 @@ class TestCallLLM(unittest.TestCase):
 
     def test_glm_task_specs_applied(self):
         captured: dict = {}
-        env = {"ZHIPU_API_KEY": "k", "EMBER_SPLIT_MODEL": "glm-x"}
-        with mock.patch.dict(os.environ, env, clear=False), \
-             mock.patch("urllib.request.urlopen",
-                        self._fake_urlopen(captured)):
-            out = executors.call_llm("sys", "user", "glm", task="split")
+        with tempfile.TemporaryDirectory() as td:
+            path=write_registry(td,split_model='glm-x')
+            env={'ZHIPU_API_KEY':'k','EMBER_MODELS_CONFIG':path}
+            with mock.patch.dict(os.environ,env),mock.patch('urllib.request.urlopen',self._fake_urlopen(captured)):
+                out=executors.call_llm('sys','user','glm',task='split')
         self.assertEqual(out, "ok")
         self.assertEqual(captured["body"]["model"], "glm-x")       # split 的模型变量
         self.assertEqual(captured["body"]["temperature"], 0.3)     # split 的温度

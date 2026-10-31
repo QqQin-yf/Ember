@@ -2,7 +2,7 @@
 """Ember v3 — Direction 挂载作业（B2，架构文档 §5.2，2026-10-09 实现）。
 
 被谁调用：手工离线运行（python scripts/mount_directions.py --entity <id>）；
-engine 缺省从 executors.json 的 mount 项读（--engine 可单次覆盖）。
+engine 缺省从 config/models.json 的 direction_mount 用途读（--engine 可单次覆盖）。
 独立离线作业，不属于 Sleep 流水线（§4.4/§5.2）。
 
 触发（§5.2）：Entity 下 Event 条数达阈值（DIRECTION_THRESHOLD=8，baseline）。
@@ -160,7 +160,7 @@ def validate(verdict: dict, valid_direction_ids: set[str]) -> list[str]:
 def main():
     ap = argparse.ArgumentParser(description="Direction 挂载作业（§5.2，B2）")
     ap.add_argument("--engine", choices=["glm", "qwen3"], default=None,
-                    help="单次覆盖；缺省读 executors.json 的 mount 项")
+                    help="单次覆盖；缺省读 config/models.json 的 direction_mount 用途")
     ap.add_argument("--entity", required=True,
                     help="目标 Entity 的 entity_id（如 ent_ember）")
     ap.add_argument("--event", default="",

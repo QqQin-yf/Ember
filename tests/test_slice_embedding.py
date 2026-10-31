@@ -8,6 +8,7 @@ import urllib.error
 import contextlib
 import runpy
 import sys
+import os
 from unittest.mock import patch
 
 from ember.slice_embedding import (SliceEmbeddingConfig, SliceEmbeddingClient,
@@ -34,8 +35,9 @@ class SliceEmbeddingTests(unittest.TestCase):
 
     def test_config_and_key_are_private(self):
         path = self.root / "config.json"
-        path.write_text(json.dumps({"api_key": "synthetic-secret"}), encoding="utf-8-sig")
-        config = SliceEmbeddingConfig.load(path)
+        path.write_text(json.dumps({"purpose": "embed"}), encoding="utf-8-sig")
+        with patch.dict(os.environ,{'SILICONFLOW_API_KEY':'synthetic-secret'}):
+            config = SliceEmbeddingConfig.load(path)
         self.assertEqual(config.model, DEFAULT_MODEL)
         self.assertNotIn("synthetic-secret", repr(config))
         self.assertNotIn("synthetic-secret", config.space)
@@ -156,12 +158,12 @@ class SliceEmbeddingTests(unittest.TestCase):
 
     def test_cli_reads_config_writes_vectors_and_reports_without_private_text(self):
         path = self.root / "config.json"
-        path.write_text(json.dumps({"api_key": "synthetic-secret"}), encoding="utf-8")
+        path.write_text(json.dumps({"purpose": "embed"}), encoding="utf-8")
         source = self.store.save("s", self.pair)
         script = Path(__file__).resolve().parents[1] / "scripts/embed_turn_slices.py"
         output = io.StringIO()
         argv = [str(script), "--config", str(path), "--data-dir", str(self.root)]
-        with patch.object(sys, "argv", argv), contextlib.redirect_stdout(output), \
+        with patch.dict(os.environ,{'SILICONFLOW_API_KEY':'synthetic-secret'}), patch.object(sys, "argv", argv), contextlib.redirect_stdout(output), \
                 patch("urllib.request.urlopen", return_value=self.response()):
             self.assertEqual(runpy.run_path(str(script))["main"](), 0)
         report = json.loads(output.getvalue())
@@ -172,7 +174,7 @@ class SliceEmbeddingTests(unittest.TestCase):
 
     def test_cli_missing_key_does_not_make_request(self):
         path = self.root / "config.json"
-        path.write_text('{"api_key":""}', encoding="utf-8")
+        path.write_text('{"purpose":"embed","enabled":false}', encoding="utf-8")
         script = Path(__file__).resolve().parents[1] / "scripts/embed_turn_slices.py"
         output = io.StringIO()
         with patch.object(sys, "argv", [str(script), "--config", str(path)]), \

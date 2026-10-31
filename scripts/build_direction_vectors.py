@@ -10,7 +10,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
-from ember.direction import embed_text  # noqa: E402
+from ember.direction import embedding_model, embed_text  # noqa: E402
 
 BASE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 DATA = os.environ.get("EMBER_DATA_DIR", os.path.join(BASE, "data"))
@@ -32,8 +32,7 @@ def main() -> None:
             e = json.loads(line)
             for d in e.get("directions", []):
                 vec = embed_text(d["description"])
-                model = os.environ.get("EMBER_EMBED_MODEL",
-                                       "Qwen/Qwen3-Embedding-8B")
+                model = embedding_model()
                 rows.append({
                     "direction_id": d["direction_id"],
                     "entity_id": e["entity_id"],

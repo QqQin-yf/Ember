@@ -97,8 +97,7 @@ class IngestionJobs:
 class SlicePipeline:
     def __init__(self, registry, config_path=None):
         self.registry = registry
-        self.config_path = Path(config_path or os.environ.get('EMBER_SLICE_EMBED_CONFIG') or
-                                Path(__file__).resolve().parents[1] / 'config/slice-embedding.local.json')
+        self.config_path = config_path or os.environ.get('EMBER_SLICE_EMBED_CONFIG')
         self.stop_event = asyncio.Event()
         self._cursor = 0
 

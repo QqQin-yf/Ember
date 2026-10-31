@@ -1,11 +1,11 @@
 """Independent SiliconFlow VL reranker; never receives legacy recall units."""
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 import json
 import math
 import os
 from pathlib import Path
-import urllib.error
-import urllib.request
+from .model_config import settings, profile, ModelConfigError
+from .model_gateway import call_model, ModelCallError
 
 from .slice_embedding import slice_text
 
@@ -17,24 +17,33 @@ class RerankerError(Exception):
 @dataclass(frozen=True)
 class RerankerConfig:
     enabled: bool=False
-    model: str='Qwen/Qwen3-VL-Reranker-8B'
+    model: str=field(default_factory=lambda:settings('rerank',require_key=False).model)
     min_score: float=0.7
     image_min_score: float=0.5
     mixed_min_score: float=0.55
     source_budget_chars: int=4000
     timeout_seconds: float=30
 
+    _settings: object=field(default=None,repr=False,compare=False)
+
     @classmethod
     def load(cls):
-        path=os.environ.get('EMBER_SLICE_RERANK_CONFIG') or Path(__file__).resolve().parents[1]/'config/slice-reranker.local.json'
+        path=os.environ.get('EMBER_SLICE_RERANK_CONFIG')
         try:
-            value=json.loads(Path(path).read_text(encoding='utf-8-sig'))
-            config=cls(**value)
-            if (type(config.enabled) is not bool or not isinstance(config.model,str) or not config.model.strip() or
-                    any(type(score) not in (int,float) or not math.isfinite(score) or not 0<=score<=1
-                        for score in (config.min_score,config.image_min_score,config.mixed_min_score)) or
-                    type(config.source_budget_chars) is not int or config.source_budget_chars<200 or
-                    type(config.timeout_seconds) not in (int,float) or not math.isfinite(config.timeout_seconds) or config.timeout_seconds<=0):
+            if path:
+                meta=json.loads(Path(path).read_text(encoding='utf-8-sig'))
+                if not isinstance(meta,dict) or set(meta)-{'purpose','config','enabled'} or meta.get('purpose')!='rerank':
+                    raise ValueError
+                if meta.get('enabled') is False:return cls()
+                value=profile(path,'rerank')
+            else:
+                value=settings('rerank',require_key=False)
+                if value.options.get('enabled',False):value=settings('rerank')
+            config=cls(model=value.model,timeout_seconds=value.timeout_seconds,_settings=value,**value.options)
+            if (type(config.enabled) is not bool or
+                any(type(score) not in (int,float) or not math.isfinite(score) or not 0<=score<=1
+                    for score in (config.min_score,config.image_min_score,config.mixed_min_score)) or
+                type(config.source_budget_chars) is not int or config.source_budget_chars<200):
                 raise ValueError
             return config
         except FileNotFoundError:
@@ -51,13 +60,11 @@ class SliceReranker:
         self.config,self.embed_config=config,embed_config
 
     def rank(self, query, sources):
-        body=json.dumps({'model':self.config.model,'query':query,
-            'documents':[slice_text(s) for s in sources],'top_n':len(sources),'return_documents':False},ensure_ascii=False).encode('utf-8')
-        request=urllib.request.Request(self.embed_config.base_url+'/rerank',data=body,
-            headers={'Content-Type':'application/json','Authorization':'Bearer '+self.embed_config.api_key})
+        cfg=self.config._settings or replace(settings('rerank',require_key=False),model=self.config.model,
+            base_url=self.embed_config.base_url,api_key=self.embed_config.api_key,timeout_seconds=self.config.timeout_seconds)
         try:
-            with urllib.request.urlopen(request,timeout=self.config.timeout_seconds) as response:
-                data=json.loads(response.read())
+            data=call_model('rerank',{'query':query,'documents':[slice_text(s) for s in sources],
+                'top_n':len(sources),'return_documents':False},config=cfg)
             results=data['results']
             if (not isinstance(results,list) or len(results)!=len(sources) or
                     any(not isinstance(r,dict) or type(r.get('index')) is not int or
@@ -66,10 +73,8 @@ class SliceReranker:
                     {r['index'] for r in results}!=set(range(len(sources)))):
                 raise ValueError
             return sorted(results,key=lambda r:(-r['relevance_score'],r['index']))
-        except urllib.error.HTTPError as exc:
-            code=exc.code;exc.close()
-            raise RerankerError(f'reranker_http_{code}') from None
-        except (urllib.error.URLError,OSError,TimeoutError):
-            raise RerankerError('reranker_unreachable') from None
+        except ModelCallError as exc:
+            raise RerankerError('reranker_http_'+str(exc.status) if exc.status else
+                'reranker_'+('response_invalid' if exc.kind=='response_invalid' else 'unreachable')) from None
         except (ValueError,TypeError,KeyError,IndexError):
             raise RerankerError('reranker_response_invalid') from None

@@ -1,0 +1,95 @@
+{
+  "policy": {
+    "timeout_seconds": 30,
+    "retries": 0,
+    "backoff_seconds": 0.5,
+    "proxy": "environment"
+  },
+  "providers": {
+    "siliconflow": {
+      "base_url": "https://api.siliconflow.cn/v1",
+      "key_env": "SILICONFLOW_API_KEY"
+    },
+    "siliconflow_recall": {
+      "inherits": "siliconflow",
+      "key_env": "EMBER_EMBED_API_KEY"
+    },
+    "zhipu": {
+      "base_url": "https://open.bigmodel.cn/api/paas/v4",
+      "key_env": "ZHIPU_MAINTENANCE_API_KEY"
+    },
+    "zhipu_offline": {
+      "inherits": "zhipu",
+      "key_env": "ZHIPU_API_KEY"
+    },
+    "ollama": {
+      "transport": "docker",
+      "container": "ombre-ollama",
+      "command": [
+        "ollama",
+        "run"
+      ],
+      "arguments": [
+        "/no_think"
+      ]
+    }
+  },
+  "purposes": {
+    "embed": {
+      "operation": "embedding",
+      "provider": "siliconflow",
+      "model": "Qwen/Qwen3-VL-Embedding-8B",
+      "timeout_seconds": 30
+    },
+    "rerank": {
+      "operation": "rerank",
+      "provider": "siliconflow",
+      "model": "Qwen/Qwen3-VL-Reranker-8B",
+      "timeout_seconds": 30,
+      "options": {
+        "enabled": true,
+        "min_score": 0.7,
+        "image_min_score": 0.5,
+        "mixed_min_score": 0.55,
+        "source_budget_chars": 4000
+      }
+    },
+    "maintenance": {
+      "operation": "chat",
+      "provider": "zhipu",
+      "model": "glm-4.7",
+      "timeout_seconds": 90,
+      "temperature": 0,
+      "options": {
+        "batch_size": 16
+      }
+    },
+    "recall_embed": {
+      "operation": "embedding",
+      "provider": "siliconflow_recall",
+      "model": "Qwen/Qwen3-Embedding-8B",
+      "timeout_seconds": 6,
+      "retries": 2
+    },
+    "direction_split": {
+      "operation": "chat",
+      "provider": "zhipu_offline",
+      "model": "glm-4.7",
+      "timeout_seconds": 180,
+      "temperature": 0.3
+    },
+    "direction_mount": {
+      "operation": "chat",
+      "provider": "zhipu_offline",
+      "model": "glm-4.7",
+      "timeout_seconds": 120,
+      "temperature": 0.2
+    },
+    "direction_local": {
+      "operation": "chat",
+      "provider": "ollama",
+      "model": "qwen3:1.7b",
+      "timeout_seconds": 600
+    }
+  }
+}

@@ -1,9 +1,4 @@
 {
-  "enabled": false,
-  "model": "Qwen/Qwen3-VL-Reranker-8B",
-  "min_score": 0.7,
-  "image_min_score": 0.5,
-  "mixed_min_score": 0.55,
-  "source_budget_chars": 4000,
-  "timeout_seconds": 30
+  "purpose": "rerank",
+  "enabled": false
 }

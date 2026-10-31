@@ -47,3 +47,13 @@ python -B -X utf8 scripts/check_memory_health.py --data-dir 'D:\your-heart\data\
 ## 验收记录
 
 2026-10-24：新增专项 15/15 通过，覆盖合法追加修订、坏 JSON/截断末行、无效来源编号、pending/null、冻结来源冲突、断链、SQLite WAL、未恢复回滚日志、原库字节与 mtime 不变、变化时 inconclusive、明细截断及 CLI。VPS 隔离目录完整 267/267 unittest 与 136 项独立验收通过；最终版本只读复查现有库的结果与首次一致。
+
+## 模型配置与密钥
+
+- 唯一模型配置：config/models.json。providers集中base_url/key_env；purposes按embed、rerank、maintenance、recall_embed、direction_split、direction_mount、direction_local命名。
+- key只保存在.env；不同既有凭据通过provider继承显式区分，避免覆盖不同账户。
+- 超时、重试、退避、代理、temperature/max_tokens在统一配置设置，入口统一执行。max_tokens未设置时沿用提供方默认；proxy支持environment、direct和env:变量名。
+- 参数改动后重启对应服务；不需要在各调用点修改。EMBER_MODELS_CONFIG可选择另一份完整配置，不能把明文key写入其中。
+- App Sleep的正式产出模型仍由App控制台管理。Ember maintenance仅是后台第三方判断，不替代App模型。
+- 本次将原本地JSON凭据迁入.env。部署时需同步所需环境变量；源码推送不包含凭据，也不启动维护任务。
+- `python -X utf8 scripts/check_model_config.py`用于不联网的配置检查。

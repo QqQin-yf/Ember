@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 from pathlib import Path
 import tempfile
 import time
@@ -21,7 +22,9 @@ class SlicePipelineTests(unittest.TestCase):
         self.service = self.registry.service('default')
         self.root = Path(self.service.store.root)
         self.config = Path(self.tmp.name) / 'embedding.json'
-        self.config.write_text(json.dumps({'api_key': 'synthetic-secret'}), encoding='utf-8')
+        self.config.write_text(json.dumps({'purpose':'embed'}), encoding='utf-8')
+        credentials=patch.dict(os.environ,{'SILICONFLOW_API_KEY':'synthetic-secret'})
+        credentials.start();self.addCleanup(credentials.stop)
         self.pipeline = SlicePipeline(self.registry, self.config)
         self.rows = [{'message_id': 1, 'role': 'user', 'content': 'provider original user'},
                      {'message_id': 2, 'role': 'assistant', 'content': 'provider original reply'}]
@@ -94,7 +97,7 @@ class SlicePipelineTests(unittest.TestCase):
         self.assertEqual(self.jobs().status(receipt['job_id'])['state'], 'ready')
 
     def test_missing_embedding_key_still_saves_raw_slice(self):
-        self.config.write_text('{"api_key":""}', encoding='utf-8')
+        self.config.write_text('{"purpose":"embed","enabled":false}', encoding='utf-8')
         receipt = self.enqueue()
         with patch.object(source_client, 'fetch_source_path', return_value=self.rows):
             self.pipeline.process_one()

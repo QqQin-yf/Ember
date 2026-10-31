@@ -1,11 +1,10 @@
 """Separate third-party maintenance client; never use the dialogue model."""
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import json
 import math
 from pathlib import Path
-import urllib.error
-import urllib.parse
-import urllib.request
+from .model_config import settings, profile, ModelConfigError
+from .model_gateway import call_model, ModelCallError
 
 
 class MaintenanceModelError(Exception):
@@ -21,24 +20,20 @@ class MaintenanceConfig:
     batch_size: int = 16
 
     @classmethod
-    def load(cls, path):
+    def load(cls, path=None):
         try:
-            data = json.loads(Path(path).read_text(encoding='utf-8-sig'))
-            base, model, key = (data.get(k, '') for k in ('base_url', 'model', 'api_key'))
-            if not all(isinstance(x, str) and x.strip() for x in (base, model, key)):
-                raise MaintenanceModelError('maintenance_config_missing')
-            url = urllib.parse.urlsplit(base)
-            if url.scheme != 'https' or not url.hostname or url.username or url.password or url.query or url.fragment:
-                raise ValueError
-            timeout, batch = data.get('timeout_seconds', 30), data.get('batch_size', 16)
-            if (type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0 or
-                    type(batch) is not int or batch < 1 or '\n' in key or '\r' in key):
-                raise ValueError
-            return cls(base.rstrip('/'), model.strip(), key.strip(), timeout, batch)
-        except FileNotFoundError:
-            raise MaintenanceModelError('maintenance_config_missing') from None
-        except (OSError, ValueError, TypeError, AttributeError):
-            raise MaintenanceModelError('maintenance_config_invalid') from None
+            value=profile(path,'maintenance')
+            batch=value.options.get('batch_size',16)
+            if type(batch) is not int or batch<1:
+                raise ModelConfigError('maintenance_batch_invalid')
+            return cls(value.base_url,value.model,value.api_key,value.timeout_seconds,batch)
+        except ModelConfigError as exc:
+            missing=str(exc).startswith('model_key_missing:') or str(exc) in ('model_profile_missing','model_profile_disabled')
+            raise MaintenanceModelError('maintenance_config_missing' if missing else 'maintenance_config_invalid') from None
+
+    def request_config(self):
+        return replace(settings('maintenance',require_key=False),api_key=self.api_key,base_url=self.base_url,
+                       model=self.model,timeout_seconds=self.timeout_seconds)
 
 
 class MaintenanceClient:
@@ -92,14 +87,10 @@ attachments:{event_id,entity_id,reason,evidence}：确定Event属于已有Entity
 近期经历可能打破或更新已有认知/规律时，用新方向proposals提交材料，正式判断、改写和评分交App。'''
         else:
             raise MaintenanceModelError('maintenance_phase_invalid')
-        body = json.dumps({'model': self.config.model, 'messages': [
-            {'role': 'system', 'content': system}, {'role': 'user', 'content': json.dumps(payload, ensure_ascii=False)}],
-            'temperature': 0}).encode('utf-8')
-        request = urllib.request.Request(self.config.base_url + '/chat/completions', data=body,
-            headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + self.config.api_key})
         try:
-            with urllib.request.urlopen(request, timeout=self.config.timeout_seconds) as response:
-                data = json.loads(response.read())
+            data=call_model('maintenance',{'messages':[
+                {'role':'system','content':system},{'role':'user','content':json.dumps(payload,ensure_ascii=False)}]},
+                config=self.config.request_config())
             text = data['choices'][0]['message']['content'].strip()
             if text.startswith('```') and text.endswith('```'):
                 text = text.split('\n', 1)[1].rsplit('```', 1)[0]
@@ -107,10 +98,8 @@ attachments:{event_id,entity_id,reason,evidence}：确定Event属于已有Entity
             if not isinstance(result, dict) or not isinstance(result.get('decisions'), list):
                 raise ValueError
             return result['decisions']
-        except urllib.error.HTTPError as exc:
-            code = exc.code;exc.close()
-            raise MaintenanceModelError(f'maintenance_http_{code}') from None
-        except (urllib.error.URLError, OSError, TimeoutError):
-            raise MaintenanceModelError('maintenance_unreachable') from None
+        except ModelCallError as exc:
+            raise MaintenanceModelError('maintenance_http_'+str(exc.status) if exc.status else
+                'maintenance_'+('response_invalid' if exc.kind=='response_invalid' else 'unreachable')) from None
         except (ValueError, KeyError, TypeError, IndexError, AttributeError):
             raise MaintenanceModelError('maintenance_response_invalid') from None

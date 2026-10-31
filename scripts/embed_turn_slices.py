@@ -16,7 +16,7 @@ from ember.turn_slices import TurnSliceStore
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, default=HERE / "config/slice-embedding.local.json")
+    parser.add_argument("--config", type=Path, default=None, help="Optional non-secret model purpose profile")
     parser.add_argument("--data-dir", type=Path, default=HERE / "data")
     parser.add_argument("--limit", type=int, default=100)
     args = parser.parse_args()

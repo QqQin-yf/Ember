@@ -187,7 +187,7 @@ class KnowledgeEmbeddingWorker:
     def process_one(self):
         from .slice_embedding import SliceEmbeddingConfig
         import os
-        path=os.environ.get('EMBER_SLICE_EMBED_CONFIG') or Path(__file__).resolve().parents[1]/'config/slice-embedding.local.json'
+        path=os.environ.get('EMBER_SLICE_EMBED_CONFIG')
         for name in self.registry.names:
             root=self.registry.dir_of(name)
             if KnowledgeStore(root,name).all():

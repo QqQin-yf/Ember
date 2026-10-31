@@ -1,7 +1,4 @@
 {
-  "base_url": "https://open.bigmodel.cn/api/paas/v4",
-  "model": "glm-4.7",
-  "api_key": "",
-  "timeout_seconds": 90,
-  "batch_size": 16
+  "purpose": "maintenance",
+  "enabled": false
 }

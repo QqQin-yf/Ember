@@ -31,3 +31,6 @@ _mount_llm_check.json
 .local-notes/
 discussions/
 handoffs/
+
+# Editable local tool contract review, never publish.
+/工具规范审阅.md

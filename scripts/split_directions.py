@@ -2,7 +2,7 @@
 """Ember v3 — Direction 划分作业（§5.1，2026-10-09 实现）。
 
 被谁调用：手工离线运行（python scripts/split_directions.py --entity <id>）；
-engine 缺省从 executors.json 的 split 项读（--engine 可单次覆盖）；
+engine 缺省从 config/models.json 的 direction_split 用途读（--engine 可单次覆盖）；
 pipeline.py 在 B1 之后按阈值自动触发。
 
 职责（§5.1 定稿）：
@@ -128,7 +128,7 @@ def validate(verdict: dict) -> list[str]:
 def main():
     ap = argparse.ArgumentParser(description="Direction 划分（§5.1）")
     ap.add_argument("--engine", choices=["glm", "qwen3"], default=None,
-                    help="单次覆盖；缺省读 executors.json 的 split 项")
+                    help="单次覆盖；缺省读 config/models.json 的 direction_split 用途")
     ap.add_argument("--entity", required=True, help="目标 Entity 的 entity_id")
     ap.add_argument("--dry-run", action="store_true",
                     help="只打印将参与划分的事件清单")

@@ -47,7 +47,7 @@ class SliceRerankerTests(unittest.TestCase):
 
     def test_vl_reranker_payload_and_untrusted_indices(self):
         response=io.BytesIO(json.dumps({'results':[{'index':0,'relevance_score':.8}]}).encode())
-        with patch('ember.slice_reranker.urllib.request.urlopen',return_value=response) as http:
+        with patch('ember.model_gateway.urllib.request.urlopen',return_value=response) as http:
             ranks=SliceReranker(self.rerank,self.config).rank('query',[self.sources[0]])
         request=http.call_args.args[0]
         body=json.loads(request.data)
@@ -56,7 +56,7 @@ class SliceRerankerTests(unittest.TestCase):
         self.assertEqual(body['documents'],['user:\nold text 1\n\nassistant:\nreply 1'])
         self.assertEqual(ranks[0]['relevance_score'],.8)
         response=io.BytesIO(json.dumps({'results':[{'index':99,'relevance_score':.8}]}).encode())
-        with patch('ember.slice_reranker.urllib.request.urlopen',return_value=response),self.assertRaises(RerankerError):
+        with patch('ember.model_gateway.urllib.request.urlopen',return_value=response),self.assertRaises(RerankerError):
             SliceReranker(self.rerank,self.config).rank('query',[self.sources[0]])
 
     def present(self,refs):

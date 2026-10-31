@@ -252,7 +252,7 @@ def content_query(row,query,legacy,cache):
     model=row.get('model','')
     if not model.startswith('vl:'):
         return legacy
-    config=SliceEmbeddingConfig.load(os.environ.get('EMBER_SLICE_EMBED_CONFIG') or Path(__file__).resolve().parents[1]/'config/slice-embedding.local.json')
+    config=SliceEmbeddingConfig.load(os.environ.get('EMBER_SLICE_EMBED_CONFIG'))
     if model!='vl:'+config.space:
         return None
     if model not in cache:
@@ -263,11 +263,11 @@ def content_query(row,query,legacy,cache):
 class MemoryMaintenanceWorker:
     def __init__(self,registry):
         self.registry=registry;self.stop_event=asyncio.Event();self.last_backfill=0
-        self.config=Path(__file__).resolve().parents[1]/'config/slice-maintenance.local.json'
+        self.config=None
 
     def process_one(self):
         config=MaintenanceConfig.load(os.environ.get('EMBER_SLICE_MAINTENANCE_CONFIG') or self.config)
-        embedding=SliceEmbeddingConfig.load(os.environ.get('EMBER_SLICE_EMBED_CONFIG') or Path(__file__).resolve().parents[1]/'config/slice-embedding.local.json')
+        embedding=SliceEmbeddingConfig.load(os.environ.get('EMBER_SLICE_EMBED_CONFIG'))
         for name in self.registry.names:
             service=self.registry.service(name)
             life=Lifecycle(service.store.root,name)

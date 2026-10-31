@@ -26,8 +26,7 @@ class SliceRecall:
         self.root = Path(root)
         self.instance = instance
         self.path = self.root / 'slice_recall.sqlite3'
-        self.config_path = Path(config_path or os.environ.get('EMBER_SLICE_EMBED_CONFIG') or
-                                Path(__file__).resolve().parents[1] / 'config/slice-embedding.local.json')
+        self.config_path = config_path or os.environ.get('EMBER_SLICE_EMBED_CONFIG')
 
     @contextmanager
     def db(self):

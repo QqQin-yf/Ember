@@ -1,6 +1,4 @@
 {
-  "api_key": "",
-  "base_url": "https://api.siliconflow.cn/v1",
-  "model": "Qwen/Qwen3-VL-Embedding-8B",
-  "timeout_seconds": 30
+  "purpose": "embed",
+  "enabled": false
 }

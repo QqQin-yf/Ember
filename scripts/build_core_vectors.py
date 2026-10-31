@@ -24,7 +24,7 @@ import sys
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE)
 
-from ember.direction import embed_text  # noqa: E402
+from ember.direction import embedding_model, embed_text  # noqa: E402
 from ember.env import load_env  # noqa: E402
 from ember.store import EmberStore  # noqa: E402
 from ember.entity import EntityStore  # noqa: E402
@@ -45,7 +45,7 @@ def _write(path: str, rows: list[dict], key: str) -> None:
 def main() -> None:
     store = EmberStore(DATA)
     estore = EntityStore(DATA)
-    model = os.environ.get("EMBER_EMBED_MODEL", "Qwen/Qwen3-Embedding-8B")
+    model = embedding_model()
 
     # ---- 事件 core（含 superseded）----
     events = store.all_events()

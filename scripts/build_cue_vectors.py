@@ -22,7 +22,7 @@ import sys
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE)
 
-from ember.direction import embed_text  # noqa: E402
+from ember.direction import embedding_model, embed_text  # noqa: E402
 from ember.env import load_env  # noqa: E402
 
 DATA = os.environ.get("EMBER_DATA_DIR", os.path.join(BASE, "data"))
@@ -63,8 +63,7 @@ def main() -> None:
     for i, (rid, cue) in enumerate(reps, 1):
         vec = embed_text(cue)
         # model 取自环境变量回显（与 build_direction_vectors 同口径）
-        model_used = os.environ.get(
-            "EMBER_EMBED_MODEL", "Qwen/Qwen3-Embedding-8B")
+        model_used = embedding_model()
         rows.append({"route_id": rid, "cue": cue,
                      "vector": vec, "model": model_used})
         print(f"  [{i}/{len(reps)}] {cue[:24]}  dim={len(vec)}",

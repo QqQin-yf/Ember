@@ -1,19 +1,18 @@
 """One full turn slice -> one SiliconFlow vector, with recoverable local state."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import json
 import math
 from pathlib import Path
-import urllib.error
-import urllib.parse
-import urllib.request
+from .model_config import settings, profile, ModelConfigError
+from .model_gateway import call_model, ModelCallError
 
 from .turn_slices import TurnSliceStore
 
 
-DEFAULT_MODEL = "Qwen/Qwen3-VL-Embedding-8B"
-DEFAULT_BASE_URL = "https://api.siliconflow.cn/v1"
+DEFAULT_MODEL = settings("embed",require_key=False).model
+DEFAULT_BASE_URL = settings("embed",require_key=False).base_url
 INPUT_FORMAT = "turn-roles-v1"
 
 
@@ -29,35 +28,19 @@ class SliceEmbeddingConfig:
     timeout_seconds: float = 30
 
     @classmethod
-    def load(cls, path: str | Path) -> SliceEmbeddingConfig:
+    def load(cls, path=None):
         try:
-            data = json.loads(Path(path).read_text(encoding="utf-8-sig"))
-        except FileNotFoundError:
-            raise SliceEmbeddingError("config_not_found") from None
-        except (OSError, ValueError):
-            raise SliceEmbeddingError("config_invalid") from None
-        if not isinstance(data, dict):
-            raise SliceEmbeddingError("config_invalid")
-        key = data.get("api_key", "")
-        if not isinstance(key, str) or not key.strip():
-            raise SliceEmbeddingError("api_key_missing")
-        base = data.get("base_url", DEFAULT_BASE_URL)
-        model = data.get("model", DEFAULT_MODEL)
-        timeout = data.get("timeout_seconds", 30)
-        if not isinstance(base, str) or not isinstance(model, str) or not model.strip():
-            raise SliceEmbeddingError("config_invalid")
-        try:
-            parsed = urllib.parse.urlsplit(base)
-        except ValueError:
-            raise SliceEmbeddingError("config_invalid") from None
-        if (parsed.scheme != "https" or not parsed.hostname or parsed.username or
-                parsed.password or parsed.query or parsed.fragment):
-            raise SliceEmbeddingError("config_invalid")
-        if (type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0):
-            raise SliceEmbeddingError("config_invalid")
-        if "\n" in key or "\r" in key:
-            raise SliceEmbeddingError("config_invalid")
-        return cls(key.strip(), base.rstrip("/"), model.strip(), timeout)
+            value=profile(path,'embed')
+            return cls(value.api_key,value.base_url,value.model,value.timeout_seconds)
+        except ModelConfigError as exc:
+            text=str(exc)
+            code=('config_not_found' if text=='model_profile_missing' else
+                  'api_key_missing' if text.startswith('model_key_missing:') or text=='model_profile_disabled' else 'config_invalid')
+            raise SliceEmbeddingError(code) from None
+
+    def request_config(self):
+        return replace(settings('embed',require_key=False),api_key=self.api_key,base_url=self.base_url,
+                       model=self.model,timeout_seconds=self.timeout_seconds)
 
     @property
     def space(self) -> str:
@@ -76,22 +59,11 @@ class SliceEmbeddingClient:
         self.config = config
 
     def embed(self, text: str) -> list[float]:
-        body = json.dumps({"model": self.config.model, "input": text,
-                           "encoding_format": "float"}, ensure_ascii=False).encode("utf-8")
-        request = urllib.request.Request(self.config.base_url + "/embeddings", data=body,
-            headers={"Content-Type": "application/json",
-                     "Authorization": "Bearer " + self.config.api_key})
         try:
-            with urllib.request.urlopen(request, timeout=self.config.timeout_seconds) as response:
-                data = json.loads(response.read())
-        except urllib.error.HTTPError as exc:
-            code = exc.code
-            exc.close()
-            raise SliceEmbeddingError(f"embedding_http_{code}") from None
-        except (urllib.error.URLError, OSError, TimeoutError):
-            raise SliceEmbeddingError("embedding_unreachable") from None
-        except (ValueError, UnicodeError):
-            raise SliceEmbeddingError("embedding_response_invalid") from None
+            data=call_model('embed',{'input':text,'encoding_format':'float'},config=self.config.request_config())
+        except ModelCallError as exc:
+            raise SliceEmbeddingError('embedding_http_'+str(exc.status) if exc.status else
+                'embedding_'+('response_invalid' if exc.kind=='response_invalid' else 'unreachable')) from None
         try:
             items = data["data"]
             if len(items) != 1 or items[0].get("index") != 0:
