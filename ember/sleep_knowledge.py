@@ -43,6 +43,8 @@ class SleepKnowledge:
         snapshot=json.loads(row['groups_json'])
         current={r['group_id']:r for r in self.store.groups(False)}
         pending=[g for g in snapshot if g['group_id'] in current and current[g['group_id']]['state']=='pending']
+        if row['state']=='completed':
+            pending=[] # A later substantive update belongs to the next Sleep.
         source_ids={s['slice_id'] for g in pending for s in g['sources']}
         with self.db() as db:
             receipts=db.execute("SELECT c.result_json FROM sleep_knowledge_calls c JOIN sleep_knowledge_runs r USING(sleep_id) WHERE r.instance=? AND c.state='completed' AND c.volatile=0 AND c.name IN ('write_memory_knowledge','write_event_from_slices')",(self.store.instance,)).fetchall()
@@ -70,6 +72,9 @@ class SleepKnowledge:
             old=self.run(body['sleep_id'])
             if old:
                 return self.response(old) if old['session_id']==body['session_id'] else fail('sleep_context_conflict')
+            from .memory_lifecycle import Lifecycle
+            from .review_aggregation import consolidate
+            consolidate(Lifecycle(self.store.root,self.store.instance))
             groups=self.store.groups()
             # Knowledge review needs recent experiences, not only the two old
             # statements being compared. Freeze completed source IDs at Sleep start.
@@ -183,4 +188,7 @@ class SleepKnowledge:
                 db.execute('UPDATE sleep_knowledge_runs SET state=? WHERE sleep_id=?',
                     ('unknown' if unknown else body['state'],body['sleep_id']))
             self.service._sleep_knowledge_read_ids.pop(body['sleep_id'],None)
+            from .memory_lifecycle import Lifecycle
+            from .review_aggregation import consolidate
+            consolidate(Lifecycle(self.store.root,self.store.instance))
             return self.response(self.run(body['sleep_id']))

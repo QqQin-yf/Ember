@@ -161,8 +161,19 @@ def validate_result(result, payload):
         evidence(item,item.get('ids',[]))
         if len(set(item.get('ids',[])))<2 or item.get('kind') not in ('theme','pattern','habit','preference','entity_extract'):
             raise ValueError('review_proposal_invalid')
+        if not item.get('group_id') and (not isinstance(item.get('direction'),str) or not item['direction'].strip()):
+            raise ValueError('proposal_direction_required')
         if item['kind']=='entity_extract' and any(known[i]['kind']!='event' for i in item['ids']):
             raise ValueError('entity_requires_events')
+        if item.get('group_id') and item['group_id'] not in {g['group_id'] for g in payload['known_groups']}:
+            raise ValueError('proposal_group_unknown')
+        if item.get('change_evidence'):
+            if not isinstance(item['change_evidence'],list) or any(not isinstance(e,dict) for e in item['change_evidence']):
+                raise ValueError('change_evidence_invalid')
+            evidence({'reason':item['reason'],'evidence':item['change_evidence']},
+                list({e.get('id') for e in item['change_evidence']}))
+            if len({e['id'] for e in item['change_evidence']})<2:
+                raise ValueError('reopening_requires_comparison_evidence')
     for item in output.get('entity_merges',[]):
         evidence(item,[item.get('source'),item.get('target')])
         if any(known[i]['kind']!='entity' for i in (item['source'],item['target'])) or item['source']==item['target']:
@@ -208,21 +219,18 @@ def apply_result(service,payload,output):
         patch_members(service,None,life.canonical(item['entity_id']),item['event_id'])
     for item in output.get('extensions',[]):
         group=next(g for g in payload['known_groups'] if g['group_id']==item['group_id'])
-        sources={s['slice_id']:s for s in group['sources']}
-        sources.update({s['slice_id']:s for mid in item['ids'] for s in known[mid]['sources']})
-        with store.db() as db:
-            db.execute('UPDATE memory_groups SET sources_json=? WHERE group_id=? AND instance=?',
-                (json.dumps(list(sources.values())),item['group_id'],service.source_instance))
         material=life.material(item['group_id'])
+        material.pop('change_evidence',None) # An extension is not a new change verdict.
         items={r['id']:r for r in material.get('items',[])}
         items.update({mid:known[mid] for mid in item['ids']})
         material['items']=list(items.values())
-        with life.db() as db:
-            db.execute('INSERT OR REPLACE INTO review_materials VALUES (?,?)',
-                (item['group_id'],json.dumps(material)))
+        material['group_id']=group['group_id']
+        life.propose(group['kind'],group['sources']+[s for mid in item['ids'] for s in known[mid]['sources']],group['reason'],material)
     for item in output.get('proposals',[]):
         life.propose(item['kind'],[s for mid in item['ids'] for s in known[mid]['sources']],item['reason'],
             {'items':[known[mid] for mid in item['ids']],'evidence':item['evidence'],
+             'direction':item.get('direction',''),'group_id':item.get('group_id'),
+             'change_evidence':item.get('change_evidence',[]),
              'memory_ids':[mid for mid in item['ids'] if known[mid]['kind']=='knowledge'],
              'instruction':'只总结有依据的部分；可不提炼。过时或与当前信息矛盾的部分标低置信度并停止召回。Event材料只提取确定的Entity，可不提取。'})
 

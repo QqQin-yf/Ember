@@ -48,7 +48,7 @@ class PoolKnowledgeTests(unittest.TestCase):
 
     def pool_judge(self):
         old=self.judge()[0]
-        return [{'proposals':[{'kind':'pattern','ids':old['slice_ids'],'reason':old['reason'],
+        return [{'proposals':[{'kind':'pattern','direction':'Lunch choice habit','ids':old['slice_ids'],'reason':old['reason'],
             'evidence':[{'id':e['slice_id'],'quote':e['quote']} for e in old['evidence']]}]}]
 
     def test_pool_is_enqueued_before_any_reply_or_event_and_excludes_current(self):

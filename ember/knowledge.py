@@ -153,6 +153,8 @@ class KnowledgeStore:
             rows=[dict(r) for r in db.execute('SELECT * FROM memory_groups WHERE instance=? ORDER BY rowid',(self.instance,))]
         result=[]
         for row in rows:
+            if row['state']=='merged':
+                continue
             if pending and row['state']!='pending':
                 continue
             row['sources']=json.loads(row.pop('sources_json'))
@@ -172,6 +174,14 @@ class KnowledgeStore:
             changed=db.execute('UPDATE memory_groups SET state=? WHERE instance=? AND group_id=?',(state,self.instance,gid)).rowcount
         if not changed:
             raise ValueError('group_not_found')
+        from .memory_lifecycle import Lifecycle
+        life=Lifecycle(self.root,self.instance)
+        material=life.material(gid)
+        if material.get('memory_ids'):
+            material['reviewed_versions']={r['memory_id']:r['content_hash'] for r in self.all()
+                if r['memory_id'] in material['memory_ids']}
+            with life.db() as db:
+                db.execute('INSERT OR REPLACE INTO review_materials VALUES (?,?)',(gid,json.dumps(material)))
         return {'status':'ok','group_id':gid,'state':state}
 
     def match(self, text, vector=None, space=None):

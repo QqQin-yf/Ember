@@ -67,16 +67,8 @@ class Lifecycle:
         return json.loads(row[0]) if row else {}
 
     def propose(self, kind, sources, reason, material):
-        from .knowledge import KnowledgeStore
-        sources=sorted({s['slice_id']:s for s in sources}.values(),key=lambda s:s['slice_id'])
-        versions=sorted((r['id'],r['document'].get('content_hash')) for r in material.get('items',[])) if kind=='knowledge_review' else []
-        gid='GR-'+fingerprint([self.instance,kind,sources,material.get('direction',kind),versions])[:24]
-        with self.db() as db:
-            db.execute('INSERT OR IGNORE INTO review_materials VALUES (?,?)',(gid,json.dumps(material,ensure_ascii=False)))
-        with KnowledgeStore(self.root,self.instance).db() as db:
-            db.execute('INSERT OR IGNORE INTO memory_groups(group_id,instance,kind,sources_json,reason) VALUES (?,?,?,?,?)',
-                       (gid,self.instance,kind,json.dumps(sources),reason))
-        return gid
+        from .review_aggregation import submit
+        return submit(self,kind,sources,reason,material)
 
     def hold(self, session, turn, result, allowed=lambda r:True):
         """Receipt makes retries idempotent. Expiry never bans future retrieval."""

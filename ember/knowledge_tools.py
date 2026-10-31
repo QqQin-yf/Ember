@@ -32,7 +32,7 @@ def tool_specs(sleep=False):
              {'group_id':{'type':'string'},'state':{'enum':['reviewed','dismissed']}},['group_id','state']),
         spec('list_memory_knowledge','读取现有认知/规律与 pin 预算，供 Sleep 时自主取舍。',{})]
     specs += [
-        spec('review_memory_knowledge','审阅相似认知/规律：维持、改写补写或合并。每条最终产出必须评分；只有近期经历明确打破或过时才能<=5，须提供逐字来源证据。',
+        spec('review_memory_knowledge','审阅相似认知/规律：维持、改写补写或合并。每条必须列为keep/rewrite/merge目标或merge_ids成员，不能遗漏；每条最终保留项必须评分。只有近期经历明确打破或过时才能<=5，须提供逐字来源证据。',
             {'group_id':{'type':'string'},'items':{'type':'array','minItems':1,'items':{'type':'object',
               'additionalProperties':False,'required':['memory_id','action','confidence'],'properties':{
                 'memory_id':{'type':'string'},'action':{'enum':['keep','rewrite','merge']},

@@ -90,6 +90,8 @@ def review_knowledge(service,args,context):
     merged=[mid for r in updates for mid in r.get('merge_ids',[])]
     if len(set(merged))!=len(merged) or targets.intersection(merged):
         raise ValueError('conflicting_merge_targets')
+    if item['kind']=='knowledge_review' and targets.union(merged)!=allowed:
+        raise ValueError('all_review_items_must_be_accounted_for')
     results=[]
     life=Lifecycle(store.root,store.instance)
     with store.db() as db:

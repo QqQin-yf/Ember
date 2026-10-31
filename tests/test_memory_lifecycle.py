@@ -130,7 +130,8 @@ class MemoryLifecycleTests(unittest.TestCase):
         gid=stage.start(identity)['groups'][0]['group_id']
         def call(name,args,cid):
             return stage.call(dict(identity,call_id=cid,name=name,arguments=args))
-        args={'group_id':gid,'items':[{'memory_id':a,'action':'keep','confidence':4}]}
+        args={'group_id':gid,'items':[{'memory_id':a,'action':'keep','confidence':4},
+                                    {'memory_id':b,'action':'keep','confidence':8}]}
         self.assertEqual(call('review_memory_knowledge',args,'unread')['status'],'failed')
         self.assertEqual(call('read_memory_slices',{'group_id':gid},'read')['status'],'ok')
         self.assertEqual(call('review_memory_knowledge',args,'no-basis')['status'],'failed')
