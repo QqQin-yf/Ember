@@ -432,53 +432,28 @@ async def _sleep_knowledge(request: Request) -> JSONResponse:
     result = await asyncio.to_thread(getattr(SleepKnowledge(svc),method),body)
     return JSONResponse(result)
 
-async def _sleep_link_batches(request: Request) -> JSONResponse:
-    """接口 1：材料出队——app 贴进窗口末尾给正主 AI 判联。"""
+async def _retired_sleep_step(request: Request) -> JSONResponse:
     svc = _service_or_404(request)
     if isinstance(svc, JSONResponse):
         return svc
-    return JSONResponse(svc.sidecar_link_batches())
+    return JSONResponse({'status':'retired','code':'legacy_sleep_step_retired',
+                         'hint':'Use Sleep knowledge materials; judgment and slice/knowledge indexing run independently.'}, status_code=410)
+
+
+async def _sleep_link_batches(request: Request) -> JSONResponse:
+    return await _retired_sleep_step(request)
 
 
 async def _sleep_link_submit(request: Request) -> JSONResponse:
-    """接口 2：交卷——app 转交窗口 AI 的 link_relations 结果。"""
-    svc = _service_or_404(request)
-    if isinstance(svc, JSONResponse):
-        return svc
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    return JSONResponse(svc.sidecar_link_submit(body))
+    return await _retired_sleep_step(request)
 
 
 async def _sleep_link_progress(request: Request) -> JSONResponse:
-    """接口 3：进度——断线恢复时 app 问跑到哪了。"""
-    svc = _service_or_404(request)
-    if isinstance(svc, JSONResponse):
-        return svc
-    return JSONResponse(svc.sidecar_link_progress())
+    return await _retired_sleep_step(request)
 
 
 async def _sleep_structure_run(request: Request) -> JSONResponse:
-    """结构维护：向量补建 + cue 收紧；观察条目已退役。
-
-    编排顺序：挂在 link/submit 清完之后——挂完关系不等于没活儿，
-    还有这一步（契约见 API.md「编排顺序」）。
-
-    挪线程（2026-10-19）：向量补建可能耗时，在事件循环上直跑会把
-    **整个进程**卡住——其他实例
-    的钩子全部排队。asyncio.to_thread 挪到工作线程，事件循环继续
-    接待；app 的本请求仍然等到跑完才返回（sleep 是顺序编排，下一
-    步 sediment 依赖本步完成——等待是契约，排队不是）。
-
-    错误处理契约不变：失败如实回执给 app（HTTP 500 + 原因），不
-    静默重试——sleep 是 app 编排的流程，重试决定权在 app。
-    """
-    svc = _service_or_404(request)
-    if isinstance(svc, JSONResponse):
-        return svc
-    return JSONResponse(await asyncio.to_thread(svc.run_structure_maintenance))
+    return await _retired_sleep_step(request)
 
 
 async def _sleep_sediment_evidence(request: Request) -> JSONResponse:

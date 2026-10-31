@@ -39,6 +39,10 @@ class KnowledgeMCPTests(unittest.TestCase):
                 names={t['name'] for t in listed['result']['tools']}
                 self.assertNotIn('write_memory_knowledge',names)
                 self.assertIn('read_memory_slices',names)
+                for path,method in [('link/batches','GET'),('link/progress','GET'),('link/submit','POST'),('structure/run','POST')]:
+                    retired=client.request(method,'/ember/sleep/'+path,json={} if method=='POST' else None)
+                    self.assertEqual(retired.status_code,410)
+                    self.assertEqual(retired.json()['code'],'legacy_sleep_step_retired')
                 start=client.post('/ember/hooks/turn_start',json={'session_id':'new','message':'current input',
                     'user_message_id':101,'recall_id':'knowledge-http'})
                 self.assertEqual(start.status_code,200)

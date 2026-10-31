@@ -875,8 +875,8 @@ class EmberService:
         }
         if dropped:
             result["dropped_quotes"] = dropped
-        # 待配对队列（2026-10-14 设计稿 v2）：写入成功即记，挂关系出队消费
-        self.link_pending_add(event.event_id)
+        # New writes use the independent slice-maintenance queue below.
+        # The historical link_pending queue is retained for legacy inspection only.
         try:
             from .event_slices import sync_from_files
             sync_from_files(self.store.root, self.source_instance)

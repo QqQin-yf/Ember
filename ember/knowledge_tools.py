@@ -90,7 +90,6 @@ def write_event(service, args, context):
         service.store.write_route(RecallRoute(route_id=f'rt_{event.event_id}_{index:02d}',event_id=event.event_id,
             matcher='lexical',cue_type=route['cue_type'],cue=route['cue'],status='active',
             evidence_refs=['slice:'+s['slice_id'] for s in sources],provenance_refs=['app-slice-writer']))
-    service.link_pending_add(event.event_id)
     enqueue_event_maintenance(service,event)
     return {'status':'created','event_id':event.event_id,'summary':event.summary,
             'source_slice_ids':args['source_slice_ids'],'dropped_quotes':dropped}
