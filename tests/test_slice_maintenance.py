@@ -149,9 +149,11 @@ class SliceMaintenanceTests(unittest.TestCase):
                 recall_id='maintenance-write', tool_call_id='create')
         judge.assert_not_called()
         self.assertEqual(result['status'], 'created')
-        jobs = MaintenanceQueue(root).statuses()
-        self.assertEqual(len(jobs), 1)
-        self.assertEqual(jobs[0]['event_id'], result['event_id'])
+        from ember.source_sync import db
+        with db(root) as conn:
+            job=conn.execute('SELECT requested,completed FROM sync').fetchone()
+        self.assertEqual(tuple(job),(1,0))
+        self.assertEqual(MaintenanceQueue(root).statuses(),[])
         self.assertFalse(hasattr(service, "link_pending_add"))
 
     def test_discovery_recovers_missing_enqueue_idempotently(self):
@@ -248,7 +250,7 @@ class SliceMaintenanceTests(unittest.TestCase):
         with patch('ember.slice_recall.SliceEmbeddingConfig.load', return_value=config), \
                 patch('ember.slice_recall.SliceEmbeddingClient.embed', return_value=[1., 0.]):
             recall = SliceRecall(self.root)
-            result = recall.match('current')
+            result = recall.match('current',purpose='search')
         candidate = recall.trace(result['trace_id'])['candidate_pool'][0]
         self.assertEqual(candidate['maintenance_relations'][0]['scope'], 'turn')
         self.assertEqual(candidate['source_memberships'][0]['event_id'], 'O')

@@ -21,6 +21,39 @@ class SourceUnavailable(Exception):
 def configured() -> bool:
     return bool(SOURCE_URL)
 
+
+def fetch_source_increment(cursor=None, *, instance='default', limit=100):
+    """Provider-owned opaque cursor over completed, path-validated source turns."""
+    if not SOURCE_URL:
+        raise SourceUnavailable('Source not configured','source_unconfigured')
+    query=urllib.parse.urlencode({'cursor':json.dumps(cursor),'limit':limit})
+    request=urllib.request.Request(SOURCE_URL.rstrip('/')+'/api/source/increment?'+query)
+    request.add_header('X-Heart-Instance',instance)
+    if SOURCE_TOKEN:
+        request.add_header('Authorization','Bearer '+SOURCE_TOKEN)
+    try:
+        with _open_source(request) as response:
+            data=json.loads(response.read().decode('utf-8'))
+    except urllib.error.HTTPError as exc:
+        status=exc.code
+        exc.close()
+        raise SourceUnavailable('Source increment rejected','source_increment_rejected',status) from None
+    except (OSError,ValueError) as exc:
+        raise SourceUnavailable('Source increment unavailable','source_unreachable') from None
+    if (not isinstance(data,dict) or 'cursor' not in data or not isinstance(data.get('turns'),list)
+            or type(data.get('has_more')) is not bool or (data['has_more'] and data['cursor']==cursor)):
+        raise SourceUnavailable('Invalid source increment','source_increment_invalid')
+    for row in data['turns']:
+        if (not isinstance(row,dict) or not isinstance(row.get('session_id'),str) or not row['session_id']
+                or not isinstance(row.get('messages'),list) or len(row['messages']) not in (1,2)
+                or type(row.get('user_is_system',False)) is not bool):
+            raise SourceUnavailable('Invalid source turn','source_increment_invalid')
+        for message in row['messages']:
+            if (not isinstance(message,dict) or message_seq(message.get('message_id')) is None
+                    or message.get('role') not in ('user','assistant','system') or not isinstance(message.get('content'),str)):
+                raise SourceUnavailable('Invalid source message','source_increment_invalid')
+    return data
+
 def _open_source(request):
     # Loopback and Tailscale providers must not be sent to a public HTTP proxy.
     import ipaddress

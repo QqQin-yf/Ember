@@ -18,14 +18,24 @@ from ember.turn_slices import TurnSliceStore
 class Provider(BaseHTTPRequestHandler):
     def do_GET(self):
         self.server.reads.append(self.path)
-        self.respond({'messages': [{'message_id': '1', 'role': 'user', 'content': 'original user'},
-                                   {'message_id': '2', 'role': 'assistant', 'content': 'original assistant'}]})
+        messages=[{'message_id':'1','role':'user','content':'original user'},
+                  {'message_id':'2','role':'assistant','content':'original assistant'}]
+        from urllib.parse import parse_qs,urlsplit
+        if urlsplit(self.path).path=='/api/source/increment':
+            cursor=json.loads(parse_qs(urlsplit(self.path).query)['cursor'][0])
+            self.respond({'cursor':'latest','has_more':False,'turns':[] if cursor else [
+                {'session_id':'s','messages':messages,'user_is_system':self.server.system}]})
+        else:
+            self.respond({'messages':messages})
 
     def do_POST(self):
-        self.server.inputs.append(json.loads(self.rfile.read(int(self.headers['Content-Length']))))
+        payload=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+        self.server.inputs.append(payload)
         self.server.embedding_started.set()
         self.server.allow_embedding.wait(5)
-        self.respond({'model': self.server.model, 'data': [{'index': 0, 'embedding': [1., .5, -.25]}]})
+        from ember.lifecycle_config import lifecycle_config
+        vector=[0.,1.,0.] if payload['input'] in lifecycle_config()['slice']['filler_texts'] else [1.,.5,-.25]
+        self.respond({'model':self.server.model,'data':[{'index':0,'embedding':vector}]})
 
     def respond(self, payload):
         raw = json.dumps(payload).encode()
@@ -46,6 +56,7 @@ class PipelineHTTPTests(unittest.TestCase):
         self.registry = InstanceRegistry(self.tmp.name, ['default', 'other'])
         self.provider = ThreadingHTTPServer(('127.0.0.1', 0), Provider)
         self.provider.reads, self.provider.inputs = [], []
+        self.provider.system=False
         self.provider.embedding_started = threading.Event()
         self.provider.allow_embedding = threading.Event()
         self.thread = threading.Thread(target=self.provider.serve_forever)
@@ -73,6 +84,7 @@ class PipelineHTTPTests(unittest.TestCase):
         self.thread.join()
 
     def finish_turn(self, client, system=False):
+        self.provider.system=system
         start = client.post('/ember/hooks/turn_start', json={
             'session_id': 's', 'message': 'hook payload is not source',
             'user_message_id': 1, 'recall_id': 'r'})
@@ -83,46 +95,43 @@ class PipelineHTTPTests(unittest.TestCase):
             'recall_id': 'r', 'user_is_system': system})
         self.assertEqual(result.status_code, 200, result.text)
         self.assertTrue(result.json()['ok'])
-        return result.json()['slice_ingestion']['job_id']
+        self.assertNotIn('slice_ingestion',result.json())
+        return result.json()
 
-    def await_ready(self, client, job_id):
-        deadline = time.monotonic() + 6
-        while time.monotonic() < deadline:
-            result = client.get('/ember/slices/jobs/' + job_id)
-            self.assertEqual(result.status_code, 200)
-            if result.json()['state'] == 'ready':
-                return result.json()
-            time.sleep(.02)
-        self.fail('Background pipeline did not reach ready')
+    def refresh(self,client):
+        return client.post('/ember/briefing/refresh',json={'session_id':'s','keep_from_message_id':3})
 
-    def test_turn_end_returns_while_embedding_waits_then_all_data_is_stored(self):
-        with TestClient(self.sidecar.app) as client:
-            job_id = self.finish_turn(client)
-            try:
-                self.assertTrue(self.provider.embedding_started.wait(4))
-                self.assertFalse(self.provider.allow_embedding.is_set())
-                status = client.get('/ember/slices/jobs/' + job_id).json()
-                self.assertEqual(status['state'], 'working')
-                store = TurnSliceStore(self.registry.dir_of('default'))
-                self.assertEqual(store.get(status['slice_id'])['messages'][0]['content'], 'original user')
-            finally:
-                self.provider.allow_embedding.set()
-            status = self.await_ready(client, job_id)
-            self.assertEqual(store.embedding(status['slice_id'], self.config.space)['dimensions'], 3)
-            self.assertEqual(self.provider.inputs[0]['input'],
-                             'user:\noriginal user\n\nassistant:\noriginal assistant')
-            self.assertEqual(len(self.provider.reads), 1)
-            self.assertEqual(client.get('/ember/slices/jobs/' + job_id,
-                headers={'X-Heart-Instance': 'other'}).status_code, 404)
+    def slices(self):
+        store=TurnSliceStore(self.registry.dir_of('default'))
+        if not store.path.exists():
+            return store,[]
+        with store._db() as db:
+            ids=[r[0] for r in db.execute('SELECT slice_id FROM turn_slices')]
+        return store,[store.get(i) for i in ids]
 
-    def test_http_system_flag_excludes_user_from_slice_and_embedding(self):
+    def test_turn_end_does_not_slice_and_briefing_pulls_original_increment(self):
         self.provider.allow_embedding.set()
         with TestClient(self.sidecar.app) as client:
-            job_id = self.finish_turn(client, system=True)
-            status = self.await_ready(client, job_id)
-        store = TurnSliceStore(self.registry.dir_of('default'))
-        self.assertEqual([m['role'] for m in store.get(status['slice_id'])['messages']], ['assistant'])
-        self.assertEqual(self.provider.inputs[0]['input'], 'assistant:\noriginal assistant')
+            self.finish_turn(client)
+            self.assertFalse(self.provider.reads)
+            self.refresh(client)
+            store,rows=self.slices()
+            self.assertEqual(len(rows),1)
+            self.assertEqual(rows[0]['messages'][0]['content'],'original user')
+            self.assertEqual(store.embedding(rows[0]['slice_id'],self.config.space)['dimensions'],3)
+            self.refresh(client)
+            self.assertEqual(len(self.slices()[1]),1)
+            self.assertTrue(all('/api/source/increment?' in r for r in self.provider.reads))
+            self.assertIn('user:\noriginal user\n\nassistant:\noriginal assistant',[r['input'] for r in self.provider.inputs])
+
+    def test_provider_system_flag_excludes_user_from_slice_and_embedding(self):
+        self.provider.allow_embedding.set()
+        with TestClient(self.sidecar.app) as client:
+            self.finish_turn(client,system=True)
+            self.refresh(client)
+        store,rows=self.slices()
+        self.assertEqual([m['role'] for m in rows[0]['messages']],['assistant'])
+        self.assertIn('assistant:\noriginal assistant',[r['input'] for r in self.provider.inputs])
 
     def test_http_rejects_non_boolean_system_marker(self):
         with TestClient(self.sidecar.app) as client:
@@ -133,8 +142,8 @@ class PipelineHTTPTests(unittest.TestCase):
     def test_raw_recall_preview_and_next_hook_use_slice_vector_without_injection(self):
         self.provider.allow_embedding.set()
         with TestClient(self.sidecar.app) as client:
-            job_id = self.finish_turn(client)
-            self.await_ready(client, job_id)
+            self.finish_turn(client)
+            self.refresh(client)
             preview = client.post('/ember/recall/slices/preview', json={'input': 'fresh preview query'})
             self.assertEqual(preview.status_code, 200, preview.text)
             metadata = preview.json()

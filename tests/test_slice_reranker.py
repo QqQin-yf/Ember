@@ -34,6 +34,12 @@ class SliceRerankerTests(unittest.TestCase):
         for eid,turn,seq in [('A',1,1),('B',2,3)]:
             links.register({'event_id':eid,'version_id':'v1','source_session_id':'old','source_evidence':'frozen_messages',
                 'source_turn_spans':[[turn,turn]],'turn_messages':[{'turn':turn,'user_message_id':str(seq),'assistant_message_id':str(seq+1)}]})
+        from ember.models import Event
+        from ember.core_semantic import CoreVectorStore
+        events=EmberStore(str(self.root))
+        for eid in ('A','B'):
+            events.write_event(Event(eid,'v1','conversation/session-old','x','2026-01-01','2026-01-01',core=eid+' complete event',kind='daily'))
+            CoreVectorStore(str(self.root)).upsert(eid,eid+' complete event',[1.,0.],self.config.space)
         self.recall=SliceRecall(self.root)
         with patch('ember.slice_recall.SliceEmbeddingConfig.load',return_value=self.config), \
                 patch('ember.slice_recall.SliceEmbeddingClient.embed',return_value=[1.,0.]):
@@ -71,24 +77,25 @@ class SliceRerankerTests(unittest.TestCase):
     def test_three_ownership_cases_leave_legacy_decision_untouched(self):
         result,rerank=self.present([{'event_id':'A'}])
         items=result['presentations']
-        self.assertEqual(items[0]['merged_into'],'A')
-        self.assertIsNone(items[1]['merged_into'])
-        self.assertEqual(items[1]['owner_event_ids'],['B'])
-        self.assertEqual(items[2]['owner_event_ids'],[])
-        self.assertEqual(result['recalled_count'],3)
-        self.assertEqual(len(result['recall_refs']['events']),1)
+        self.assertEqual(items[0]['event_id'],'B')
+        self.assertEqual(items[1]['presentation'],'source_slice')
+        self.assertEqual(items[1]['owner_event_ids'],[])
+        self.assertNotIn('old text 1',result['prefix'])
+        self.assertNotIn('old text 3',result['prefix'])
+        self.assertIn('B complete event',result['prefix'])
+        self.assertEqual(len(result['recall_refs']['events']),2)
         self.assertTrue(result['prefix'].startswith('legacy prefix'))
         args=rerank.call_args.args
         self.assertEqual(len(args[1]),3)
         self.assertTrue(all('messages' in s and 'event_id' not in s for s in args[1]))
         trace=self.recall.trace(self.metadata['trace_id'])
         self.assertEqual(len(trace['candidate_pool']),3)
-        self.assertEqual(len(trace['rerank']['selected']),3)
+        self.assertEqual(len(trace['rerank']['selected']),2)
 
     def test_entity_overview_does_not_claim_a_member_event_was_presented(self):
         result,_=self.present([])
-        self.assertTrue(all(p['merged_into'] is None for p in result['presentations']))
-        self.assertEqual(result['recall_refs']['events'],[])
+        self.assertEqual([p['event_id'] for p in result['presentations'] if p['presentation']=='event_text'],['A','B'])
+        self.assertEqual(len(result['recall_refs']['events']),2)
 
     def test_reranker_failure_keeps_legacy_prefix_and_candidates(self):
         original={'prefix':'legacy prefix','presentations':[],'recall_refs':{'events':[]},'slice_recall':self.metadata}

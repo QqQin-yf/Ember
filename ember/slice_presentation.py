@@ -51,6 +51,23 @@ def append_slice_presentations(service,result,query):
                     selection['stale_sources'].append(candidate['slice_id']);continue
                 owners=list(dict.fromkeys(m['event_id'] for m in
                     candidate.get('span_memberships',[])+candidate.get('source_memberships',[])))
+                parents=candidate.get('parent_event_ids')
+                if parents is not None:
+                    for eid in parents:
+                        if eid in presented:
+                            continue
+                        event=service.store.get_event(eid)
+                        block=f'[{eid} {event.kind}] {event.core}'
+                        if used+len(block)>config.source_budget_chars:
+                            continue
+                        blocks.append(block);used+=len(block)+2;presented.add(eid)
+                        item={'presentation':'event_text','event_id':eid,'version_id':event.version_id,
+                              'via_slice_id':source['slice_id'],'rerank_score':rank['relevance_score']}
+                        result.setdefault('presentations',[]).append(item)
+                        selection['selected'].append(item)
+                        refs=service._presented_event_refs([item])
+                        result.setdefault('recall_refs',{}).setdefault('events',[]).extend(refs)
+                    continue
                 matched=next((eid for eid in owners if eid in presented),None)
                 label=(f'补充 {matched} 的命中原文' if matched else
                        '原文切片'+('（来源 '+', '.join(owners)+'，仅呈现命中片段）' if owners else ''))

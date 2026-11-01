@@ -74,7 +74,7 @@ class PoolKnowledgeTests(unittest.TestCase):
         queue.enqueue(self.trace('preview'))
         self.assertIsNone(queue.claim())
 
-    def test_real_turn_start_enqueues_before_reply_or_memory_write(self):
+    def test_real_turn_start_does_not_enqueue_glm_pool_work(self):
         for source in (self.a,self.b):
             self.slices.save_embedding(source,self.config.space,[1.,0.])
         from ember.slice_reranker import RerankerConfig
@@ -85,8 +85,7 @@ class PoolKnowledgeTests(unittest.TestCase):
         self.assertEqual(started['slice_recall']['candidate_count'],2)
         with PoolQueue(self.root).db() as db:
             job=db.execute('SELECT * FROM pool_jobs').fetchone()
-        self.assertEqual(job['state'],'pending')
-        self.assertEqual(len(json.loads(job['sources_json'])),2)
+        self.assertIsNone(job)
         self.assertEqual(self.service.store.all_events(),[])
         self.assertEqual(self.service.generations.generation('pool-born')['state'],'running')
 

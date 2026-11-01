@@ -164,5 +164,6 @@ class EventSliceTests(unittest.TestCase):
             metadata = recall.match('query')
         trace = recall.trace(metadata['trace_id'])
         self.assertEqual(trace['rankings'][0]['score'], 1.)
-        self.assertEqual(trace['candidate_pool'][0]['span_memberships'][0]['event_id'], 'E')
+        self.assertEqual(trace['rankings'][0]['span_memberships'][0]['event_id'], 'E')
+        self.assertEqual(trace['candidate_pool'],[])  # Unknown parent cannot pass its independent gate.
         self.assertFalse(trace['injected'])

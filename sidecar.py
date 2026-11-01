@@ -214,19 +214,20 @@ async def _lifespan(app):
         cleanup = asyncio.create_task(_expire_recall_snapshots())
         pipeline = SlicePipeline(REGISTRY)
         app.state.slice_pipeline = pipeline
-        ingestion = asyncio.create_task(pipeline.run())
-        maintenance = SliceMaintenanceWorker(REGISTRY)
+        # Raw ingestion is pulled after committed Event batches or briefing refresh.
+        from ember.source_sync import SourceSyncWorker
+        maintenance = SourceSyncWorker(REGISTRY)
         app.state.slice_maintenance = maintenance
         maintaining = asyncio.create_task(maintenance.run())
         pool_worker = PoolMaintenanceWorker(REGISTRY)
         knowledge_worker = KnowledgeEmbeddingWorker(REGISTRY)
         app.state.pool_maintenance = pool_worker
         app.state.knowledge_embedding = knowledge_worker
-        pooling = asyncio.create_task(pool_worker.run())
+        # Per-query GLM pool classification is retired.
         embedding_knowledge = asyncio.create_task(knowledge_worker.run())
         memory_worker = MemoryMaintenanceWorker(REGISTRY)
         app.state.memory_maintenance = memory_worker
-        memory_maintenance = asyncio.create_task(memory_worker.run())
+        # Replaced by kind-specific maintenance in the new lifecycle.
         try:
             yield
         finally:
@@ -235,7 +236,7 @@ async def _lifespan(app):
             pool_worker.stop_event.set()
             knowledge_worker.stop_event.set()
             memory_worker.stop_event.set()
-            await asyncio.gather(ingestion, maintaining, pooling, embedding_knowledge, memory_maintenance)
+            await asyncio.gather(maintaining, embedding_knowledge)
             cleanup.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await cleanup
@@ -302,7 +303,7 @@ async def _run_lifecycle(request: Request) -> JSONResponse:
         result = await asyncio.to_thread(svc.sidecar_run_start, body)
     else:
         result = await asyncio.to_thread(complete_run, svc,
-            getattr(request.app.state, "slice_pipeline", None), body)
+            None, body)
     return _run_response(result)
 
 
@@ -377,7 +378,7 @@ async def _hook_turn_end(request: Request) -> JSONResponse:
         return _generation_response({"status": "failed", "code": "invalid_arguments",
                                      "error": "user_is_system must be boolean"})
     return _generation_response(await asyncio.to_thread(complete_turn, svc,
-        getattr(request.app.state, "slice_pipeline", None),
+        None,
         body.get("session_id"), str(body.get("assistant_reply") or ""),
         turn, assistant_message_id=_opt_int(body, "assistant_message_id"),
         recall_id=body.get("recall_id"), status=body.get("status", "done"),
@@ -472,7 +473,7 @@ async def _briefing_refresh(request: Request) -> JSONResponse:
         body = await request.json()
     except Exception:
         body = {}
-    return JSONResponse(svc.sidecar_briefing_refresh(body))
+    return JSONResponse(await asyncio.to_thread(svc.sidecar_briefing_refresh,body))
 
 
 async def _briefing_get(request: Request) -> JSONResponse:

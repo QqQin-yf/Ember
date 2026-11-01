@@ -60,6 +60,9 @@ class SliceRecall:
             'presentation_limit': None, 'ranked_count': 0,
             'filtered_by_window': 0, 'filtered_by_anchor': 0,
             'invalid_vectors': 0, 'selection_reason': 'presentation_rules_not_set'}
+        from .lifecycle_config import lifecycle_config
+        threshold=lifecycle_config()['slice']['threshold']
+        metadata['candidate_threshold']=threshold
         query_vector = None
         ranked = []
         try:
@@ -98,6 +101,16 @@ class SliceRecall:
                     raise SliceEmbeddingError('embedding_response_invalid')
                 from .memory_lifecycle import Lifecycle
                 eligible=Lifecycle(self.root,self.instance).eligibility_checker()
+                from .models import Event
+                from .maintenance_materials import events as event_rows
+                from .slice_policy import passing_parents, informative
+                events={}
+                if purpose!='search':
+                    for eid,document in event_rows(self.root).items():
+                        try:
+                            events[eid]=Event.from_dict(document)
+                        except (TypeError,ValueError):
+                            pass
                 for row in rows:
                     if not eligible(row['slice_id']):
                         continue
@@ -132,11 +145,17 @@ class SliceRecall:
                         'span_memberships': [m for m in memberships.get(row['slice_id'], []) if m['membership_kind']=='span'],
                         'maintenance_relations': relations.get(row['slice_id'], []),
                         'source_memberships': [m for m in memberships.get(row['slice_id'], []) if m['membership_kind']!='span']})
+                if purpose!='search':
+                    for item in ranked:
+                        parents=passing_parents(self.root,item,query_vector,config,events)
+                        item['parent_event_ids']=parents
+                        source=store.get(item['slice_id'])
+                        item['parent_gate_passed']=bool(parents) or (parents is None and informative(source))
                 ranked.sort(key=lambda r: (-r['score'], r['slice_id']))
                 for index, item in enumerate(ranked, 1):
                     item['rank'] = index
                     # Compare full precision; displayed rounding never admits a candidate.
-                    item['in_candidate_pool'] = item['score'] >= CANDIDATE_MIN_SCORE
+                    item['in_candidate_pool'] = item['score'] >= threshold and item.get('parent_gate_passed',True)
                 metadata['ranked_count'] = len(ranked)
                 metadata['candidate_pool'] = [dict(item) for item in ranked if item['in_candidate_pool']]
                 metadata['candidate_count'] = len(metadata['candidate_pool'])
@@ -147,12 +166,6 @@ class SliceRecall:
                 (trace_id, self.instance, json.dumps(metadata, ensure_ascii=False),
                  json.dumps(query_vector, allow_nan=False) if query_vector is not None else None,
                  json.dumps(ranked, allow_nan=False), datetime.now(timezone.utc).isoformat()))
-        if purpose == 'automatic':
-            try:
-                from .pool_maintenance import PoolQueue
-                PoolQueue(self.root).enqueue(metadata)
-            except (OSError, sqlite3.Error):
-                pass  # Worker discovers the durable pool after recovery.
         # Hook responses stay compact; full candidate identities are available in the trace.
         return {key: value for key, value in metadata.items() if key != 'candidate_pool'}
 

@@ -578,17 +578,14 @@ class EmberService:
             "route_count": len(routes),
             "recall_cues": [r["cue"] for r in routes],
         }
-        # New writes use the independent slice-maintenance queue below.
+        from .source_sync import request_sync
+        request_sync(self)
+        # Derived memberships can be rebuilt after source completion.
         try:
             from .event_slices import sync_from_files
             sync_from_files(self.store.root, self.source_instance)
         except Exception:
             pass  # Derived span membership can be rebuilt independently.
-        try:
-            from .slice_maintenance import enqueue_event_maintenance
-            enqueue_event_maintenance(self, event)
-        except Exception:
-            pass  # Independent worker discovers unqueued committed Events after recovery.
         return result
 
 
@@ -2268,6 +2265,8 @@ class EmberService:
         if mid > 0:
             keep_from = (self.turn_ledger.turn_at_or_after(session_id, mid)
                          or 0)
+        from .source_sync import sync_increment
+        source_sync=sync_increment(self)
         now = datetime.now(timezone.utc).astimezone()
         horizon = (now - timedelta(hours=72)).isoformat(timespec="seconds")
 
@@ -2394,7 +2393,7 @@ class EmberService:
                                       list(dict.fromkeys(kept_ids)))
 
         report = {"status": "ok", "text": text, "chars": len(text),
-                  "session_id": session_id,
+                  "session_id": session_id, "source_sync": source_sync,
                   "stats": {"pinned": len(pinned), "sig10": len(sig10),
                             "new72": len(new72),
                             "recalled_top": top_id,

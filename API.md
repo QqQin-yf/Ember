@@ -322,3 +322,14 @@ X-Heart-Instance: <Ember 实例名>
 key_quotes、objects、participants、context、state、outcome、affect、details 均已删除；理解、情况、细节和感受写入 core。原文读取失败时 briefing 只保留 core。旧测试数据不迁移。
 
 revise_memory_event 可直接改 summary / core / significance / 非 promise 的 kind 及 recall_cues，不再受旧 Sleep 定稿限制；来源绑定不可修改。约定状态与改期由后续的约定处理工具承担。
+
+
+### 原文增量提供方契约（2026-11-01）
+
+Ember 在 Event 落库后后台拉取，以及 POST /ember/briefing/refresh 时同步兜底；不再需要 App 另行通知切片。turn_end 仅提交生成完成及来源身份，不再启动切片任务。旧 /ember/slices/jobs 仅能查询历史任务。
+
+原文提供方需要实现 GET /api/source/increment?cursor=<JSON 编码的不透明游标>&limit=<页大小>，鉴权与 X-Heart-Instance 同 /api/source/path。初始 cursor=null；返回 {cursor, has_more:boolean, turns:[{session_id, messages:[{message_id,role,content}], user_is_system?:boolean}]}。只列出已完成且由提供方验证历史分支路径的完整人机消息对，或 assistant 单条；系统用户消息由提供方显式标记。游标属于该实例的增量流，不能用当前叶节点或最大消息 ID 猜测历史分支。has_more=true 时游标必须前进；空页同样返回 cursor 与 has_more。
+
+两个触发点共用一个持久游标和排他执行锁，切片以消息身份去重；绑定、筛选和向量写入成功才推进游标，失败保留游标供重试。briefing 返回 source_sync 状态；来源或模型不可达时保留准确的已有记忆，报告 unavailable，不假装增量已同步。刷新接口现会等待原文拉取与嵌入，应设置适当请求超时。App 原文服务适配此接口后再启用新链路。
+
+有上级的切片仅在切片自身与上级 core 分别过门槛后带出符合 kind 规则的上级 Event；不直接呈现原文。无上级且有信息量的切片才直接呈现。阈值、典型废话、页大小等见 config/lifecycle.json（EMBER_LIFECYCLE_CONFIG 可指定替代文件）；所有嵌入仍由 config/models.json 的 embed 用途和统一网关提供。

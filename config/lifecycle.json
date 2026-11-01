@@ -1,0 +1,9 @@
+{
+  "slice": {"min_chars": 3, "threshold": 0.6, "parent_threshold": 0.5, "filler_threshold": 0.92, "filler_texts": ["好", "嗯嗯", "晚安", "哈哈", "好的，知道了", "嗯嗯，好呀"], "page_size": 100, "retry_seconds": 10},
+  "promise": {"lapse_days": 7, "timezone": "Asia/Shanghai", "low_score_max": 7},
+  "grouping": {"threshold": 0.6, "minimum": 2, "batch_size": 16},
+  "timeline": {"upper_chars": 10000, "lower_chars": 8000, "compressed_upper_chars": 4000, "compressed_lower_chars": 3200, "point_batch": 10, "health_ratio": 0.5, "retries": 2},
+  "pin": {"relationship_limit": 10, "ordinary_limit": 3, "knowledge_limit": 10, "event_chars": 4000, "knowledge_chars": 2000, "promise_chars": 10000},
+  "briefing": {"recent_hours": 72, "recent_chars": 6000},
+  "extraction": {"batch_chars": 8000}
+}
