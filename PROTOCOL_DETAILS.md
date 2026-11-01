@@ -99,13 +99,13 @@ app 可把可用的 source_session_id + source_turn_spans + turn_messages 交给
 
 ### 4. 后续交接与验证边界
 
-app 原文解析/读取的新实现保持现状，旧 `/api/source` 暂不改。待 Ember 的新路径读取客户端完成并覆盖翻原文、写入核对、sleep 等消费方后，再协调迁移，不提前收紧旧接口。
+2026-11-01 更新：Ember 原文客户端已使用 `/api/source/path`，覆盖 Event 下钻、quote/focus 核验及约定曝光原文；切片增量使用 `/api/source/increment`。旧 Sleep 专属材料入口已退役。App 原文增量提供、实例归属核验与真实联调仍需由 App 侧适配，接口见 API.md。
 
-普通生成显式工具绑定和稳定召回快照已本地实现，见 GENERATION_BINDING_SPEC.md 与 RECALL_SNAPSHOT_SPEC.md。后续独立工作仍包括 run/tool 专用证据、pending 查询和完成、原文客户端迁移及三方联调。pending 仅针对主动轮中 AI 已显式调用的记忆工具；没有调用就不生成 pending 或长期 Event。整个唤醒链路不训练 Heart 耳朵。
+普通生成显式工具绑定、稳定召回快照和主动 run 的隔离读取接口已本地实现，见本页相应章节。主动 run 当前仅允许 read_memory_source，不能借普通生成身份写记忆；后续写入能力、App 适配与真实三方联调仍需另行完成。整个唤醒链路不训练 Heart 耳朵。
 
 隔离测试覆盖：正文/摘录/概览区分、隐藏和落选成员排除、轻量/修正/观察呈现、原文字串兼容、实际轮前响应、来源冻结、重启与最大 reply 不改来源、无编号和旧语料、跨会话/实例、缺版本、无内容事件及引用失败无半成品。
 
-本次验证结果：136 项 unittest 通过；独立验收脚本全部成功退出（两项真实数据验收缺数据跳过）；19 个旧版/新版渲染对比场景逐字一致。未做真实三方联调或生产部署。
+本节原实现阶段的历史验证记录：136 项 unittest 通过；独立验收脚本成功退出（两项真实数据验收缺数据跳过）；19 个旧版/新版渲染对比场景逐字一致。当前分支验收以 OPERATIONS.md 为准；上述历史记录不代表真实三方联调或生产部署。
 
 
 <a id="recall-snapshots"></a>
@@ -322,7 +322,7 @@ MCP 失败仍为正常 RPC 响应中的 `isError=true` 与业务 code；run_cont
 
 适用条件必须全部满足：
 
-1. 原记忆确由已登记普通生成的显式 create_memory_event 创建；有 writer_recall_id、writer_tool_call_id、已完成且返回该 event_id 的工具回执，以及不可变原出处记录。
+1. 原记忆确由已登记普通生成的显式 write_event / write_promise 创建；有 writer_recall_id、writer_tool_call_id、已完成且返回该 event_id 的工具回执，以及不可变原出处记录。
 2. 待补的具体来源轮属于同一实例、同一 source_session_id，原出处跨度已包含该轮，user seq 已在写入时核验。来源轮必须精确匹配该生成的原 turn、真实用户 anchor；不得只看“创建发生在这一轮”。
 3. 新写入的出处 schema_version=2，在 pending_sources 中另记该缺失位置的 turn、user_message_id、pending_source_recall_id，只标记确属写入生成且无已存在 assistant 语料的缺失位置；不靠当前 live 槽或以后变大的 reply 倒推。writer 身份与逐轮 source 身份继续分开。
 4. 收到同 recall_id、同 session/turn 的 done，含真实非空最终正文和真实 assistant seq，沿用现有收轮业务哈希/冲突校验。只在这些条件成立后，把真实 seq 记入独立的 completion binding。

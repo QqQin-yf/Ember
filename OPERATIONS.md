@@ -98,3 +98,5 @@ python -B -X utf8 scripts/check_memory_health.py --data-dir 'D:\your-heart\data\
 修正 8 补充：截断 refresh 产生的压缩/抽点失败也登记持久重试期限，避免后台已空闲时遗漏重试；worker 完成时保守保留并发 refresh 刚登记的未来期限。专项覆盖到点唤醒及并发完成不丢期限。
 
 2026-11-01 本分支最终本地隔离验收：507 项 unittest 通过（ResourceWarning 作为错误）；独立 sidecar 38 项通过；工具 schema / 成功回执导出覆盖全部 22 个普通 MCP 工具，Sleep 专属 0 项；模型配置只读检查 status=ok。Direction 真实库离线验收因 data_real 缺失跳过，不记为通过。测试不代表线上模型、App 原文增量适配或生产部署已验证；本次未修改 Deliz/App、未部署或重启服务。
+
+2026-11-01 文档复查：五份发布 Markdown 均已同步；补清 API / PROTOCOL_DETAILS 中遗留的旧观察/Sleep 原文消费者、旧工具名和“原文客户端待迁移”说明，并明确旧验收记录属于历史阶段。此补丁仅改文档。
