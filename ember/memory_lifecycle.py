@@ -116,10 +116,18 @@ def filter_recall(service, result, session, start, message_ids=None):
     life=Lifecycle(service.store.root,service.source_instance)
     store=KnowledgeStore(service.store.root,service.source_instance)
     eligible=life.eligibility_checker()
+    from .pin_policy import Pins
+    with Pins(service).db() as conn:
+        merged_ids={r[0] for r in conn.execute('SELECT event_id FROM merged')}
     events=[]
     for ev in service.store.all_events():
-        sources=store.event_sources(ev.event_id)
-        if sources is None and message_ids is not None:
+        merged=ev.event_id in merged_ids
+        if merged:
+            from .briefing import source_records
+            sources=source_records(service,ev) or []
+        else:
+            sources=store.event_sources(ev.event_id)
+        if not merged and sources is None and message_ids is not None:
             refs=service._presented_event_refs([{'event_id':ev.event_id,'presentation':'event'}])
             if refs:
                 ref=refs[0]

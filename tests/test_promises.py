@@ -102,3 +102,18 @@ class PromiseTests(unittest.TestCase):
         restarted=EmberService(EmberStore(self.tmp.name),MockLLMClient())
         self.assertEqual(Promises(restarted).pending(),[])
         self.assertEqual(len(restarted.store.get_event('p').log),1)
+
+    def test_materials_follow_exposure_generation_to_exact_accepted_reply(self):
+        self.event(score=8)
+        self.service.store.write_route(RecallRoute('r','p','lexical','lexical','看海'))
+        self.service.hook_turn_start('s','看海',user_message_id=71,recall_id='mention')
+        self.service.hook_turn_end('s','这次已经去了',assistant_message_id=75,recall_id='mention')
+        originals=[{'message_id':71,'role':'user','content':'看海'},
+                   {'message_id':75,'role':'assistant','content':'这次已经去了'}]
+        with patch('ember.source_client.fetch_source_path',return_value=originals) as provider:
+            materials=self.promises.materials()
+        context=materials[0]['contexts'][0]
+        self.assertEqual(provider.call_args.args,('s',['71','75']))
+        self.assertEqual(context['messages'],originals)
+        self.promises.process({'event_id':'p','log':'这次已经去了','status':'done'})
+        self.assertEqual(self.service.store.get_event('p').log[-1]['spans'][0]['message_ids'],['71','75'])

@@ -147,11 +147,11 @@ class BriefingTests(unittest.TestCase):
         self.assertIn("EVT-PIN 的完整叙述", text)
         self.assertIn("【原文】", text)
         self.assertIn("原文1", text)
-        self.assertIn("EVT-S10 的完整叙述", text)
+        self.assertNotIn("EVT-S10 的完整叙述", text)
         # core 层：8-9 新增 + 召回最相关一条
         self.assertIn("EVT-C9 的完整叙述", text)
         self.assertIn("EVT-C8 的完整叙述", text)
-        self.assertIn("EVT-R1 的完整叙述", text)
+        self.assertNotIn("EVT-R1 的完整叙述", text)
         # summary 层：1-7 新增
         self.assertIn("EVT-S6 的摘要", text)
         self.assertIn("EVT-S2 的摘要", text)
@@ -164,7 +164,7 @@ class BriefingTests(unittest.TestCase):
         self.assertEqual(text.count("EVT-PIN 的完整叙述"), 1)
         # 注入记在场（ledger route=briefing）
         self.assertIn(("s1", "EVT-C9"), self.svc.recall_ledger.last_injected)
-        self.assertEqual(out["stats"]["recalled_top"], "EVT-R1")
+        self.assertNotIn("recalled_top",out["stats"])
         # 持久化 + get
         again = self.svc.sidecar_briefing_get()
         self.assertEqual(again["text"], text)
@@ -237,7 +237,7 @@ class BriefingTests(unittest.TestCase):
                       self.svc.recall_ledger.last_injected)
         # recalled_top 仍是真召回最多的 EVT-R1，不被刷上去的挤掉
         out = self._refresh()
-        self.assertEqual(out["stats"]["recalled_top"], "EVT-R1")
+        self.assertNotIn("recalled_top",out["stats"])
 
     def test_keep_from_not_swallowed_by_reply_less_turn(self) -> None:
         """缺 reply 的轮不得当无上界区间（2026-10-17 修）。
@@ -299,11 +299,13 @@ class BriefingTests(unittest.TestCase):
         self.assertEqual(self.svc._briefing_when(SimpleNamespace()), "时间缺失")
 
     def test_budget_cuts_low_layers_first(self) -> None:
-        self.svc.BRIEFING_BUDGET = 120   # 原文层就超——可砍层全砍，pin/10 保留
-        out = self._refresh()
+        from ember.lifecycle_config import lifecycle_config
+        cfg=lifecycle_config();cfg['briefing']['total_chars']=1
+        with mock.patch('ember.briefing.lifecycle_config',return_value=cfg):
+            out = self._refresh()
         # pin/10 永不砍
         self.assertIn("EVT-PIN 的完整叙述", out["text"])
-        self.assertIn("EVT-S10 的完整叙述", out["text"])
+        self.assertNotIn("EVT-S10 的完整叙述", out["text"])
         # 低层被砍光
         self.assertGreaterEqual(out["stats"]["dropped"]["core"], 1)
         self.assertNotIn("EVT-C9 的完整叙述", out["text"])

@@ -51,7 +51,7 @@ TOOL_NAMES={'list_memory_groups','read_memory_slices','search_memory_slices','wr
             'set_knowledge_pin','finish_memory_group','list_memory_knowledge',
             'review_memory_knowledge','extract_memory_entity','set_slice_recall_state'}
 SLEEP_ONLY_TOOLS=TOOL_NAMES-{'read_memory_slices','search_memory_slices'}
-VOLATILE_TOOLS={'read_memory_slices','search_memory_slices'}
+VOLATILE_TOOLS={'read_memory_slices','search_memory_slices','list_pending_promises'}
 
 
 def read_memory(service, memory_id, canonicalize=True):

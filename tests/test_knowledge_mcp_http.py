@@ -76,11 +76,14 @@ class KnowledgeMCPTests(unittest.TestCase):
                 repeated=sleep_call('write_memory_knowledge',args,'write')
                 self.assertEqual(repeated,created)
                 mid=created['memory_id']
+                client.post('/ember/briefing/refresh',json={'session_id':'new'})
                 briefing=client.get('/ember/briefing').json()
                 self.assertIn(mid,briefing['knowledge']['memory_ids'])
                 changed=sleep_call('set_knowledge_pin',{'memory_id':mid,'pinned':False},'unpin')
                 self.assertEqual(changed['status'],'ok')
                 self.assertFalse(changed['pinned'])
+                self.assertIn(mid,client.get('/ember/briefing').json()['knowledge']['memory_ids'])
+                client.post('/ember/briefing/refresh',json={'session_id':'new'})
                 self.assertNotIn(mid,client.get('/ember/briefing').json()['knowledge']['memory_ids'])
                 # Raw read receipts keep their transcript in volatile memory.
                 receipt=service.generations.call('knowledge-http','read')

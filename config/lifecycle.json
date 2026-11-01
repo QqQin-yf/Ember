@@ -44,7 +44,7 @@
   },
   "briefing": {
     "recent_hours": 72,
-    "recent_chars": 6000
+    "total_chars": 6000
   },
   "extraction": {
     "batch_chars": 8000

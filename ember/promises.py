@@ -103,6 +103,39 @@ class Promises:
                 conn.executemany('UPDATE exposures SET processed=1 WHERE id=?',[(i,) for i in entry['exposure_ids']])
             return {'status':'ok','event_id':event.event_id,'promise_status':status,'due':due,'log':entry}
 
+    def materials(self,context=None,recall_id=None):
+        """Fetch exact exposure dialogue, not the original promise's creation."""
+        from . import source_client
+        items=self.pending()
+        for item in items:
+            for entry in item['contexts']:
+                span=entry['span']
+                if not span.get('message_ids') and context and context['session'].session_id==span.get('session_id'):
+                    seq=self.service.turn_ledger.user_msg.get((span['session_id'],context['turn']))
+                    if seq is not None:
+                        span=dict(span,message_ids=[str(seq)],recall_id=recall_id)
+                rid=span.get('recall_id')
+                if rid:
+                    generation=self.service.generations.generation(rid)
+                    snapshot=self.service.generations.snapshot(rid)
+                    request=json.loads(snapshot['metadata_json']).get('request_context',{}) if snapshot else {}
+                    if (generation and generation['state']=='done' and request.get('session_id')==span.get('session_id')
+                            and str(request.get('user_message_id')) in span.get('message_ids',[]) and generation.get('assistant_message_id')):
+                        span=dict(span,message_ids=list(dict.fromkeys(span['message_ids']+[str(generation['assistant_message_id'])])))
+                if span!=entry['span']:
+                    with self.db() as conn:
+                        conn.execute('UPDATE exposures SET span=? WHERE id=?',(json.dumps(span),entry['id']))
+                    entry['span']=span
+                ids=span.get('message_ids',[])
+                try:
+                    if not ids:
+                        raise source_client.SourceUnavailable('No exposure messages','source_identity_missing')
+                    entry['messages']=source_client.fetch_source_path(span['session_id'],ids,instance=self.service.source_instance)
+                    entry['source_status']='ok'
+                except source_client.SourceUnavailable as exc:
+                    entry['source_status']=exc.code
+        return items
+
     def sweep(self,now=None):
         now=(now or datetime.now(timezone.utc)).astimezone(ZoneInfo(lifecycle_config()['promise']['timezone']))
         day=now.date().isoformat()
@@ -139,11 +172,11 @@ def tool_specs():
 TOOL_NAMES={'list_pending_promises','process_promise'}
 
 
-def dispatch(service,name,args):
+def dispatch(service,name,args,context=None,recall_id=None):
     store=Promises(service)
     try:
         if name=='list_pending_promises':
-            return {'status':'ok','items':store.pending()}
+            return {'status':'ok','items':store.materials(context,recall_id)}
         return store.process(args)
     except (ValueError,KeyError,TypeError) as exc:
         return {'status':'failed','code':'invalid_promise_update','error':str(exc)}

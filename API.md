@@ -369,3 +369,12 @@ pin 原文先取完整来源，再围绕 focus 消息居中取 event_chars，省
 merge_memory_events(event_ids,summary,core) 合并意思相同的 10 分无 due 约定，保留写入最早一条；同秒按库中创建顺序判先后。原文来源可跨会话，保留各自冻结消息身份，不拼成虚假的连续区间；log 只追加合入，原条不删，标 merged_into 并保留旧 ID 到主条映射。旧 ID 读取、pin 和处理约定会到主条。
 
 钉住约定总字数超预算时，下一次 turn_start 响应给 system_reminders 数组；App 按该 hook 输出作为 system reminder 注入，无需另行通知 Ember。每次超额只提醒一次，整理到预算内后重新超出可再提醒。提醒和召回响应一起持久化，快照失败不会误消耗；同 recall_id 重试重放同一响应。提醒不写进持久 briefing。
+
+
+### 五档 briefing 快照（2026-11-01）
+
+POST /ember/briefing/refresh 收 session_id、keep_from_message_id，可附精确 context_message_ids；新会话、截断和断线重进需要新简报时调用。先兜底同步原文增量、等待关系压缩/抽点，再按顺序保存完整快照：关系时间线；其他 pin 原文；近期非关系、非 promise 的 8–9 分 core / 1–7 分 summary；pin 的认知/规律；到期 open 约定及待处理数量。未 pin 的 10 分不自动入场，旧“召回次数最多一条”规则取消。promise 的浮现规则优先，不通过近期层提前带入未到期或无 due 约定。
+
+近期层使用 total_chars 扣除不可砍部分后的剩余预算，从最低分、最旧条目开始移除；不会硬截 core。关系、pin、知识及到期约定保持各自既定规则；最后的到期约定和待处理数量不砍。快照带 revision / refreshed_at / 分层统计，完整文本原子保存。GET /ember/briefing 只读该快照，不动态拼接新 pin 的知识；无快照为 empty，损坏为 failed / briefing_snapshot_unreadable。对话中不替换已有 briefing。
+
+任何被 briefing 带入的约定（包括 pin）都会记曝光；list_pending_promises 读取曝光时的确切对话消息，已确认回复按同一 generation 补齐，不用 max-reply 推断。来源不可达会明确标注；这些原文结果只作易失工具响应，不落持久工具回执。

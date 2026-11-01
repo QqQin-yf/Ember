@@ -108,7 +108,7 @@ class PoolKnowledgeTests(unittest.TestCase):
             'recall_cues':['黄焖鸡'],'source_slice_ids':[self.a['slice_id'],self.b['slice_id']]},context)
         self.assertEqual(result['status'],'created')
         mid=result['memory_id']
-        self.assertIn(mid,self.service.sidecar_briefing_get()['knowledge']['memory_ids'])
+        self.assertIn(mid,self.service.sidecar_briefing_refresh({'session_id':'current'})['knowledge']['memory_ids'])
         self.assertEqual(self.store.match('黄焖鸡'),[])
         dispatch(self.service,'set_knowledge_pin',{'memory_id':mid,'pinned':False},context)
         hits=self.store.match('黄焖鸡')
