@@ -21,7 +21,7 @@ class SourceCompletionTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.svc = EmberService(EmberStore(self.tmp.name), MockLLMClient())
         self.first = self.svc.hook_turn_start("source", TEXT, user_message_id=71, recall_id="writer")
-        written = self.svc.sidecar_call_tool("create_memory_event", write_args(), recall_id="writer", tool_call_id="create")
+        written = self.svc.sidecar_call_tool("write_event", write_args(), recall_id="writer", tool_call_id="create")
         self.assertEqual(written["status"], "created", written)
         self.eid = written["event_id"]
 

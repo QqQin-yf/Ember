@@ -131,9 +131,9 @@ class RecallRefsTests(unittest.TestCase):
         self.assertEqual(refs, [])
         self.assertEqual(items[0]["presentation"], "retrieval_hint")
         self.assertIsNone(items[0]["version_id"])
-        event.key_quotes = [{"speaker": "user", "text": "A real quote"}]
+        event.summary = "A real summary"
         _, _, refs = self.render(units=[{"kind": "event", "event_ids": ["A"]}])
-        self.assertEqual(refs[0]["presentation"], "event_excerpt")
+        self.assertEqual(refs[0]["presentation"], "event_text")
         self.assertIsNone(refs[0]["version_id"])
 
     def test_valid_endpoints_do_not_launder_unknown_middle_corpus(self):

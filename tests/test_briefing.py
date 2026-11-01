@@ -64,22 +64,19 @@ class SignificanceFormatTests(unittest.TestCase):
 
     def _evt(self, sig: str) -> dict:
         return {"event": {
-            "summary": "s", "participants": ["user", "ai"], "objects": [],
-            "context": "c", "core": "c", "outcome": "o", "state": "s",
-            "affect": "a", "significance": sig, "details": [],
-            "key_quotes": [],
+            "summary":"s","core":"c","kind":"daily","focus":"1","significance":sig,
         }, "recall_routes": [{"cue_type": "lexical", "cue": "触"}],
             "quote_spans": [{"start_quote": "起句在这里",
                              "end_quote": "尾句在这里"}]}
 
     def test_valid_formats(self) -> None:
-        for sig in ("8：Deliz 开发线的转折", "10:永久要记住的", "5：背景"):
+        for sig in (8, 10, 5):
             out, err = validate_writer_arguments(self._evt(sig))
             self.assertIsNone(err, sig)
             self.assertIsNotNone(out, sig)
 
     def test_invalid_formats_rejected(self) -> None:
-        for sig in ("重要发现", "11：超纲", "0：零", "8 没有冒号"):
+        for sig in ("重要发现", 11, 0, True, 8.5, "8：理由"):
             out, err = validate_writer_arguments(self._evt(sig))
             self.assertIsNone(out, sig)
             self.assertIn("significance", err or "")
@@ -130,8 +127,7 @@ class BriefingTests(unittest.TestCase):
             event_time=ingest, ingest_time=ingest,
             turn_refs=[f"turn-{turn}"],
             summary=f"{eid} 的摘要", core=f"{eid} 的完整叙述",
-            significance=sig or "5：无标分", origin=origin,
-            key_quotes=[{"speaker": "user", "text": f"{eid} 的原话"}],
+            significance=int(sig.split("：")[0]) if sig else 5, origin=origin,
         )
         self.svc.store.write_event(ev)
         self.svc.turn_spans.fill(eid, [(turn, turn)], filled_by="test")
@@ -215,8 +211,7 @@ class BriefingTests(unittest.TestCase):
             event_time=_iso(NOW), ingest_time=_iso(NOW),
             turn_refs=["turn-50"],
             summary="别会话的摘要", core="别会话的完整叙述",
-            significance="7：别的会话",
-            key_quotes=[{"speaker": "user", "text": "别会话的原话"}],
+            significance=7,
         ))
         self.svc.turn_spans.fill("EVT-OTHER", [(50, 50)], filled_by="test")
         out = self._refresh()   # keep_from_message_id=800 → turn 40

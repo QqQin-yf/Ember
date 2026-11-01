@@ -51,19 +51,8 @@ def write_args(user_quote: str | None = None,
     if extra_ai_quote:
         quotes.append({"speaker": "ai", "text": extra_ai_quote})
     args = {
-        "event": {
-            "summary": "决定把传播模型改成 Route Search",
-            "participants": ["ai", "user"],
-            "objects": ["Ember"],
-            "context": "联调期间的讨论",
-            "core": "我们把 Ember 的传播模型改成了 Route Search。",
-            "outcome": "架构定型",
-            "state": "设计文档已更新",
-            "affect": "踏实",
-            "significance": "8：影响后续所有记忆链路设计",
-            "details": ["细节一"],
-            "key_quotes": quotes,
-        },
+        "event": {"summary":"决定把传播模型改成 Route Search", "core":"我们把 Ember 的传播模型改成了 Route Search。",
+                  "significance":8, "kind":"project", "focus":"71"},
         "recall_routes": [{"cue_type": "lexical", "cue": c} for c in cues],
     }
     if quote_spans is _UNSET:
@@ -195,7 +184,7 @@ def _run_tests():
         print("== S10 MCP 工具清单完整 ==")
         names = {s["function"]["name"] for s in service2.sidecar_tool_specs()}
         check("原工具与切片检索下钻工具齐全",
-              names == {"create_memory_event", "read_memory_source",
+              names == {"write_event", "read_memory_source",
                         "revise_memory_event", "search_memory",
                         "pin_memory", "unpin_memory", "read_memory_slices", "search_memory_slices"},
               str(names))
@@ -203,7 +192,7 @@ def _run_tests():
         print("== S11 hooks 与 MCP 共用召回/写入主路 ==")
         started = service2.hook_turn_start("s_regress", "今天我们决定把 Ember 的传播模型改成 Route Search。")
         check("hook 正常开轮", started["turn"] == 1)
-        r11 = service2.sidecar_call_tool("create_memory_event", write_args())
+        r11 = service2.sidecar_call_tool("write_event", write_args())
         check("MCP 显式写入 created", r11["status"] == "created", str(r11)[:160])
         service2.hook_turn_end("s_regress", "确认。")
         r11b = service2.hook_turn_start("s_regress", "我们继续聊 Ember 吧。")

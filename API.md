@@ -311,3 +311,14 @@ X-Heart-Instance: <Ember 实例名>
 ## 主动 run 隔离接入（ember-runs/1）
 
 新增 `POST /ember/runs/start`、`POST /ember/runs/finish`、`GET /ember/runs/{run_id}`。严格字段、幂等/终态/重启与 MCP 绑定见 [RUNS_SPEC.md](PROTOCOL_DETAILS.md#runs)，App 接线回执见 APP_WAKE_RUNS_REPLY.md（本地历史记录）。首版仅开放 read_memory_source；不支持写入工具或有副作用的 search_memory。当前仅工作区实现和隔离验收，不代表日常主动发送已开启。
+
+
+## 2026-11-01 Event 写入契约
+
+本节替代旧的 create_memory_event / write_event_from_slices 字段说明；这两个 MCP 名称已取消。write_event 与 write_promise 并排提供，来源二选一：顶层 quote_spans 或 source_slice_ids，不能同时提供。
+
+两者顶层 event 都要求 summary、core、significance（1–10 整数）、kind、focus（来源消息 ID 字符串）。write_event.kind 为 daily / relationship / project；write_promise.kind 固定为 promise，due 为带时区 ISO 日期时间或 null，初始 status=open、log=[] 由 Ember 生成。focus 在落库前核对来源范围，只存储供原文截断使用，不展示给模型。
+
+key_quotes、objects、participants、context、state、outcome、affect、details 均已删除；理解、情况、细节和感受写入 core。原文读取失败时 briefing 只保留 core。旧测试数据不迁移。
+
+revise_memory_event 可直接改 summary / core / significance / 非 promise 的 kind 及 recall_cues，不再受旧 Sleep 定稿限制；来源绑定不可修改。约定状态与改期由后续的约定处理工具承担。

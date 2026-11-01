@@ -25,7 +25,7 @@ def main():
     if action == "prepare":
         svc = service(root)
         svc.hook_turn_start('source', TEXT, user_message_id=71, recall_id='writer')
-        result = svc.sidecar_call_tool('create_memory_event', write_args(), recall_id='writer', tool_call_id='create')
+        result = svc.sidecar_call_tool('write_event', write_args(), recall_id='writer', tool_call_id='create')
         assert result['status'] == 'created', result
         for rid in ('reader', 'reader2'):
             result = svc.hook_turn_start(rid, 'Ember', user_message_id=101 if rid == 'reader' else 103, recall_id=rid)

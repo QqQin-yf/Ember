@@ -8,7 +8,11 @@ from ember.service import EmberService
 from ember.source_paths import QuoteSourceError
 from ember.store import EmberStore
 from ember.turn_span import _locate_index, spans_from_quotes
-from tests.test_sidecar import write_args
+from tests.test_sidecar import write_args as _write_args
+
+def write_args(*args,**kwargs):
+    value=_write_args(*args,**kwargs); value["event"]["focus"]="1"; return value
+
 
 
 def rows(*texts):

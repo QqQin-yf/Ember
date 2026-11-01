@@ -144,7 +144,7 @@ class EventSliceTests(unittest.TestCase):
             {'message_id': 71, 'role': 'user', 'content': TEXT},
             {'message_id': 75, 'role': 'assistant', 'content': 'confirmed'}])
         svc.hook_turn_start('s', TEXT, user_message_id=71, recall_id='writer')
-        result = svc.sidecar_call_tool('create_memory_event', write_args(),
+        result = svc.sidecar_call_tool('write_event', write_args(),
                                       recall_id='writer', tool_call_id='create')
         self.assertEqual(result['status'], 'created')
         self.assertFalse(self.links.for_slice(source['slice_id']))

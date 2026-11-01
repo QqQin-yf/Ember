@@ -7,7 +7,11 @@ from ember.llm import MockLLMClient
 from ember.recall import DirectRecall
 from tests.legacy_event_fixture import LegacyEventService as EmberService
 from ember.store import EmberStore
-from tests.test_sidecar import write_args
+from tests.test_sidecar import write_args as _write_args
+
+def write_args(*args,**kwargs):
+    value=_write_args(*args,**kwargs); value["event"]["focus"]="1"; return value
+
 
 class HookMemoryLifecycleTests(unittest.TestCase):
     def setUp(self):
@@ -23,7 +27,7 @@ class HookMemoryLifecycleTests(unittest.TestCase):
         return self.svc.hook_turn_start("s", text, user_message_id=1)
 
     def write(self):
-        return self.svc.sidecar_call_tool("create_memory_event", write_args())
+        return self.svc.sidecar_call_tool("write_event", write_args())
 
     def test_hooks_do_not_call_model_or_write_implicitly(self):
         self.start()
@@ -59,7 +63,7 @@ class HookMemoryLifecycleTests(unittest.TestCase):
 
     def test_validation_failure_does_not_write_or_block_chat(self):
         self.start()
-        result = self.svc.sidecar_call_tool("create_memory_event", {"event": {"summary": "残缺"}})
+        result = self.svc.sidecar_call_tool("write_event", {"event": {"summary": "残缺"}})
         self.assertEqual(result["status"], "failed")
         self.assertTrue(result["error"])
         self.assertFalse(self.svc.store.all_events())
@@ -78,21 +82,20 @@ class HookMemoryLifecycleTests(unittest.TestCase):
         self.assertEqual(restored.hook_turn_start("s", "重启后一句。", user_message_id=3)["turn"], 2)
         self.assertFalse((Path(self.tmp.name) / "transcripts.jsonl").exists())
 
-    def test_rejected_key_quote_does_not_reappear_after_reload(self):
+    def test_deleted_fields_are_not_persisted(self):
         self.start()
-        result = self.svc.sidecar_call_tool("create_memory_event", write_args(
-            user_quote="今天我们决定把", extra_ai_quote="这句 AI 从未说过"))
-        self.assertEqual(result["status"], "created")
-        self.assertEqual(result["dropped_quotes"], [{"speaker": "ai", "text": "这句 AI 从未说过"}])
-        restored = EmberStore(self.tmp.name).get_event(result["event_id"])
-        self.assertEqual(restored.key_quotes, [{"speaker": "user", "text": "今天我们决定把"}])
+        result=self.write()
+        restored=EmberStore(self.tmp.name).get_event(result['event_id'])
+        self.assertFalse({'key_quotes','participants','affect','details'} & set(restored.to_dict()))
+        self.assertEqual(restored.significance,8)
+        self.assertEqual(restored.focus,'1')
 
     def test_multiple_cues_aggregate_without_composite_phrase(self):
         text = "我决定记下这件事：堂姐结婚，国庆办，在河南。"
         self.start(text)
         args = write_args(cues=("堂姐结婚", "堂姐", "结婚", "国庆", "河南"),
                           quote_spans=[{"start_quote": text, "end_quote": text}])
-        result = self.svc.sidecar_call_tool("create_memory_event", args)
+        result = self.svc.sidecar_call_tool("write_event", args)
         self.assertEqual(result["status"], "created")
         for query, count in (("这次国庆没人结婚。", 2), ("河南最近怎么样。", 1)):
             with self.subTest(query=query):

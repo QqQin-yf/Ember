@@ -57,3 +57,8 @@ python -B -X utf8 scripts/check_memory_health.py --data-dir 'D:\your-heart\data\
 - App Sleep的正式产出模型仍由App控制台管理。Ember maintenance仅是后台第三方判断，不替代App模型。
 - 本次将原本地JSON凭据迁入.env。部署时需同步所需环境变量；源码推送不包含凭据，也不启动维护任务。
 - `python -X utf8 scripts/check_model_config.py`用于不联网的配置检查。
+
+
+## 2026-11-01 改造进度
+
+1. Event 字段和写入工具：对应《Event字段调整》第 1–4 节、《写入工具与归组范围》第 1 节。移除旧内容字段，整数 significance，增加 kind / focus 和 promise 基础字段；成对工具共用来源与调用幂等校验，支持区间或离散切片来源；读取与 briefing 以 core 兜底。后续步骤完成前，原有分类维护和 briefing 组装尚未切换。

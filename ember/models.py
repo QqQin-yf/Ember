@@ -50,23 +50,15 @@ class Event:
     turn_refs: list[str] = field(default_factory=list)
     # content —— 完整内容
     summary: str = ""
-    participants: list[str] = field(default_factory=list)
-    objects: list[str] = field(default_factory=list)
-    context: list[str] = field(default_factory=list)
-    # core —— LLM 对这段经历的第一人称连贯叙述（取代原 actions 列表）
     core: str = ""
-    outcome: list[str] = field(default_factory=list)
-    state: list[str] = field(default_factory=list)
-    affect: list[str] = field(default_factory=list)
-    significance: str = ""
-    # change —— Event 本体字段，但写入时不必填；由 Sleep 在有足够历史上下文后补写
+    significance: int = 5
+    kind: str = "daily"
+    focus: str = ""
+    due: str | None = None
+    status: str = "open"
+    log: list[dict[str, Any]] = field(default_factory=list)
+    # Existing maintenance annotation, not a model-authored content field.
     change: str = ""
-    details: list[str] = field(default_factory=list)
-    # key_quotes —— 模型从对话原文逐字摘出的原话（r4 第 3 项）：
-    #   [{"speaker": "user"|"ai", "text": "逐字原话"}]，至多 3 条（写入侧校验）。
-    #   写入时逐字核对，对不上的条目丢弃（dropped_quotes 回执）；价值在"是真话"。
-    #   呈现时与 core 一起展示；summary_fallback 概览不带。
-    key_quotes: list[dict[str, str]] = field(default_factory=list)
     # provenance
     provenance_refs: list[str] = field(default_factory=list)
     # origin —— 事件出身："" = 实时写入（对话中模型自主触发）；

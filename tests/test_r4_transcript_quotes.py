@@ -126,7 +126,7 @@ def test_verify_and_presentation():
     with tempfile.TemporaryDirectory() as root:
         svc = _mk_service(root)
         svc.hook_turn_start("sV", "就按这个方案定稿吧。")
-        result = svc.sidecar_call_tool("create_memory_event", GOOD_WRITER_ARGS)
+        result = svc.sidecar_call_tool("write_event", GOOD_WRITER_ARGS)
         check("显式 MCP 写入成功", result["status"] == "created")
         ev = svc.store.get_event(result["event_id"])
         check("真 user 原话保留", ev.key_quotes == [{"speaker": "user", "text": "就按这个方案定稿吧。"}])
@@ -142,7 +142,7 @@ def test_read_memory_source():
     with tempfile.TemporaryDirectory() as root:
         svc = _mk_service(root)
         svc.hook_turn_start("sQ", "就按这个方案定稿吧。")
-        result = svc.sidecar_call_tool("create_memory_event", GOOD_WRITER_ARGS)
+        result = svc.sidecar_call_tool("write_event", GOOD_WRITER_ARGS)
         ev = svc.store.get_event(result["event_id"])
         content = svc.sidecar_call_tool("read_memory_source", {"event_id": ev.event_id})
         check("旧本地语料无精确出处 → not_archived", content["status"] == "not_archived")

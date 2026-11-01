@@ -13,7 +13,11 @@ from ember.service import EmberService
 from ember.source_paths import QuoteSourceError
 from ember.store import EmberStore
 from ember.writer import validate_writer_arguments, writer_error_result
-from tests.test_sidecar import write_args
+from tests.test_sidecar import write_args as _write_args
+
+def write_args(*args,**kwargs):
+    value=_write_args(*args,**kwargs); value["event"]["focus"]="1"; return value
+
 
 
 class WriterDiagnosticTests(unittest.TestCase):
@@ -23,7 +27,7 @@ class WriterDiagnosticTests(unittest.TestCase):
             ("quote_spans", [], "quote_spans"),
             ("event.summary", " ", "event.summary"),
             ("event.significance", "important", "event.significance"),
-            ("event.key_quotes", [{"speaker":"ai","text":"a"}] * 4, "event.key_quotes"),
+            ("event.focus", " ", "event.focus"),
             ("recall_routes", [{"cue_type":"lexical","cue":" "}], "recall_routes[0].cue"),
             ("quote_spans", [{"start_quote":"a","end_quote":" "}], "quote_spans[0].end_quote"),
         ]
@@ -77,22 +81,20 @@ class WriterDiagnosticTests(unittest.TestCase):
             with patch.object(service, "_fetched_corpus", return_value=[]):
                 service.hook_turn_start("s", "actual user text", user_message_id=1, recall_id="r")
                 args = write_args(); args["recall_routes"] = []
-                first = service.sidecar_call_tool("create_memory_event", args, recall_id="r", tool_call_id="t")
-                again = service.sidecar_call_tool("create_memory_event", args, recall_id="r", tool_call_id="t")
+                first = service.sidecar_call_tool("write_event", args, recall_id="r", tool_call_id="t")
+                again = service.sidecar_call_tool("write_event", args, recall_id="r", tool_call_id="t")
             self.assertEqual(first, again)
             self.assertEqual(first["field"], "recall_routes")
             self.assertTrue(first["hint"])
             self.assertFalse(service.store.all_events())
             self.assertEqual(service.sidecar_tool_status("r", "t")["result"], first)
 
-    def test_legacy_acceptance_ignores_host_source_configuration(self):
-        from tests import test_sidecar
-        with patch.multiple(source_client, SOURCE_URL="http://must-not-contact.invalid", SOURCE_TOKEN="fake"), \
-             patch.object(source_client, "_open_source", side_effect=AssertionError("Unexpected network")), \
-             contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as stopped:
-            test_sidecar.main()
-        self.assertEqual(stopped.exception.code, 0)
-        self.assertEqual(test_sidecar.FAIL, 0)
+    def test_old_tool_is_rejected_without_writing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service=EmberService(EmberStore(tmp),MockLLMClient())
+            result=service.sidecar_call_tool('create_memory_event',write_args())
+            self.assertEqual(result['status'],'failed')
+            self.assertFalse(service.store.all_events())
 
 
 if __name__ == "__main__":

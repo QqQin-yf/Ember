@@ -145,7 +145,7 @@ class SliceMaintenanceTests(unittest.TestCase):
         service = EmberService(EmberStore(str(root)), MockLLMClient())
         with patch('ember.slice_maintenance.MaintenanceClient.judge') as judge:
             service.hook_turn_start('s', TEXT, user_message_id=71, recall_id='maintenance-write')
-            result = service.sidecar_call_tool('create_memory_event', write_args(),
+            result = service.sidecar_call_tool('write_event', write_args(),
                 recall_id='maintenance-write', tool_call_id='create')
         judge.assert_not_called()
         self.assertEqual(result['status'], 'created')

@@ -97,11 +97,9 @@ def isolated_receipts():
         for source in sources:slices.save_embedding(source,embedding.space,[1.,0.])
         session=service.get_or_create_session('fixture-chat');session.next_turn()
         text='A concrete fixture decision was made.'
-        session.messages=[{'turn':1,'role':'user','content':text}]
+        session.messages=[{'turn':1,'role':'user','content':text,'_source_message_id':'1'}]
         service._live_turn={'session':session,'turn':1,'user_text':text}
-        event={'summary':'A fixture decision','participants':['user','ai'],'objects':['fixture'],
-            'context':'Isolated documentation example','core':text,'outcome':'Recorded','state':'done',
-            'affect':'calm','significance':'8: concrete fixture decision','details':['fixture detail'],'key_quotes':[]}
+        event={'summary':'A fixture decision','core':text,'significance':8,'kind':'project','focus':'1'}
         args={'event':event,'recall_routes':[{'cue_type':'lexical','cue':'fixture'}],
               'quote_spans':[{'start_quote':text,'end_quote':text}]}
         wire={str(m['message_id']):m for s in sources for m in s['messages']}
@@ -112,8 +110,8 @@ def isolated_receipts():
              patch.object(source_client,'SOURCE_URL',''), \
              patch('ember.slice_recall.SliceEmbeddingConfig.load',return_value=embedding), \
              patch('ember.slice_embedding.SliceEmbeddingClient.embed',return_value=[1.,0.]):
-            results['create_memory_event']=service.sidecar_call_tool('create_memory_event',args)
-            created=results['create_memory_event'].get('event_id')
+            results['write_event']=service.sidecar_call_tool('write_event',args)
+            created=results['write_event'].get('event_id')
             if not created:raise RuntimeError('Documentation fixture failed to write Event')
             results['revise_memory_event']=service.sidecar_call_tool('revise_memory_event',{'event_id':created,'core':'Updated fixture decision'})
             results['pin_memory']=service.sidecar_call_tool('pin_memory',{'event_id':created})
@@ -158,7 +156,7 @@ def isolated_receipts():
                 {'memory_id':first,'action':'keep','confidence':8},{'memory_id':second,'action':'keep','confidence':8}]})
             results['extract_memory_entity']=call('extract_memory_entity',{'group_id':entity,'name':'Fixture object',
                 'summary':'An isolated object','event_ids':[r['id'] for r in events]})
-            results['write_event_from_slices']=call('write_event_from_slices',{'event':event,'recall_routes':args['recall_routes'],'source_slice_ids':ids})
+            results['write_promise']=service.sidecar_call_tool('write_promise',{'event':dict(event,kind='promise',due=None),'recall_routes':args['recall_routes'],'source_slice_ids':ids})
             results['set_slice_recall_state']=call('set_slice_recall_state',{'group_id':generic,'slice_ids':[ids[0]],
                 'reason':'Fixture-only outdated example','evidence':sources[0]['messages'][0]['content']})
             results['finish_memory_group']=call('finish_memory_group',{'group_id':generic,'state':'reviewed'})
@@ -166,13 +164,13 @@ def isolated_receipts():
 
 
 HANDLERS={
- 'create_memory_event':[('ember/service.py','sidecar_create_memory_event'),('ember/service.py','_create_memory_in_context'),('ember/service.py','write_validated_event'),('ember/writer.py','writer_error_result')],
+ 'write_event':[('ember/service.py','sidecar_create_memory_event'),('ember/service.py','_create_memory_in_context'),('ember/service.py','write_validated_event'),('ember/writer.py','writer_error_result')],
  'read_memory_source':[('ember/service.py','read_source_event')],
  'revise_memory_event':[('ember/service.py','sidecar_revise_memory_event')],
  'search_memory':[('ember/service.py','sidecar_search_memory')],
  'pin_memory':[('ember/service.py','sidecar_pin_memory')],
  'unpin_memory':[('ember/service.py','sidecar_unpin_memory')],
- 'write_event_from_slices':[('ember/knowledge_tools.py','write_event')],
+ 'write_promise':[('ember/knowledge_tools.py','write_event')],
  'write_memory_knowledge':[('ember/knowledge.py','create'),('ember/sleep_review.py','score'),('ember/sleep_review.py','set_confidence')],
  'set_knowledge_pin':[('ember/knowledge.py','pin')],
  'review_memory_knowledge':[('ember/sleep_review.py','review_knowledge'),('ember/sleep_review.py','group'),('ember/sleep_review.py','score')],

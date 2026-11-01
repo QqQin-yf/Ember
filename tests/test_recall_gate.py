@@ -281,8 +281,8 @@ class InjectionDedupTests(unittest.TestCase):
 
     def test_full_then_light_then_full_again(self) -> None:
         sid = "s_dedup"
-        self.svc.hook_turn_start(sid, "今天我们决定把 Ember 的传播模型改成 Route Search。")
-        written = self.svc.sidecar_call_tool("create_memory_event", write_args())
+        self.svc.hook_turn_start(sid, "今天我们决定把 Ember 的传播模型改成 Route Search。",user_message_id=71)
+        written = self.svc.sidecar_call_tool("write_event", write_args())
         self.assertEqual(written["status"], "created")
         eid = written["event_id"]
         full_mark = f'read_memory_source("{eid}")'

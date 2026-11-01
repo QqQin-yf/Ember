@@ -12,8 +12,7 @@ class MaintenancePending(Exception):
     pass
 
 
-EVENT_FIELDS = ('event_id', 'version_id', 'event_time', 'ingest_time', 'summary', 'core', 'affect', 'context',
-                'outcome', 'details', 'state', 'significance', 'change', 'participants', 'objects')
+EVENT_FIELDS = ('event_id', 'version_id', 'event_time', 'ingest_time', 'summary', 'core', 'significance', 'kind', 'due', 'status', 'log', 'change')
 
 
 def events(root):

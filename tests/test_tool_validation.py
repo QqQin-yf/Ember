@@ -12,12 +12,7 @@ class ToolInputValidationTests(unittest.TestCase):
     def setUp(self):
         self.schema = build_tools_spec()[0]["function"]["parameters"]
         self.args = {
-            "event": {
-                "summary": "test", "participants": [], "objects": [],
-                "context": "", "core": "test", "outcome": "", "state": "",
-                "affect": "", "significance": "8: test", "details": [],
-                "key_quotes": [],
-            },
+            "event": {"summary":"test","core":"test","significance":8,"kind":"daily","focus":"1"},
             "recall_routes": [{"cue_type": "lexical", "cue": "test"}],
             "quote_spans": [{"start_quote": "test", "end_quote": "test"}],
         }
@@ -44,7 +39,7 @@ class ToolInputValidationTests(unittest.TestCase):
         token = sidecar.CURRENT_SERVICE.set(service)
         try:
             request = types.CallToolRequest(method="tools/call",
-                params=types.CallToolRequestParams(name="create_memory_event", arguments=self.args))
+                params=types.CallToolRequestParams(name="write_event", arguments=self.args))
             with patch.object(sidecar.mcp_server, "_tool_cache", {}):
                 # Validation is synchronous inside the async handler. Drive this
                 # no-I/O path directly; Windows event loops require socketpair.
@@ -73,7 +68,7 @@ class ToolInputValidationTests(unittest.TestCase):
                 with self.subTest(status=status):
                     payload = {"status": status, "code": "test-code"}
                     with patch.object(sidecar.asyncio, "to_thread", new=AsyncMock(return_value=payload)):
-                        coroutine = sidecar._call_tool("create_memory_event", self.args)
+                        coroutine = sidecar._call_tool("write_event", self.args)
                         try:
                             with self.assertRaises(StopIteration) as completed:
                                 coroutine.send(None)

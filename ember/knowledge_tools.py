@@ -23,9 +23,6 @@ def tool_specs(sleep=False):
               'recall_cues':strings,'source_slice_ids':strings,
               'confidence':{'type':'integer','minimum':0,'maximum':10},
               'confidence_basis':{'enum':['recently_disproved','outdated']},'confidence_evidence':{'type':'string'}},['kind','content','recall_cues','source_slice_ids','confidence']),
-        spec('write_event_from_slices','由你按正常 Event 格式把离散原文切片写成一件经历。来源可以跨会话，不能扩大区间或把同类经历强合成同一件事。',
-             {'event':writer['event'],'recall_routes':writer['recall_routes'],'source_slice_ids':strings},
-             ['event','recall_routes','source_slice_ids']),
         spec('set_knowledge_pin','自主管理认知/规律的 briefing 常驻预算。超预算时先斟酌重要程度取消部分 pin，再 pin 新条目；取消后仍可正常召回。',
              {'memory_id':{'type':'string'},'pinned':{'type':'boolean'}},['memory_id','pinned']),
         spec('finish_memory_group','阅读并处理分组后标记 reviewed，或判断不值得提炼时 dismissed。不会删除原文。',
@@ -51,7 +48,7 @@ def tool_specs(sleep=False):
 
 
 TOOL_NAMES={'list_memory_groups','read_memory_slices','search_memory_slices','write_memory_knowledge',
-            'write_event_from_slices','set_knowledge_pin','finish_memory_group','list_memory_knowledge',
+            'set_knowledge_pin','finish_memory_group','list_memory_knowledge',
             'review_memory_knowledge','extract_memory_entity','set_slice_recall_state'}
 SLEEP_ONLY_TOOLS=TOOL_NAMES-{'read_memory_slices','search_memory_slices'}
 VOLATILE_TOOLS={'read_memory_slices','search_memory_slices'}
@@ -91,8 +88,7 @@ def write_event(service, args, context):
         raise ValueError('A live App generation is required to author an Event')
     # Reuse the complete Event content/route validation, while provenance is
     # explicitly resolved by slice IDs, never by these legacy quote anchors.
-    validated,error=validate_writer_arguments({'event':args.get('event'),'recall_routes':args.get('recall_routes'),
-                                             'quote_spans':[{'start_quote':'slice-source','end_quote':'slice-source'}]})
+    validated,error=validate_writer_arguments(args)
     if error:
         raise ValueError(str(error))
     sources=store.sources(args.get('source_slice_ids'))
@@ -103,7 +99,7 @@ def write_event(service, args, context):
     event.turn_refs=[]
     event.provenance_refs=['app-slice-writer']+['slice:'+s['slice_id'] for s in sources]
     corpus=[m for r in rows for m in r['messages']]
-    dropped=service._verify_key_quotes(event,context['session'],corpus=corpus)
+    service._validate_focus(event,corpus)
     store.save_event_sources(event.event_id,sources)
     service.store.write_event(event)
     for index,route in enumerate(validated['recall_routes'],1):
@@ -112,7 +108,7 @@ def write_event(service, args, context):
             evidence_refs=['slice:'+s['slice_id'] for s in sources],provenance_refs=['app-slice-writer']))
     enqueue_event_maintenance(service,event)
     return {'status':'created','event_id':event.event_id,'summary':event.summary,
-            'source_slice_ids':args['source_slice_ids'],'dropped_quotes':dropped}
+            'source_slice_ids':args['source_slice_ids']}
 
 
 def dispatch(service,name,args,context=None):
@@ -121,7 +117,7 @@ def dispatch(service,name,args,context=None):
         if name in SLEEP_ONLY_TOOLS and (context is None or context.get('kind')!='sleep'):
             return {'status':'failed','code':'sleep_context_required'}
         if context and context.get('kind')=='sleep':
-            if name in ('write_memory_knowledge','write_event_from_slices') and 'source_ids' in context:
+            if name == 'write_memory_knowledge' and 'source_ids' in context:
                 ids=args.get('source_slice_ids')
                 if not isinstance(ids,list) or not all(isinstance(s,str) and s in context['source_ids'] for s in ids):
                     return {'status':'failed','code':'source_outside_sleep_materials'}
@@ -171,8 +167,6 @@ def dispatch(service,name,args,context=None):
             return {'status':'ok','slice_ids':args['slice_ids'],'recall_state':'no_recall'}
         if name=='set_knowledge_pin':
             return store.pin(args.get('memory_id'),args.get('pinned'))
-        if name=='write_event_from_slices':
-            return write_event(service,args,context)
         if name=='read_memory_slices':
             if sum(bool(args.get(k)) for k in ('slice_ids','memory_id','group_id'))!=1:
                 raise ValueError('Choose exactly one of slice_ids, memory_id, group_id')

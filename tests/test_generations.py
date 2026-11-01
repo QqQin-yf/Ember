@@ -32,7 +32,7 @@ class GenerationTests(unittest.TestCase):
     def start(self, rid="r-1", sid="s1", seq=71, text=TEXT):
         return self.svc.hook_turn_start(sid, text, user_message_id=seq, recall_id=rid)
 
-    def call(self, rid="r-1", cid="tool-1", args=None, name="create_memory_event"):
+    def call(self, rid="r-1", cid="tool-1", args=None, name="write_event"):
         return self.svc.sidecar_call_tool(name, write_args() if args is None else args,
                                           recall_id=rid, tool_call_id=cid)
 
@@ -71,16 +71,16 @@ class GenerationTests(unittest.TestCase):
 
     def test_no_header_or_partial_or_unknown_context_never_borrows_bound_slot(self):
         self.start()
-        self.assertEqual(self.svc.sidecar_call_tool("create_memory_event", write_args())["code"], "identity_required")
+        self.assertEqual(self.svc.sidecar_call_tool("write_event", write_args())["code"], "identity_required")
         self.assertEqual(self.svc.sidecar_create_memory_event(write_args())["code"], "identity_required")
-        self.assertEqual(self.svc.sidecar_call_tool("create_memory_event", write_args(), recall_id="r-1")["code"], "invalid_identity")
+        self.assertEqual(self.svc.sidecar_call_tool("write_event", write_args(), recall_id="r-1")["code"], "invalid_identity")
         self.assertEqual(self.call(rid="unknown")["code"], "unknown_recall")
         self.assertEqual(len(self.svc.store.all_events()), 0)
 
     def test_run_or_mixed_identity_does_not_fall_back_to_dialogue(self):
         self.start()
-        self.assertEqual(self.svc.sidecar_call_tool("create_memory_event", write_args(), run_id="run1")["code"], "invalid_identity")
-        self.assertEqual(self.svc.sidecar_call_tool("create_memory_event", write_args(), run_id="run1", recall_id="r-1", tool_call_id="t")["code"], "context_mismatch")
+        self.assertEqual(self.svc.sidecar_call_tool("write_event", write_args(), run_id="run1")["code"], "invalid_identity")
+        self.assertEqual(self.svc.sidecar_call_tool("write_event", write_args(), run_id="run1", recall_id="r-1", tool_call_id="t")["code"], "context_mismatch")
         self.assertEqual(len(self.svc.store.all_events()), 0)
 
     def test_completed_write_retry_survives_supersession_and_restart(self):
@@ -90,7 +90,7 @@ class GenerationTests(unittest.TestCase):
         self.assertEqual(self.call(), first)
         self.assertEqual(self.call(cid="late-new")["code"], "stale_generation")
         again = EmberService(EmberStore(self.tmp.name), MockLLMClient())
-        out = again.sidecar_call_tool("create_memory_event", write_args(), recall_id="r-1", tool_call_id="tool-1")
+        out = again.sidecar_call_tool("write_event", write_args(), recall_id="r-1", tool_call_id="tool-1")
         self.assertEqual(out, first)
         self.assertEqual(len(again.store.all_events()), 1)
 
@@ -102,7 +102,8 @@ class GenerationTests(unittest.TestCase):
         self.assertEqual(self.call(args=args)["code"], "id_conflict")
         self.assertEqual(self.call(name="pin_memory", args={"event_id": "A"})["code"], "id_conflict")
         self.start("r-2", "s2", 80)
-        separate = self.call(rid="r-2")
+        args=write_args();args["event"]["focus"]="80"
+        separate = self.call(rid="r-2",args=args)
         self.assertEqual(separate["status"], "created")
         self.assertEqual(self.svc.store.get_event(separate["event_id"]).source_ref, "conversation/session-s2")
         self.assertEqual(len(self.svc.store.all_events()), 2)
@@ -165,11 +166,11 @@ class GenerationTests(unittest.TestCase):
 
     def test_restart_preserves_uncertain_call_and_interrupts_active_writer(self):
         self.start()
-        self.svc.generations.begin_call("r-1", "unfinished", fingerprint({"recall_id": "r-1", "name": "create_memory_event", "arguments": write_args()}), "create_memory_event")
+        self.svc.generations.begin_call("r-1", "unfinished", fingerprint({"recall_id": "r-1", "name": "write_event", "arguments": write_args()}), "write_event")
         again = EmberService(EmberStore(self.tmp.name), MockLLMClient())
         self.assertEqual(again.sidecar_generation_status("r-1")["status"], "interrupted")
-        self.assertEqual(again.sidecar_call_tool("create_memory_event", write_args(), recall_id="r-1", tool_call_id="unfinished")["code"], "tool_outcome_unknown")
-        self.assertEqual(again.sidecar_call_tool("create_memory_event", write_args(), recall_id="r-1", tool_call_id="new")["code"], "stale_generation")
+        self.assertEqual(again.sidecar_call_tool("write_event", write_args(), recall_id="r-1", tool_call_id="unfinished")["code"], "tool_outcome_unknown")
+        self.assertEqual(again.sidecar_call_tool("write_event", write_args(), recall_id="r-1", tool_call_id="new")["code"], "stale_generation")
 
     def test_read_results_never_persist_transcript(self):
         self.start(text=TEXT + " user-message-do-not-store")
@@ -245,7 +246,7 @@ class GenerationTests(unittest.TestCase):
         self.call()
         with tempfile.TemporaryDirectory() as other:
             other_svc = EmberService(EmberStore(other), MockLLMClient())
-            self.assertEqual(other_svc.sidecar_call_tool("create_memory_event", write_args(), recall_id="r-1", tool_call_id="tool-1")["code"], "unknown_recall")
+            self.assertEqual(other_svc.sidecar_call_tool("write_event", write_args(), recall_id="r-1", tool_call_id="tool-1")["code"], "unknown_recall")
 
     def test_query_metadata_excludes_request_hash_and_chat_text(self):
         self.start()
@@ -300,7 +301,7 @@ class GenerationHTTPTests(unittest.IsolatedAsyncioTestCase):
 
     async def tool(self, headers=None, args=None):
         response = await self.client.post("/mcp/", headers=headers or {}, json={"jsonrpc": "2.0", "id": 7,
-            "method": "tools/call", "params": {"name": "create_memory_event", "arguments": args or write_args()}})
+            "method": "tools/call", "params": {"name": "write_event", "arguments": args or write_args()}})
         if response.status_code != 200:
             return response, response.json()
         data = response.json()
@@ -325,7 +326,7 @@ class GenerationHTTPTests(unittest.IsolatedAsyncioTestCase):
         args = write_args()
         args["recall_routes"] = []
         body = {"jsonrpc": "2.0", "id": 9, "method": "tools/call",
-                "params": {"name": "create_memory_event", "arguments": args}}
+                "params": {"name": "write_event", "arguments": args}}
         first = (await self.client.post("/mcp/", headers=headers, json=body)).json()["result"]
         again = (await self.client.post("/mcp/", headers=headers, json=body)).json()["result"]
         self.assertTrue(first["isError"])

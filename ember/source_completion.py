@@ -70,7 +70,7 @@ class SourceCompletions:
         snapshot = db.execute("SELECT * FROM recall_snapshots WHERE recall_id=?", (rid,)).fetchone()
         if (not generation or generation["state"] != "done" or not generation["end_hash"]
                 or not snapshot or snapshot["state"] != "ready" or not call
-                or call["state"] != "completed" or call["tool_name"] != "create_memory_event"
+                or call["state"] != "completed" or call["tool_name"] not in ("write_event", "write_promise")
                 or not call["result_json"]):
             return None
         receipt = json.loads(call["result_json"])

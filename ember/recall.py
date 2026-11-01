@@ -39,7 +39,7 @@ class RecalledEvent:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "event": self.event.to_dict(),
+            "event": {k:v for k,v in self.event.to_dict().items() if k != "focus"},
             "raw_ref": self.event.raw_ref,
             "multi_cue": self.multi_cue,
             "why_recalled": [

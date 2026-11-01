@@ -39,7 +39,7 @@ from .core_semantic import (CoreVectorStore, EntitySummaryVectorStore,
                             SEARCH_HIT_FLOOR, cosine)
 from .writer import (
     PIN_TOOL_NAME, UNPIN_TOOL_NAME, REVISE_TOOL_NAME,
-    TOOL_NAME,
+    TOOL_NAME, PROMISE_TOOL_NAME,
     READ_SOURCE_TOOL_NAME,
     build_revise_tool_spec,
     build_pin_tool_specs,
@@ -541,13 +541,7 @@ class EmberService:
         if not span_pairs:
             raise QuoteSourceError(getattr(corpus, "issue", None) or "quote_not_found")
 
-        # key_quotes 逐字核对（r4 第 3.2 项，确定性代码侧）：
-        # 每条 text 在本会话原文（session.messages 中对应 role 的
-        # content；用户侧用原话，不含召回前缀——历史里存的就是原话）
-        # 里逐字查找；对不上的条目丢弃（不拒绝整个 Event），
-        # 丢弃清单写进 tool result 让模型知道哪句没对上
-        dropped = self._verify_key_quotes(event, session, corpus=corpus)
-
+        self._validate_focus(event, corpus, span_pairs)
 
         self.event_sources.capture(
             event.event_id, event.version_id, session.session_id, span_pairs, corpus,
@@ -584,8 +578,6 @@ class EmberService:
             "route_count": len(routes),
             "recall_cues": [r["cue"] for r in routes],
         }
-        if dropped:
-            result["dropped_quotes"] = dropped
         # New writes use the independent slice-maintenance queue below.
         try:
             from .event_slices import sync_from_files
@@ -960,15 +952,8 @@ class EmberService:
         return True
 
     @staticmethod
-    def _format_key_quotes(event: Event) -> str:
-        """原话行（r4 第 3.4 项）：speaker=user 标"她"，ai 标"我"；无原话返回空串。"""
-        if not (getattr(event, "key_quotes", None) or []):
-            return ""
-        parts = []
-        for q in event.key_quotes:
-            who = "她" if q.get("speaker") == "user" else "我"
-            parts.append(f"「{q.get('text', '')}」（{who}）")
-        return "原话：" + "".join(parts)
+    def _format_key_quotes(event):
+        return ""
 
     def _append_tool_record(self, session: Session,
                             tool_calls: list[dict[str, Any]],
@@ -1013,17 +998,10 @@ class EmberService:
             ingest_time=_now_iso(),
             turn_refs=[f"turn-{turn}"],
             summary=w_event["summary"],
-            participants=w_event["participants"],
-            objects=w_event["objects"],
-            context=[w_event["context"]],
             core=w_event["core"],
-            outcome=[w_event["outcome"]],
-            state=[w_event["state"]],
-            affect=[w_event["affect"]],
             significance=w_event["significance"],
-            # change 不由 Writer 提供，留给 Sleep 补写
-            details=w_event["details"],
-            key_quotes=w_event.get("key_quotes") or [],
+            kind=w_event["kind"], focus=w_event["focus"],
+            due=w_event.get("due"),
             provenance_refs=["memory-writer", f"chat:{session.session_id}"],
         )
 
@@ -1065,57 +1043,12 @@ class EmberService:
         return SourceCorpus(fetched + [m for m in current if m.get("_source_message_id") not in present],
                             getattr(fetched, "issue", None))
 
-    def _verify_key_quotes(self, event: Event,
-                           session: Session, corpus: list[dict] | None = None) -> list[dict[str, str]]:
-        """key_quotes 逐字核对（r4 第 3.2 项，确定性，代码侧）。
+    @staticmethod
+    def _validate_focus(event, corpus, spans=None):
+        messages=[m for m in corpus if spans is None or any(lo <= m.get('turn',-1) <= hi for lo,hi in spans)]
+        if not any(str(m.get('_source_message_id',m.get('message_id'))) == event.focus for m in messages):
+            raise ValueError('event.focus must identify a message inside the source spans')
 
-        每条 text 逐字查找本会话原文。核对语料见 _quote_corpus（持久存档
-        ∪ 内存——2026-10-12 修正：旁路形态下 sidecar 重启会清空内存会话，
-        易失语料会让「引用更早对话的原话」全部误伤）。做空白
-        归一容错。key_quotes 保存原话，仍使用独立的逐字校验，
-        不沿用 quote_spans 的格式容错定位。对不上的条目从 event 上
-        丢弃并返回（调用方写进 tool result）；原话的价值在于是真话，
-        不能让改写或编造的句子混进去。
-        """
-        import re
-
-        def _norm(s: str) -> str:
-            return re.sub(r"\s+", "", s or "")
-
-        corpus_by_role: dict[str, list[str]] = {"user": [], "assistant": []}
-
-        def _feed(role: Any, content: Any) -> None:
-            if role in corpus_by_role and isinstance(content, str):
-                corpus_by_role[role].append(content)
-
-        for m in (self._quote_corpus(session) if corpus is None else corpus):
-            _feed(m.get("role"), m.get("content"))
-
-        def _find_anywhere(text: str, speaker: str) -> bool:
-            t, tn = text, _norm(text)
-            # 精确：任一对应 role 的消息原文包含
-            for c in corpus_by_role.get(speaker, []):
-                if t and t in c:
-                    return True
-            # 空白归一容错
-            if len(tn) >= 4:
-                for c in corpus_by_role.get(speaker, []):
-                    if tn in _norm(c):
-                        return True
-            return False
-
-        kept: list[dict[str, str]] = []
-        dropped: list[dict[str, str]] = []
-        for q in (event.key_quotes or []):
-            speaker = "assistant" if q.get("speaker") == "ai" else "user"
-            if _find_anywhere(q.get("text", ""), speaker):
-                kept.append(q)
-            else:
-                dropped.append(q)
-        event.key_quotes = kept
-        return dropped
-
-    # ---------- recall（复用第一阶段） ----------
 
     def _ledger_record(self, session: Session, turn: int,
                        ctx: PresentationContext, entity_hits: list,
@@ -1604,7 +1537,16 @@ class EmberService:
         from .knowledge_tools import TOOL_NAMES, dispatch
         if name in TOOL_NAMES:
             return dispatch(self, name, arguments, context)
-        if name == TOOL_NAME:
+        if name in (TOOL_NAME, PROMISE_TOOL_NAME):
+            validated,error=validate_writer_arguments(arguments,promise=name==PROMISE_TOOL_NAME)
+            if error:
+                return writer_error_result(error)
+            if 'source_slice_ids' in arguments:
+                from .knowledge_tools import write_event
+                try:
+                    return write_event(self,validated,context)
+                except (ValueError,KeyError,TypeError) as exc:
+                    return {'status':'failed','code':'invalid_memory_material','error':str(exc)}
             if context is not None:
                 return self._create_memory_in_context(context["session"], context["turn"],
                     arguments, recall_id, tool_call_id)
@@ -1797,36 +1739,23 @@ class EmberService:
                     "error": f"找不到该 event_id: {eid}"}
         event = self.store.get_event(resolved)
 
-        # 冷静期判定：进过夜间维护 → 定稿，指路 resolves
-        if resolved in self._sleep_done_ids():
-            return {
-                "status": "rejected",
-                "event_id": resolved,
-                "reason": "该记忆已定稿（进入过夜间维护），不能直接修改。"
-                          "请改用 create_memory_event 写一条更正记忆，"
-                          "在 core 里说明它修正了哪条旧认知。",
-            }
-
         # 锁死字段显式拒绝（防模型绕过白名单）
         for locked in REVISE_LOCKED_FIELDS:
             if locked in (arguments or {}):
                 return {"status": "failed", "event_id": resolved,
                         "error": f"字段 {locked} 不可修改（与原文/系统的绑定）"}
 
-        revised: list[str] = []
-        for field in REVISE_ALLOWED_FIELDS:
-            if field not in (arguments or {}):
-                continue
-            value = arguments[field]
-            if value is None or (isinstance(value, str) and not value.strip()):
-                continue
-            # participants/objects/details/context/outcome/state/affect
-            # 均为 list[str] 型字段：单值更正为主，str → [str] 归一
-            if field in ("summary", "core", "significance"):
-                setattr(event, field, str(value).strip())
-            else:
-                setattr(event, field, self._normalize_revise_list(value))
-            revised.append(field)
+        updates={k:arguments[k] for k in REVISE_ALLOWED_FIELDS if k in arguments}
+        candidate=dict(event.to_dict(),**updates)
+        if any(not isinstance(candidate[k],str) or not candidate[k].strip() for k in ('summary','core')):
+            return {'status':'failed','code':'invalid_tool_arguments','error':'summary and core must be nonempty strings'}
+        if type(candidate['significance']) is not int or not 1<=candidate['significance']<=10:
+            return {'status':'failed','code':'invalid_tool_arguments','field':'significance'}
+        if candidate['kind'] not in ('daily','relationship','project','promise') or ((candidate['kind']=='promise') != (event.kind=='promise')):
+            return {'status':'failed','code':'invalid_tool_arguments','field':'kind'}
+        revised=list(updates)
+        for key,value in updates.items():
+            setattr(event,key,value)
 
         # 召回线索整体重设（可选）：旧 active routes 退役，按新 cues 重建
         cues = (arguments or {}).get("recall_cues")
@@ -2281,10 +2210,8 @@ class EmberService:
         return os.path.join(self.store.root, self.BRIEFING_FILE)
 
     @staticmethod
-    def _sig_level(significance: str) -> int:
-        """significance 文本 → 重要度分（无数字前缀的旧事件按 5 计）。"""
-        m = re.match(r"\s*(10|[1-9])\s*[：:]", significance or "")
-        return int(m.group(1)) if m else 5
+    def _sig_level(significance: int) -> int:
+        return significance if type(significance) is int and 1 <= significance <= 10 else 5
 
     @staticmethod
     def _briefing_when(ev: Any) -> str:
@@ -2316,10 +2243,7 @@ class EmberService:
         if src.get("status") == "ok" and transcript:
             lines = [f"  {ln}" for ln in transcript.splitlines()]
             return head + "\n  【原文】\n" + "\n".join(lines)
-        quotes = [f"  「{q.get('text', '')}」"
-                  for q in (ev.key_quotes or [])
-                  if isinstance(q, dict) and q.get("text")]
-        return head + ("\n" + "\n".join(quotes) if quotes else "")
+        return head
 
     def sidecar_briefing_refresh(self, args: dict[str, Any]) -> dict[str, Any]:
         """截断时刷新简报（app 调用；自包含重写）。

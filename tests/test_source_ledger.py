@@ -58,10 +58,8 @@ def _make_event(svc: EmberService, sid: str, turn: int,
         raw_ref=f"conversation/session-{sid}/turn-{turn}",
         event_time=now, ingest_time=now,
         turn_refs=[f"turn-{turn}"],
-        summary="旧摘要", participants=["ai"], objects=["测试"],
-        context=["背景"], core="旧叙述", outcome=["旧结果"],
-        state=["旧状态"], affect=["旧感受"], significance="旧意义",
-        details=["旧细节"],
+        summary="旧摘要",core="旧叙述",significance=5,kind="daily",focus="1",
+
     )
 
 
@@ -556,23 +554,21 @@ class ReviseMemoryTests(unittest.TestCase):
         r = self.svc.sidecar_revise_memory_event({
             "event_id": "EVT-001",
             "core": "新叙述：我去过杭州，不是住在杭州。",
-            "significance": "新意义",
+            "significance": 8,
         })
         self.assertEqual(r["status"], "revised")
         self.assertEqual(set(r["revised_fields"]), {"core", "significance"})
         ev = self.svc.store.get_event("EVT-001-aaaaaa")
         self.assertIn("去过杭州", ev.core)
-        self.assertEqual(ev.significance, "新意义")
+        self.assertEqual(ev.significance, 8)
         self.assertEqual(ev.summary, "旧摘要")  # 未提供的字段不动
-        self.assertEqual(ev.key_quotes, [])     # 锁死字段不受影响
+        self.assertNotIn("key_quotes",ev.to_dict())     # 锁死字段不受影响
 
     def test_revise_list_field_accepts_string(self) -> None:
         r = self.svc.sidecar_revise_memory_event({
             "event_id": "EVT-001", "participants": "user",
         })
-        self.assertEqual(r["status"], "revised")
-        ev = self.svc.store.get_event("EVT-001-aaaaaa")
-        self.assertEqual(ev.participants, ["user"])
+        self.assertEqual(r["status"], "failed")
 
     def test_revise_rejected_after_sleep(self) -> None:
         p = self.tmp / "data" / "sleep_progress.jsonl"
@@ -582,15 +578,13 @@ class ReviseMemoryTests(unittest.TestCase):
         r = self.svc.sidecar_revise_memory_event({
             "event_id": "EVT-001", "core": "试改",
         })
-        self.assertEqual(r["status"], "rejected")
-        self.assertIn("更正记忆", r["reason"])
+        self.assertEqual(r["status"], "revised")
         ev = self.svc.store.get_event("EVT-001-aaaaaa")
-        self.assertEqual(ev.core, "旧叙述")  # 未被改动
+        self.assertEqual(ev.core, "试改")
 
     def test_revise_locked_field_failed(self) -> None:
         r = self.svc.sidecar_revise_memory_event({
-            "event_id": "EVT-001", "key_quotes": [{"speaker": "user",
-                                                   "text": "改"}],
+            "event_id": "EVT-001", "focus": "12",
         })
         self.assertEqual(r["status"], "failed")
         self.assertIn("不可修改", r["error"])

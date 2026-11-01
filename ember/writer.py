@@ -5,194 +5,43 @@ from __future__ import annotations
 import re
 from typing import Any
 
-TOOL_NAME = "create_memory_event"
+TOOL_NAME = "write_event"
+PROMISE_TOOL_NAME = "write_promise"
 READ_SOURCE_TOOL_NAME = "read_memory_source"
 
-TOOL_DESCRIPTION = (
-    "记录一条值得长期保存的经历（Event）。只在出现具体的、值得留存的经历时调用："
-    "明确的决定、变化、结果、认知转变或重要互动。普通寒暄、闲聊、进行中的琐碎"
-    "对话不要调用；拿不准时不要调用。各字段填法见参数描述；系统字段"
-    "（id、时间戳、出处等）由系统生成，无需提供。每次写入必须附 quote_spans"
-    "（起尾句逐字摘自对话原文，无法定位的写入会被拒绝）。"
-    "同一条经历只调用一次：返回 status=created 即已写入成功，"
-    "不要因为 dropped_quotes（原话未通过逐字核对）或任何细节不满意而重复调用——"
-    "重复调用会产生重复记忆。被丢的原话只说明摘录与原文有出入，记忆本身已完整保存。"
-)
 
-READ_SOURCE_TOOL_DESCRIPTION = (
-    "读取一条记忆（Event）对应的对话原文。只在需要原话细节时调用——"
-    "回忆起的事件内容已由召回呈现，需要核对当时的原话（说了什么、怎么说的）才用。"
-)
-
-
-def build_tools_spec() -> list[dict[str, Any]]:
-    """momo §7 Tool Schema 原文（strict）+ r4 扩展（key_quotes / read_memory_source）。"""
-    return [{
-        "type": "function",
-        "function": {
-            "name": TOOL_NAME,
-            "description": TOOL_DESCRIPTION,
-            "strict": True,
-            "parameters": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["event", "recall_routes", "quote_spans"],
-                "properties": {
-                    "event": {
-                        "type": "object",
-                        "additionalProperties": False,
-                        "required": [
-                            "summary", "participants", "objects", "context",
-                            "core", "outcome", "state", "affect",
-                            "significance", "details", "key_quotes",
-                        ],
-                        "properties": {
-                            "summary": {
-                                "type": "string",
-                                "description": "一句话快速理解这段经历（客观简短，不写变化过程）",
-                            },
-                            "participants": {
-                                "type": "array",
-                                "description": (
-                                    "这段经历的参与者。这轮对话的双方都在场时"
-                                    "双方都算——ai 说过话或被涉及就带上 "
-                                    "\"ai\"，不要只写 user"
-                                ),
-                                "items": {"type": "string"},
-                            },
-                            "objects": {
-                                "type": "array",
-                                "description": "经历涉及的具体事物或话题",
-                                "items": {"type": "string"},
-                            },
-                            "context": {
-                                "type": "string",
-                                "description": "经历发生的背景情境（时间、场合、缘由等）",
-                            },
-                            "core": {
-                                "type": "string",
-                                "description": "你对这段经历的第一人称连贯叙述，写给自己的诚实版本，可以包含你对它的理解和感受",
-                            },
-                            "outcome": {
-                                "type": "string",
-                                "description": "这段经历直接引出的结果",
-                            },
-                            "state": {
-                                "type": "string",
-                                "description": "经历发生时事情所处的状况",
-                            },
-                            "affect": {
-                                "type": "string",
-                                "description": "这段经历给你的感受底色",
-                            },
-                            "significance": {
-                                "type": "string",
-                                "description": (
-                                    "重要度打分：1-10 的整数 + 冒号 + 一句话"
-                                    "理由（如「8：Deliz 开发线的转折」）。"
-                                    "10=重大项目转折或确定永远要记住的事；"
-                                    "8-9=对进行中事务有实质影响的进展、发现、"
-                                    "决定；5-7=有内容但偏背景；1-4=琐碎——"
-                                    "1-4 的事不要调用本工具（随口带过的偏好、"
-                                    "习惯、单点琐事不写成长期记忆）"
-                                ),
-                            },
-                            "details": {
-                                "type": "array",
-                                "description": "值得留存的具体细节，一条一条列",
-                                "items": {"type": "string"},
-                            },
-                            "key_quotes": {
-                                "type": "array",
-                                "description": (
-                                    "从这段经历的对话原文逐字摘出的原话（不改写、不拼接），最多三句；"
-                                    "挑以后最能带回当时情境的句子——决定本身、动人的那一句、转折点；"
-                                    "speaker 标这句话是谁说的（user=对方，ai=你自己）；"
-                                    "没有值得留的就给空数组。"
-                                ),
-                                "items": {
-                                    "type": "object",
-                                    "additionalProperties": False,
-                                    "required": ["speaker", "text"],
-                                    "properties": {
-                                        "speaker": {
-                                            "type": "string",
-                                            "enum": ["user", "ai"],
-                                        },
-                                        "text": {"type": "string"},
-                                    },
-                                },
-                            },
-                        },
-                    },
-                    "recall_routes": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "additionalProperties": False,
-                            "required": ["cue_type", "cue"],
-                            "properties": {
-                                "cue_type": {
-                                    "type": "string",
-                                    "description": "触点类型：lexical=具体词短语 / conceptual=概念 / relational=关系性表达 / situational=情境",
-                                    "enum": ["lexical", "conceptual", "relational", "situational"],
-                                },
-                                "cue": {
-                                    "type": "string",
-                                    "description": "记忆触点：未来可能让你想起这次具体经历的最小独立语义单元（如「国庆去河南」拆成「国庆」「河南」，「堂姐结婚」拆成「堂姐」「结婚」）；专有名词保持整体；不要堆砌泛泛的主题词",
-                                },
-                            },
-                        },
-                    },
-                    "quote_spans": {
-                        "type": "array",
-                        "description": (
-                            "这段经历在对话原文中的出处句对（起句/尾句），逐字摘录、"
-                            "不改写不缩略，摘录足够长以便唯一定位（至少一整句话），"
-                            "不输出轮次编号。尽可能保留每段经历的完整对话区间，"
-                            "不要为了排除信息量低的回应、过渡或闲话而断开区间。"
-                            "只有出现 A → B → A 的事件轮换，即 A 已告一段落、"
-                            "转入另一事件 B、之后又重新谈起 A，才将 A 的出处拆成多个区间。"
-                            "当两件事交织、难以划开边界时，先判断它们是否其实属于同一件经历："
-                            "如果是，合并为一条 Event，保留完整区间；如果确实是两件不同的经历，"
-                            "分别写成两条 Event，各自保留完整上下文，出处区间允许重叠，甚至完全相同。"
-                            "定位先按原文子串匹配；未命中时忽略 emoji、标点、空白和 Markdown 标记，"
-                            "按文字及数字的原顺序连续匹配。容错后仅有一条消息候选才接受；"
-                            "若返回 quote_ambiguous，请扩长报错端摘录、加入独特原文文字后重试。"
-                        ),
-                        "items": {
-                            "type": "object",
-                            "additionalProperties": False,
-                            "required": ["start_quote", "end_quote"],
-                            "properties": {
-                                "start_quote": {"type": "string"},
-                                "end_quote": {"type": "string"},
-                            },
-                        },
-                    },
-                },
-            },
-        },
-    }, {
-        # r4 第 4 项：翻原文工具（只读，不写任何认知结构）
-        "type": "function",
-        "function": {
-            "name": READ_SOURCE_TOOL_NAME,
-            "description": READ_SOURCE_TOOL_DESCRIPTION,
-            "strict": True,
-            "parameters": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["event_id"],
-                "properties": {
-                    "event_id": {
-                        "type": "string",
-                        "description": "要翻看原文的记忆 id（如 EVT-001-aaaa）",
-                    },
-                },
-            },
-        },
-    }]
+def build_tools_spec():
+    from copy import deepcopy
+    event = {"type":"object", "additionalProperties":False,
+        "required":["summary","core","significance","kind","focus"],
+        "properties":{
+            "summary":{"type":"string","minLength":1,"description":"一句话客观、简短地说清这段经历。"},
+            "core":{"type":"string","minLength":1,"description":"第一人称的连贯叙述，写给自己的诚实版本：情况、细节、理解和感受都写在这里。"},
+            "significance":{"type":"integer","minimum":1,"maximum":10,"description":"重要度整数 1-10。10=重大项目转折或确定永远要记住；8-9=有实质影响的进展、发现、决定；5-7=有内容的背景；1-4=琐碎。"},
+            "kind":{"enum":["daily","relationship","project"],"description":"事件主类：日常、关于两人关系本身的互动、项目。"},
+            "focus":{"type":"string","minLength":1,"description":"来源区间中最重要的一条消息的 message_id；原文过长时以它为截断中心。"}}}
+    routes={"type":"array","minItems":1,"items":{"type":"object","additionalProperties":False,
+        "required":["cue_type","cue"],"properties":{
+            "cue_type":{"enum":["lexical","conceptual","relational","situational"]},
+            "cue":{"type":"string","minLength":1,"description":"未来能唤起这次经历的最小独立线索；专名保持整体。"}}}}
+    spans={"type":"array","minItems":1,"items":{"type":"object","additionalProperties":False,
+        "required":["start_quote","end_quote"],"properties":{
+            "start_quote":{"type":"string","minLength":1},"end_quote":{"type":"string","minLength":1}}},
+        "description":"逐字摘录起尾句，保留完整事件区间；只有事件轮换才拆段。"}
+    props={"event":event,"recall_routes":routes,"quote_spans":spans,
+        "source_slice_ids":{"type":"array","minItems":1,"uniqueItems":True,"items":{"type":"string","minLength":1},"description":"从提取材料写入时提供切片 ID；与 quote_spans 二选一。"}}
+    schema={"type":"object","additionalProperties":False,"required":["event","recall_routes"],"properties":props,
+        "oneOf":[{"required":["quote_spans"],"not":{"required":["source_slice_ids"]}},
+                 {"required":["source_slice_ids"],"not":{"required":["quote_spans"]}}]}
+    def spec(name,description,parameters):
+        return {"type":"function","function":{"name":name,"description":description,"parameters":parameters}}
+    promise=deepcopy(schema)
+    pe=promise['properties']['event']; pe['properties']['kind']={"const":"promise"}
+    pe['properties']['due']={"type":["string","null"],"description":"具体 ISO 日期时间；无明确时间则 null。"}
+    # Status and log are maintained by Ember, never supplied on initial write.
+    return [spec(TOOL_NAME,"答应了、说好了、约好了的事，用 write_promise。记录日常、关系或项目经历；系统生成 ID 和时间。来源二选一，成功后不要重复写。",schema),
+            spec(PROMISE_TOOL_NAME,"日常、关系、项目，用 write_event。记录单方面承诺或双方约定；kind 固定为 promise，状态初始 open，log 由处理工具追加。",promise),
+            spec(READ_SOURCE_TOOL_NAME,"读取记忆对应的原文，核对具体说法或细节。",{"type":"object","additionalProperties":False,"required":["event_id"],"properties":{"event_id":{"type":"string"}}})]
 
 
 class WriterArgumentError(str):
@@ -208,8 +57,8 @@ def _invalid_writer(field: str, message: str, hint: str | None = None):
     hints = {
         "recall_routes": "请提供至少一条召回线索，例如 [{\"cue_type\": \"lexical\", \"cue\": \"关键词\"}]。",
         "quote_spans": "请提供至少一组 start_quote / end_quote，逐字摘自真实原文。",
-        "event.significance": "请使用 1-10 的数字加冒号和理由，例如 8：关系的重要转折。",
-        "event.key_quotes": "请提供最多三条逐字摘录；无摘录时传 []。",
+        "event.significance": "请使用 1-10 的整数，不带理由。",
+
     }
     if hint is None and field.endswith(".cue"):
         hint = "请填写非空的召回关键词，不能只含空白字符。"
@@ -227,110 +76,38 @@ def writer_error_result(error: str) -> dict[str, Any]:
     return result
 
 
-def validate_writer_arguments(args: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
-    """对 Memory Writer tool call 的 arguments 做严格校验。
-
-    返回 (validated, error)。校验失败的 Event 一律拒绝写入。
-    """
-    if not isinstance(args, dict):
-        return _invalid_writer('$', "arguments 不是对象")
-
-    event = args.get("event")
-    if isinstance(event, dict):
-        for field in ("recall_routes", "quote_spans"):
-            if field not in args and field in event:
-                return _invalid_writer(field,
-                    f"{field} 放错层级：当前位于 event.{field}，应放在顶层。",
-                    f"将 event.{field} 移出，与 event 平级，保留原内容。")
-
-    unknown = set(args) - {"event", "recall_routes", "quote_spans"}
-    if unknown:
-        return _invalid_writer('$', f"多余的顶层字段: {sorted(unknown)}")
-
-    # quote_spans 必填（2026-10-12 裁决：新事件一律带真实时间坐标，
-    # 不给/给空都算不合法——粗锚点只作为旧事件的查询时降级存在）
-    if "quote_spans" not in args:
-        return _invalid_writer('quote_spans', "缺少字段: quote_spans（起尾句对，逐字摘自对话原文）")
-
-    event = args.get("event")
-    required_event = [
-        "summary", "participants", "objects", "context", "core",
-        "outcome", "state", "affect", "significance", "details",
-        "key_quotes",
-    ]
-    if not isinstance(event, dict):
-        return _invalid_writer('event', "event 不是对象")
-    missing = [k for k in required_event if k not in event]
-    if missing:
-        return _invalid_writer(f'event.{missing[0]}', f"event 缺少字段: {missing}")
-    extra = set(event) - set(required_event)
-    if extra:
-        return _invalid_writer('event', f"event 含未声明字段（LLM 不得提供系统字段）: {sorted(extra)}")
-    if not isinstance(event["summary"], str) or not event["summary"].strip():
-        return _invalid_writer('event.summary', "summary 必须是非空字符串")
-    if not isinstance(event["core"], str) or not event["core"].strip():
-        return _invalid_writer('event.core', "core 必须是非空字符串")
-
-    list_fields = ["participants", "objects", "details"]
-    for k in list_fields:
-        if not isinstance(event[k], list) or not all(isinstance(i, str) for i in event[k]):
-            return _invalid_writer(f'event.{k}', f"event.{k} 必须是字符串数组")
-    for k in ["context", "outcome", "state", "affect", "significance"]:
-        if not isinstance(event[k], str):
-            return _invalid_writer(f'event.{k}', f"event.{k} 必须是字符串")
-    # significance 数字化（2026-10-17 momo：简报分层依据，格式必须可靠）
-    if not re.match(r"\s*(10|[1-9])\s*[：:]", event["significance"]):
-        return _invalid_writer('event.significance', "significance 必须以 1-10 的数字开头，后跟冒号和"
-                      "一句话理由（如「8：Deliz 开发线的转折」）")
-
-    # key_quotes（r4 第 3 项）：数组、元素 speaker∈{user,ai} + 非空 text；
-    # 上限 3 条（baseline），超出整条拒绝
-    kq = event.get("key_quotes")
-    if not isinstance(kq, list):
-        return _invalid_writer('event.key_quotes', "event.key_quotes 必须是数组")
-    if len(kq) > 3:
-        return _invalid_writer('event.key_quotes', f"event.key_quotes 最多 3 条，得到 {len(kq)} 条")
-    allowed_kq = {"speaker", "text"}
-    for i, q in enumerate(kq):
-        if not isinstance(q, dict):
-            return _invalid_writer(f'event.key_quotes[{i}]', f"event.key_quotes[{i}] 不是对象")
-        if set(q) - allowed_kq:
-            return _invalid_writer(f'event.key_quotes[{i}]', f"event.key_quotes[{i}] 含未声明字段: {sorted(set(q) - allowed_kq)}")
-        if q.get("speaker") not in ("user", "ai"):
-            return _invalid_writer(f'event.key_quotes[{i}].speaker', f"event.key_quotes[{i}].speaker 必须是 user 或 ai")
-        if not isinstance(q.get("text"), str) or not q["text"].strip():
-            return _invalid_writer(f'event.key_quotes[{i}].text', f"event.key_quotes[{i}].text 必须是非空字符串")
-
-    routes = args.get("recall_routes")
-    if not isinstance(routes, list) or not routes:
-        return _invalid_writer('recall_routes', "recall_routes 必须是非空数组")
-    allowed_route = {"cue_type", "cue"}
-    for i, r in enumerate(routes):
-        if not isinstance(r, dict):
-            return _invalid_writer(f'recall_routes[{i}]', f"recall_routes[{i}] 不是对象")
-        if set(r) - allowed_route:
-            return _invalid_writer(f'recall_routes[{i}]', f"recall_routes[{i}] 含未声明字段: {sorted(set(r) - allowed_route)}")
-        if r.get("cue_type") not in ("lexical", "conceptual", "relational", "situational"):
-            return _invalid_writer(f'recall_routes[{i}].cue_type', f"recall_routes[{i}].cue_type 非法")
-        if not isinstance(r.get("cue"), str) or not r["cue"].strip():
-            return _invalid_writer(f'recall_routes[{i}].cue', f"recall_routes[{i}].cue 必须是非空字符串")
-
-    # quote_spans 必填非空：逐对校验（起/尾句均须非空字符串）
-    quote_spans = args.get("quote_spans")
-    if not isinstance(quote_spans, list) or not quote_spans:
-        return _invalid_writer('quote_spans', "quote_spans 必须是非空数组（至少一对起尾句，逐字摘自对话原文）")
-    allowed_q = {"start_quote", "end_quote"}
-    for i, q in enumerate(quote_spans):
-        if not isinstance(q, dict):
-            return _invalid_writer(f'quote_spans[{i}]', f"quote_spans[{i}] 不是对象")
-        if set(q) - allowed_q:
-            return _invalid_writer(f'quote_spans[{i}]', f"quote_spans[{i}] 含未声明字段: {sorted(set(q) - allowed_q)}")
-        for k in ("start_quote", "end_quote"):
-            if not isinstance(q.get(k), str) or not q[k].strip():
-                return _invalid_writer(f'quote_spans[{i}].{k}', f"quote_spans[{i}].{k} 必须是非空字符串")
-
-    return {"event": event, "recall_routes": routes,
-            "quote_spans": quote_spans}, None
+def validate_writer_arguments(args, *, promise=None):
+    from .tool_validation import validate_tool_input
+    if not isinstance(args,dict):
+        return _invalid_writer('$', 'arguments 不是对象')
+    if promise is None:
+        promise = (args.get('event') or {}).get('kind') == 'promise'
+    spec=build_tools_spec()[1 if promise else 0]['function']['parameters']
+    error=validate_tool_input(args,spec)
+    if error:
+        return _invalid_writer(error['field'],error['error'],error['hint'])
+    event=args['event']
+    for key in ('summary','core','focus'):
+        if not event[key].strip():
+            return _invalid_writer('event.'+key, key+' 不能为空')
+    if type(event['significance']) is not int:
+        return _invalid_writer('event.significance','significance 必须是 1-10 的整数')
+    if event.get('due') is not None:
+        from datetime import datetime
+        try:
+            dt=datetime.fromisoformat(event['due'].replace('Z','+00:00'))
+            if dt.tzinfo is None:
+                raise ValueError()
+        except (ValueError,TypeError):
+            return _invalid_writer('event.due','due 必须是带时区的 ISO 日期时间或 null')
+    for i,r in enumerate(args['recall_routes']):
+        if not r['cue'].strip():
+            return _invalid_writer(f'recall_routes[{i}].cue','cue 不能为空')
+    for i,q in enumerate(args.get('quote_spans',[])):
+        for key in ('start_quote','end_quote'):
+            if not q[key].strip():
+                return _invalid_writer(f'quote_spans[{i}].{key}',key+' 不能为空')
+    return args,None
 
 
 # ---------------------------------------------------------------------------
@@ -342,19 +119,9 @@ REVISE_TOOL_NAME = "revise_memory_event"
 # 可修改字段 = 对事实的叙述（含参与者的更正）；cue 经 recall_cues 整体重设。
 # 锁死 = 与原文/系统的绑定（id、时间戳、出处、摘录）——摘录与原文的绑定
 # 一动双盲核对就废，出处一动回指就断。
-REVISE_ALLOWED_FIELDS = ("summary", "participants", "objects", "context",
-                         "core", "outcome", "state", "affect",
-                         "significance", "details")
-REVISE_LOCKED_FIELDS = ("key_quotes", "quote_spans", "turn_refs",
-                        "raw_ref", "source_ref")
-
-REVISE_TOOL_DESCRIPTION = (
-    "修改一条自己写下的记忆（冷静期内）。只在用户当场指出记忆内容"
-    "与事实不符（例如把「去过某地」记成了「住在某地」）时调用："
-    "提供 event_id 和需要修正的字段。系统字段（id、时间戳、出处、"
-    "逐字摘录）不可修改；已进入夜间维护的记忆不可修改——那种情况"
-    "请改用 create_memory_event 写一条更正记忆并说明修正关系。"
-)
+REVISE_ALLOWED_FIELDS = ("summary", "core", "significance", "kind")
+REVISE_LOCKED_FIELDS = ("focus", "quote_spans", "turn_refs", "raw_ref", "source_ref", "due", "status", "log")
+REVISE_TOOL_DESCRIPTION = "直接修订记忆的叙述或召回线索；约定状态和改期用约定处理工具。原文和系统绑定不可修改。"
 
 
 def build_revise_tool_spec() -> list[dict[str, Any]]:
@@ -370,7 +137,7 @@ def build_revise_tool_spec() -> list[dict[str, Any]]:
         },
     }
     for f in REVISE_ALLOWED_FIELDS:
-        props[f] = {"type": "string",
+        props[f] = {"type": "integer" if f == "significance" else "string",
                     "description": f"（可选）{f} 的新内容"}
     return [{
         "type": "function",

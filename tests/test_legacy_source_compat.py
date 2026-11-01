@@ -11,7 +11,11 @@ from ember.service import EmberService
 from ember.store import EmberStore
 from ember.llm import MockLLMClient
 from ember.source_paths import legacy_messages
-from tests.test_sidecar import write_args
+from tests.test_sidecar import write_args as _write_args
+
+def write_args(*args,**kwargs):
+    value=_write_args(*args,**kwargs); value["event"]["focus"]="313"; return value
+
 
 class Provider(BaseHTTPRequestHandler):
     def do_GET(self):

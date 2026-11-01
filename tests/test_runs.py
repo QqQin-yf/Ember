@@ -172,7 +172,7 @@ class RunTests(unittest.TestCase):
 
     def test_writes_and_side_effectful_search_are_not_allowed(self):
         self.start()
-        for name in ("create_memory_event","revise_memory_event","pin_memory","unpin_memory","search_memory"):
+        for name in ("write_event","revise_memory_event","pin_memory","unpin_memory","search_memory"):
             with self.subTest(name=name):self.assertEqual(self.call(name=name)["code"],"run_tool_not_allowed")
         self.assertFalse(self.svc.store.all_events())
 
