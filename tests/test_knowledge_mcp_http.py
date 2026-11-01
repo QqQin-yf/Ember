@@ -63,25 +63,23 @@ class KnowledgeMCPTests(unittest.TestCase):
                 ordinary,error=call('write_memory_knowledge',args,'ordinary-write')
                 self.assertFalse(error)
                 self.assertEqual(ordinary['status'],'created')
-                identity={'sleep_id':'sleep-http','session_id':'new'}
-                started=client.post('/ember/sleep/knowledge/start',json=identity).json()
-                self.assertEqual(started['remaining'],1)
-                self.assertIn('write_memory_knowledge',{t['function']['name'] for t in started['tools']})
-                def sleep_call(name,args,cid):
-                    return client.post('/ember/sleep/knowledge/tool',json={**identity,
-                        'name':name,'arguments':args,'call_id':cid}).json()
-                before=sleep_call('write_memory_knowledge',args,'before-read')
-                self.assertEqual(before['code'],'source_not_read_in_sleep')
-                self.assertEqual(sleep_call('read_memory_slices',{'group_id':'group-http'},'sleep-read')['status'],'ok')
-                created=sleep_call('write_memory_knowledge',args,'write')
-                self.assertEqual(created['status'],'created',created)
-                repeated=sleep_call('write_memory_knowledge',args,'write')
+                for operation in ('start','tool','finish'):
+                    retired=client.post('/ember/sleep/knowledge/'+operation,json={})
+                    self.assertEqual(retired.status_code,410)
+                    self.assertEqual(retired.json()['code'],'legacy_sleep_step_retired')
+                created,error=call('write_memory_knowledge',args,'write')
+                self.assertFalse(error)
+                repeated,error=call('write_memory_knowledge',args,'write')
                 self.assertEqual(repeated,created)
                 mid=created['memory_id']
+                listed,error=call('list_memory_knowledge',{},'knowledge-list')
+                self.assertFalse(error)
+                self.assertEqual(listed['items'][0]['memory_id'],mid)
+                self.assertNotIn('vector',listed['items'][0])
                 client.post('/ember/briefing/refresh',json={'session_id':'new'})
                 briefing=client.get('/ember/briefing').json()
                 self.assertIn(mid,briefing['knowledge']['memory_ids'])
-                changed=sleep_call('set_knowledge_pin',{'memory_id':mid,'pinned':False},'unpin')
+                changed,error=call('set_knowledge_pin',{'memory_id':mid,'pinned':False},'unpin')
                 self.assertEqual(changed['status'],'ok')
                 self.assertFalse(changed['pinned'])
                 self.assertIn(mid,client.get('/ember/briefing').json()['knowledge']['memory_ids'])
@@ -90,8 +88,7 @@ class KnowledgeMCPTests(unittest.TestCase):
                 # Raw read receipts keep their transcript in volatile memory.
                 receipt=service.generations.call('knowledge-http','read')
                 self.assertNotIn('午饭总吃黄焖鸡',receipt['result_json'] or '')
-                self.assertEqual(sleep_call('finish_memory_group',{'group_id':'group-http','state':'reviewed'},'ack')['status'],'ok')
-                self.assertEqual(client.post('/ember/sleep/knowledge/finish',json={**identity,'state':'completed'}).json()['state'],'completed')
+
 
 
 if __name__=='__main__':

@@ -1,6 +1,6 @@
 # ember 接口文档
 
-> ember：旁路记忆系统。职责边界：记忆写入（模型自主+校验）、召回注入、异步维护与 Sleep 正式产出、沉淀证据账本；
+> ember：旁路记忆系统。职责边界：记忆写入（模型自主+校验）、召回注入、异步维护与独立提取、沉淀证据账本；
 > **不管**对话主路径——ember 挂了/未部署，聊天照常，只损失记忆能力。
 > 消费方：app（钩子组 + sleep 编排 + 沉淀证据转交）、模型的工具循环（MCP 工具组）。
 > （梦已归 app 的 dream_submit 工具，ember 不再向 heart 推送——旧梦通道 2026-10-15 退役。）
@@ -35,7 +35,7 @@
   2. app 调 LLM（召回文本由 app 自行注入当轮 system）
   3. hook_turn_end（收轮 + 补记回复行 id）        ← 后于 LLM 调用
 写入（模型在对话中自主触发，经 app 的工具循环转 MCP）：
-  · create_memory_event 只在「进行中的一轮」存在时可用
+  · write_event / write_promise 在「进行中的一轮」存在时可用
 ```
 
 - turn_end 的 turn 校验：与登记号不匹配则拒绝
@@ -79,7 +79,7 @@
 
 2026-10-20 本段新增 `presentations`（有序呈现粒度）和 `recall_refs`（触发会话、真实锚点 seq 字符串及实际输出事件的出处辅助）。只有事件正文/摘录进入 `recall_refs.events`；实体概览不展开隐藏成员。旧事件或缺可靠消息身份保持 unresolved，路径由 app 解析。完整字段及限制见 [RECALL_REFS_SPEC.md](PROTOCOL_DETAILS.md#recall-refs)。
 
-带 recall_id 的新模式已本地实现持久快照与 24 小时原响应重放，见下节。主动 run 未实现。原文客户端已迁移到精确路径，见 §7.1 与 SOURCE_PATH_VALIDATION.md；生产提供方配置和实例归属核验仍待完成，生产开关未批准。
+带 recall_id 的新模式已本地实现持久快照与 24 小时原响应重放，见下节。主动 run 的隔离读接口已实现，见下文。原文客户端已迁移到精确路径，见 §7.1 与 SOURCE_PATH_VALIDATION.md；生产提供方配置和实例归属核验仍待完成，生产开关未批准。
 
 ### 4.1.1 普通生成显式绑定（2026-10-20 本段）
 
@@ -93,7 +93,7 @@ turn_start 可传 recall_id，MCP 随后逐请求带 X-Ember-Recall-Id 和 X-Emb
 
 同 recall_id 同业务内容的 start 在 24 小时内重放原响应，不重新选材或记账；异内容 409 id_conflict。计算/记账恢复中返回 202 recall_in_progress / recall_recovery_pending，Retry-After: 2；app 必须检查状态，不能把 202 当成成功空召回。未提交结果的中断返回 409 recall_outcome_unknown；旧版无快照登记返回 409 recall_snapshot_unavailable；未知 ID 返回 404 unknown_recall。
 
-正文从首次结果提交开始保留 24 小时，读取不续期；到期重复 start 和 response 查询返回 410 response_expired，默认 refs 仍可读，旧 ID 不可复用。启动/查询和每分钟后台任务清理临时正文；身份、引用、原有记忆及聊天保留。读取不恢复旧工具权限。主动 run 尚不支持，不因带 run 头而回退普通槽。
+正文从首次结果提交开始保留 24 小时，读取不续期；到期重复 start 和 response 查询返回 410 response_expired，默认 refs 仍可读，旧 ID 不可复用。启动/查询和每分钟后台任务清理临时正文；身份、引用、原有记忆及聊天保留。读取不恢复旧工具权限。主动 run 使用专用头，不因绑定失败而回退普通槽。
 
 ### 4.2 POST /ember/hooks/turn_end
 
@@ -110,114 +110,28 @@ turn_start 可传 recall_id，MCP 随后逐请求带 X-Ember-Recall-Id 和 X-Emb
 
 响应 200：`{"ok": true, "session_id": "…", "turn": 7}`
 
-## 5. MCP 工具组（消费方：模型的工具循环，经 app 转发）
+## 5. 普通 MCP 工具
 
-端点：`POST /mcp/`（MCP Streamable HTTP；建议带尾斜杠，`/mcp` 会被 307 重定向一次）。工具清单 `tools/list` 返回六件；以下为语义契约。
+POST /mcp/ 使用 MCP Streamable HTTP，tools/list 返回 22 个工具。schema 由运行代码生成，本地完整字段与成功/失败回执可运行 scripts/export_tool_contracts.py 导出。所有普通生成调用沿用 X-Ember-Recall-Id / X-Ember-Tool-Call-Id 绑定，写入不借用其他窗口的活动槽。
 
-- 实例路由对 MCP 同样生效，且 `X-Heart-Instance` 头要带在**每个** MCP 请求上（initialize / tools/list / tools/call——路由逐请求解析，不是握手时定死）
+| 工具 | 用途 |
+|---|---|
+| write_event / write_promise / revise_memory_event | 正式写 Event、约定及冷静期订正 |
+| read_memory_source / search_memory | 完整原文下钻、主动检索 |
+| pin_memory / unpin_memory / list_memory_pins / merge_memory_events | pin 分类管理及 10 分无 due 同义约定合并 |
+| read_memory_slices / search_memory_slices | 原文切片下钻及检索 |
+| write_memory_knowledge / review_memory_knowledge | 正式提炼认知/规律、审阅相似知识 |
+| set_knowledge_pin / list_memory_knowledge | 知识 pin 与清单 |
+| get_memory_extraction_batch / finish_memory_extraction_group | 可继续或停止的提取材料批次及结论 |
+| list_pending_promises / process_promise | 曝光约定处理及 pinned promise 主动 log |
+| revise_entity_summary / read_entity_events | Entity 摘要订正及成员下钻 |
+| read_relationship_point | 查询要点来源 Event 和时间 |
 
-### 5.1 create_memory_event
+详细内容和来源要求见下文 2026-11-01 各节。create_memory_event / write_event_from_slices 已取消，不再作为 MCP 名称；旧 Sleep 的 list_memory_groups / finish_memory_group / extract_memory_entity / set_slice_recall_state 不公开，由独立供料、后台维护和普通工具承担相应职责。原文回执不写入持久工具账；读取在进程重启后可能返回 result_not_retained。
 
-记录一条经历。**只在出现具体的、值得留存的经历时调用**；同一条经历只调一次（重复调用会产生重复记忆）。
+## 6. Sleep 边界
 
-必填参数：`event`（对象：summary/participants/objects/context/core/outcome/state/affect/significance/details/key_quotes）、`recall_routes`（召回线索）、`quote_spans`（出处句对：起尾句逐字摘自原文；**span 要还原整个场景**——从对话里刚谈到这个话题起，到话题结束止，不只圈提供信息量的那句话）。
-
-**2026-10-17 起两个格式纪律（写入端硬校验）**：
-
-- `significance` = `"N：一句话理由"`（N∈1-10：10=重大转折/永远要记；8-9=有实质影响的进展发现决定；5-7=有内容偏背景；1-4=琐碎，**不要调用本工具**——随口带过的偏好、习惯、单点琐事不写成长期记忆）。该分数是简报分层的依据
-- `participants`：对话双方在场时双方都算——ai 说过话或被涉及就带上 `"ai"`，不要只写 user
-
-校验与回执：
-
-- `quote_spans` 全部定位不上 → **整条拒绝**（`failed`，指路重摘）——双盲纪律
-- 出处定位先找原文子串，未命中时只保留文字和数字作连续子串匹配，忽略 emoji、Markdown 标记、标点和空白。容错只能唯一命中一条原文消息；仍保存该真实消息的坐标，不改写原文、不用语义相似或错字匹配。精确命中优先于容错候选。
-- 容错有多个消息候选 → `failed / quote_ambiguous`，返回具体 `field`（如 `quote_spans[0].end_quote`）、`candidate_count` 和扩长摘录的建议；整条写入在落盘前拒绝，不能任选第一条或当作单端缺失降级。
-- `key_quotes` 逐字核对，对不上的条目丢弃并进 `dropped_quotes`（记忆本体已保存，不因摘录出入重试）
-- 出处（会话/轮次/heart 钉子/message_id）由进行中的一轮自动关联，模型无需提供
-
-成功回执：`{"status": "created", "event_id": "EVT-…", "summary", "raw_ref", "route_count", "recall_cues" [, "dropped_quotes"]}`
-
-#### 工具失败回执（2026-10-23）
-
-MCP 的 schema 校验失败，以及业务返回 `status=failed`、`status=rejected` 或 `ok=false` 时，外层 `CallToolResult.isError=true`。`pending`、`in_progress`、`not_archived` 等状态本身不被改成失败。已有回执正文与稳定调用身份的重放规则保留。
-
-写记忆的参数错误保留 `status=failed` / `error`，补充 `code=invalid_tool_arguments`、精确 `field` 和 `hint`。例如：
-
-```json
-{
-  "status": "failed",
-  "code": "invalid_tool_arguments",
-  "field": "recall_routes[0].cue",
-  "error": "validation failed: recall_routes[0].cue 必须是非空字符串",
-  "hint": "请填写非空的召回关键词，不能只含空白字符。"
-}
-```
-
-层级放错会指明 `event.recall_routes` 应移到顶层，不自动搬移或补全模型参数。原文读取失败保留各自的 `source_*` code 并提供处理建议；只有可用原文中的摘录不匹配才返回 `quote_not_found`，其 `field=quote_spans`。未配置、鉴权失败、会话/路径不明均不能通过改写摘录来绕过。
-
-验收记录见 TOOL_ERROR_RELIABILITY.md（本地历史记录）。
-
-### 5.2 read_memory_source
-
-翻一条记忆对应的对话原文（只读）。只在需要核对原话细节时调用。语料 = 内存会话 ∪ 向后端原文接口按需拉取（用完即弃，本地不落盘）。
-
-- 成功：`{"status": "ok", "event_id", "turns", "context_expanded", "transcript", "truncated"}`——**原文上下文扩展（10-17）**：事件覆盖单轮时自动扩 ±3 轮（前后不足就有多少拉多少，`context_expanded=true`）；真区间按区间
-- 不可得：`{"status": "not_archived", "reason": …}`（原文接口未配置/区间拉不到）；id 未知 → `not_found`
-- superseded（被修正）的事件也可读——显式翻看不是自动召回
-
-### 5.3 revise_memory_event（冷静期修正）
-
-修改一条**自己写下的**记忆。只在用户当场指出记忆内容与事实不符时调用。
-
-- **冷静期** = 该记忆尚未进入夜间维护（sleep 维护）→ 直改本尊（此时派生物未建立，改了零残留）
-- **过冷静期** → `{"status": "rejected", "reason": "…已定稿…请用 create_memory_event 写更正记忆"}`——写更正事件判 resolves，夜间维护会自动让旧记忆退出召回
-- 可改字段（叙述类）：`summary / participants / objects / context / core / outcome / state / affect / significance / details` + `recall_cues`（整体重设召回线索）
-- 锁死字段（显式传入即 `failed`）：`key_quotes / quote_spans / turn_refs / raw_ref / source_ref`——摘录与原文的绑定一动双盲核对就废，出处一动回指就断
-- 无修改痕迹记录（改了就改了）
-
-回执：`{"status": "revised", "event_id", "revised_fields": [...]}`
-
-### 5.4 search_memory（主动检索）
-
-按内容主动检索记忆库——**自动浮现之外的另一条路**：浮起有竞争有衰减，捞起无竞争无衰减。想确认某件事、找一段说不清位置的经历、按时间回顾时调用。
-
-参数：`query`（必填，自然语言，不要求原文用词；**可含多个关键词**，空格/逗号分隔——语义主模态整串理解，关键词降级兜底时取并集并按命中数排序）+ `time_range`（可选，支持「昨天/上周/最近3天」相对表达或 ISO 起止 `a..b`）+ `k`（可选，默认 3 上限 5，超限钳制并告知——检索是定位器，超限说明 query 太泛）。
-
-响应要点：
-
-- **实体卡**（若查 query 与某实体的 summary 语义共振）：`{entity_id, name, status, summary, member_count, recent[3]}`——印象层先出，细节按 id 下钻
-- **items**：`{event_id, summary, ingest_time, status, entity_id}`——**全库可达**：`status` 如实标注 `normal / faded（淡忘中）/ superseded（+`superseded_by` 修正者指针）`
-- **relation + guidance**：命中形态 single / cluster / chain（chain = 共享同一实体）与对应行动建议；没有找到如实说记不清
-- **检索即提取**：命中入提取账（与召回同权）——刷新遗忘计时器，淡忘中的条目即时解除收紧（note 会告知「已唤醒 N 条」）
-- 向量服务不可达时自动降级关键词检索（note 告知）；`SEARCH_HIT_FLOOR=0.30` 为 baseline 待标定
-
-### 5.5 pin_memory / unpin_memory（钉住，2026-10-17）
-
-把一条记忆钉住/取消钉住（幂等）。**只在用户明确要求「钉住」「记住这事别忘」时调用**。
-
-联动：钉住的**必进简报（原文层）**且**自动召回不再浮现**（已常驻在场，再浮是复读；search 主动检索不受影响）。HTTP 等价端点：`POST /ember/memory/pin` / `POST /ember/memory/unpin`。
-
-回执：`{"status": "ok", "event_id", "pinned": true/false [, "already"|"was_pinned"]}`
-
-## 6. Sleep正式产出与后台维护
-
-关系判断、归类、资格标注由独立后台处理，不由App Sleep重复执行。Sleep读取冻结待办，App AI正式提取Entity、写Event/认知/规律，审阅合并/补写/维持并评分，以及pin/unpin；之后继续沉淀与dream。
-
-### 6.1 POST /ember/sleep/knowledge/start
-
-请求`{sleep_id,session_id}`，返回冻结的`groups`、`knowledge`、`existing_outputs`和工具schema。开始前统一聚合待办，普通补充不重开已处理方向。完整材料格式见[MEMORY_LIFECYCLE_SPEC.md](MEMORY_LIFECYCLE_SPEC.md)。
-
-### 6.2 POST /ember/sleep/knowledge/tool
-
-请求`{sleep_id,session_id,call_id,name,arguments}`。按call_id幂等；必须先读原文再正式写入，来源变动拒绝。普通MCP不提供正式提炼、认知/规律评分及pin管理工具。
-
-### 6.3 POST /ember/sleep/knowledge/finish
-
-请求`{sleep_id,session_id,state:completed|stopped}`。completed要求本批处理完；中断保留未处理材料。Sleep期间后台新证据暂存，结束后归组；旧Sleep重放不会拿到未来的新待办。
-
-### 6.4 退役入口
-
-`GET /ember/sleep/link/batches`、`GET /ember/sleep/link/progress`、`POST /ember/sleep/link/submit`和`POST /ember/sleep/structure/run`均返回HTTP 410及`legacy_sleep_step_retired`，没有写入副作用。
+Sleep 仅保留做梦与沉淀。POST /ember/sleep/knowledge/start、/tool、/finish 退役，返回 410 legacy_sleep_step_retired；原有 GET /ember/sleep/link/batches、/progress 以及 POST /ember/sleep/link/submit、/ember/sleep/structure/run 同样 410，无写入副作用。提取、约定处理改用普通 MCP，不需要 sleep_id 或 Sleep 专属上下文。
 
 ### 6.5 POST /ember/sleep/sediment/evidence
 
@@ -258,9 +172,9 @@ MCP 的 schema 校验失败，以及业务返回 `status=failed`、`status=rejec
 
 ### 7.1 原文提供接口（精确路径）
 
-2026-10-23 兼容修正：日常旧 hook 模式无需 recall_id 也可使用原始逐条编号，由精确路径提供方对照本轮真实锚点核验；不使用派生 max-reply 或范围推断。混合分支的历史候选可在 64 次请求预算内分割校验并保留合法部分，连接/鉴权错误不分割重试。span/出处/key_quotes 复用同份语料。失败回执区分 source_unconfigured、source_unreachable、source_auth_failed、source_instance_unknown、source_session_unknown、source_identity_missing、source_path_unknown、source_unavailable、source_read_limit 与 quote_not_found；不再统一要求重摘。详见 QUOTE_SOURCE_COMPAT_FIX.md。
+2026-10-23 兼容修正：日常旧 hook 模式无需 recall_id 也可使用原始逐条编号，由精确路径提供方对照本轮真实锚点核验；不使用派生 max-reply 或范围推断。混合分支的历史候选可在 64 次请求预算内分割校验并保留合法部分，连接/鉴权错误不分割重试。span/出处/focus 复用同份语料。失败回执区分 source_unconfigured、source_unreachable、source_auth_failed、source_instance_unknown、source_session_unknown、source_identity_missing、source_path_unknown、source_unavailable、source_read_limit 与 quote_not_found；不再统一要求重摘。详见 QUOTE_SOURCE_COMPAT_FIX.md。
 
-原文仍只存 App 消息树，Ember 按需读取、用完即弃，不持久保存正文。所有远程消费方已切到：
+App 消息树是原文来源；精确下钻按需拉取，增量流的切片副本与派生缓存保存在 Ember 实例目录。所有远程消费方已切到：
 
 ```text
 GET {EMBER_SOURCE_URL}/api/source/path?session_id={sid}&message_ids=71,75,80,82
@@ -278,14 +192,9 @@ X-Heart-Instance: <Ember 实例名>
 
 配置仍为 `EMBER_SOURCE_URL`、`EMBER_SOURCE_TOKEN`、`EMBER_SOURCE_TIMEOUT`（秒，默认 8）。生产提供方必须核验实例与会话/库的归属；仅发送 `X-Heart-Instance` 不等于源端已经执行隔离。当前 App 接口忽略该头，真实多实例生产验收尚未关闭，配合清单见 PRODUCTION_PREREQUISITES.md。
 
-## 8. 简报（briefing，消费方：app 截断编排）
+## 8. briefing
 
-**2026-10-17 设计夜定稿。截断驱动、拼装式零 LLM**：上下文丢头留尾式截断，每次截断时 app 调 refresh 刷新简报并注入留下上下文的开头；旧简报随头部丢弃，新简报自包含。断线重进/新会话用 GET 取。
-
-- `POST /ember/briefing/refresh`：体 `{"session_id", "keep_from_message_id"}`（现场起点的后端消息行 id——现场区间记忆不进，原文已在上下文；ember 经账本换算，app 不接触内部轮号）。返回 `{"status": "ok", "text", "chars", "stats": {…}}`，`text` 即注入文本
-- `GET /ember/briefing`：取当前简报；从未刷新 → `{"status": "empty"}`
-- 入选/分层/预算/去重全规则见 **BRIEFING_SPEC.md**（要点：pin 与 significance=10 必进给原文层；72h 新增 8-9 给 core、1-7 给 summary 一句；召回过的旧记忆只放最相关一条；现场与观察事件不进；预算 6000 字从低层砍，pin/10 永不砍；简报注入计一次在场——2h 内召回走轻量行）。每条条目显式标注 `[日期：YYYY-MM-DD]`（取存储的 event_time；缺失/null/空白显示 `[时间缺失]`，不可解析显示 `[时间解析失败]`，不以 ingest_time 兜底）。普通写记忆的 event_time 目前是写入时刻；已有缓存在下次正常 refresh 后采用新格式
-- 钉住端点：`POST /ember/memory/pin` / `POST /ember/memory/unpin`（体 `{"event_id"}`，幂等；联动见 §5.5）
+POST /ember/briefing/refresh 显式刷新，GET /ember/briefing 只读冻结快照。refresh 会等待原文增量兜底、时间线压缩和抽点，超时需覆盖实际模型重试时长；拼装本身不调 LLM。精确字段与五档规则见下文“五档 briefing 快照”，完整生命周期见 MEMORY_LIFECYCLE_SPEC.md。对话中途不自动替换快照。
 
 ## 9. 坐标系说明
 
@@ -302,10 +211,8 @@ X-Heart-Instance: <Ember 实例名>
 | EMBER_INSTANCES | 实例清单，逗号分隔（缺省 `default`）；清单外实例 404 |
 | EMBER_DATA_DIR | （旧变量）未设 EMBER_DATA_ROOT 时作为根目录回落；默认 `<项目>/data/` |
 | EMBER_SOURCE_URL / EMBER_SOURCE_TOKEN / EMBER_SOURCE_TIMEOUT | 精确路径原文接口（Deliz `/api/source/path`；实例归属/鉴权部署核验见 §7.1） |
-| EMBER_EMBED_BASE_URL / EMBER_EMBED_API_KEY / EMBER_EMBED_MODEL | 向量服务 |
-| ZHIPU_API_KEY / EMBER_SLEEP_MODEL | 观察提炼/合并等任务的 LLM |
-| EMBER_OWNER_NAME | 观察提炼注入 prompt 的用户称呼（不配写 "user"，见 §6 观察式记忆） |
-| EMBER_BRIEFING_BUDGET | 简报字符硬顶（缺省 6000，见 §8） |
+| config/models.json 中各 purpose 的 key_env | 模型与端点集中配置，key 只填对应 .env 变量 |
+| EMBER_LIFECYCLE_CONFIG | 非秘密阈值/预算配置文件，缺省 config/lifecycle.json |
 
 
 ## 主动 run 隔离接入（ember-runs/1）
@@ -337,7 +244,7 @@ Ember 在 Event 落库后后台拉取，以及 POST /ember/briefing/refresh 时�
 
 ### 约定处理（2026-11-01）
 
-list_pending_promises 返回真正进过上下文而尚未写 log 的约定及其原文 span、时间、进入路径；process_promise 要求 event_id 和非空 log，可选 status=done/dropped、due=带时区 ISO 日期时间或 null。未曝光约定不能通过该工具修改。写 log 后才确认处理完；状态不变也必须写。追加 log 与曝光回执可在重启后核对恢复。
+list_pending_promises 返回真正进过上下文而尚未写 log 的约定及其原文 span、时间、进入路径；process_promise 要求 event_id 和非空 log，可选 status=done/dropped、due=带时区 ISO 日期时间或 null。普通未 pin 的未曝光约定不能通过该工具修改；pinned promise 可主动处理。写 log 后才确认处理完；状态不变也必须写。追加 log 与曝光回执可在重启后核对恢复。
 
 到期仍 open 的约定追加在 briefing 末尾，不受预算裁切；未来到期或无 due 只按线索浮现，10 分无 due 写入时默认 pin。低分（默认 <=7）完结后 Event 与其独占的切片退出自动召回，主动下钻仍可达。按 config/lifecycle.json 的时区每日零点检查到期满 lapse_days 的 open 约定，写入 lapsed log；启动补算。Windows 需安装 requirements.txt 中的 tzdata。待处理数量只在刷新 briefing 时更新，普通轮次不替换 briefing。
 
@@ -377,7 +284,7 @@ POST /ember/briefing/refresh 收 session_id、keep_from_message_id，可附精�
 
 近期层使用 total_chars 扣除不可砍部分后的剩余预算，从最低分、最旧条目开始移除；不会硬截 core。关系、pin、知识及到期约定保持各自既定规则；最后的到期约定和待处理数量不砍。快照带 revision / refreshed_at / 分层统计，完整文本原子保存。GET /ember/briefing 只读该快照，不动态拼接新 pin 的知识；无快照为 empty，损坏为 failed / briefing_snapshot_unreadable。对话中不替换已有 briefing。
 
-任何被 briefing 带入的约定（包括 pin）都会记曝光；list_pending_promises 读取曝光时的确切对话消息，已确认回复按同一 generation 补齐，不用 max-reply 推断。来源不可达会明确标注；这些原文结果只作易失工具响应，不落持久工具回执。
+未 pin 且被 briefing 带入的约定会记曝光；list_pending_promises 读取曝光时的确切对话消息，已确认回复按同一 generation 补齐，不用 max-reply 推断。来源不可达会明确标注；这些原文结果只作易失工具响应，不落持久工具回执。
 
 修正：write_event / write_promise 可选 supersedes 指向被取代的旧日常、项目、约定；旧内容保留，以 superseded_by 与取代关系退出自动召回。新旧任一端为 relationship 都拒绝此参数；关系只写新的接续。未知目标在任何写入前拒绝。
 

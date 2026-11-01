@@ -1,4 +1,4 @@
-"""Local-only authoring of typed Sleep materials. No external model calls."""
+"""Knowledge review with source evidence; independent of Sleep context."""
 import json
 from pathlib import Path
 from .generations import fingerprint
@@ -6,32 +6,16 @@ from .knowledge import KnowledgeStore
 from .memory_lifecycle import Lifecycle
 
 
-def group(service, gid, context):
-    if context is None or context.get('kind')!='sleep':
-        from .extraction import Extraction
-        extraction=Extraction(service);row=extraction.live_group(gid)
-        if not row['payload']:
-            raise ValueError('extraction_group_not_delivered')
-        payload=json.loads(row['payload'])
-        return {'group_id':gid,'kind':'knowledge_review','sources':row['sources'],
-                'material':{'memory_ids':[r['memory_id'] for r in payload['similar_knowledge']]}}
-    if gid not in context.get('group_ids',set()):
-        raise ValueError('sleep_group_required')
-    store=KnowledgeStore(service.store.root,service.source_instance)
-    item=next((g for g in store.groups(False) if g['group_id']==gid),None)
-    if item is None:
-        raise ValueError('group_missing')
-    frozen=context.get('frozen_sources',{})
-    if any(s['slice_id'] not in frozen or frozen[s['slice_id']]!=s for s in item['sources']):
-        raise ValueError('group_changed_during_sleep')
-    store.read_sources(item['sources'])
-    snapshot=context.get('snapshot_groups',{}).get(gid)
-    if snapshot:
-        item=dict(item,sources=snapshot['sources'],material=snapshot.get('material',item.get('material',{})))
-        store.read_sources(item['sources'])
-    if not {s['slice_id'] for s in item['sources']}<=context.get('read_source_ids',set()):
-        raise ValueError('source_not_read_in_sleep')
-    return item
+def group(service, gid, context=None):
+    from .extraction import Extraction
+    extraction=Extraction(service);row=extraction.live_group(gid)
+    with extraction.db() as conn:
+        delivered=conn.execute('SELECT 1 FROM parts WHERE group_id=? AND delivered=1',(gid,)).fetchone()
+    if not row['payload'] or not delivered:
+        raise ValueError('extraction_group_not_delivered')
+    payload=json.loads(row['payload'])
+    return {'group_id':gid,'kind':'knowledge_review','sources':row['sources'],
+            'material':{'memory_ids':[r['memory_id'] for r in payload['similar_knowledge']]}}
 
 
 def score(args):
@@ -145,25 +129,3 @@ def patch_members(service,source,target,event_id=None):
         if (source and source in refs) or eid==event_id:
             updates[eid]={'entity_refs':list(dict.fromkeys([r for r in refs if r!=source]+[target]))}
     service._patch_event_rows(updates)
-
-
-def extract_entity(service,args,context):
-    from .entity import Entity
-    item=group(service,args['group_id'],context)
-    material=item.get('material',{})
-    allowed={r['id'] for r in material.get('items',[]) if r['kind']=='event'}
-    if item['kind']!='entity_extract' or not set(args['event_ids'])<=allowed:
-        raise ValueError('entity_events_outside_material')
-    if not args['event_ids']:
-        raise ValueError('entity_members_required')
-    eid='ent_'+fingerprint([service.source_instance,args['name'].strip(),sorted(args['event_ids'])])[:16]
-    existing=service.entity_store.find_by_name(args['name'])
-    if existing:
-        eid=existing.entity_id
-    ent=Entity(entity_id=eid,name=args['name'].strip(),summary=args['summary'],
-        aliases=list(dict.fromkeys(args.get('aliases',[])+(existing.aliases if existing else []))),
-        directions=existing.directions if existing else [],provenance_refs=['app-sleep:'+args['group_id']])
-    service.entity_store.upsert(ent);service.entity_store.save()
-    for event_id in args['event_ids']:
-        patch_members(service,None,eid,event_id)
-    return {'status':'created','entity_id':eid,'member_event_ids':args['event_ids']}

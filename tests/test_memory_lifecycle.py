@@ -18,7 +18,7 @@ from ember.llm import MockLLMClient
 from ember.entity import Entity
 from ember.models import Event
 from ember.turn_slices import TurnSliceStore
-from ember.sleep_knowledge import SleepKnowledge
+from tests.legacy_sleep_fixture import SleepKnowledge
 
 
 class MemoryLifecycleTests(unittest.TestCase):
@@ -85,7 +85,7 @@ class MemoryLifecycleTests(unittest.TestCase):
         for eid,name in [('one','Ember'),('two','Ember system')]:
             self.service.entity_store.upsert(Entity(eid,name,summary='Memory system'))
         self.service.entity_store.save()
-        from ember.sleep_review import patch_members
+        from ember.knowledge_review import patch_members
         patch_members(self.service,None,'one','A')
         materials=[r for r in catalog(self.service) if r['kind']=='entity']
         self.assertEqual(next(r for r in materials if r['id']=='one')['events'][0]['id'],'A')

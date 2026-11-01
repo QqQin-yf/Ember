@@ -7,78 +7,13 @@ HTTP入口与通用字段见[API.md](API.md)。本页集中保存briefing、引�
 
 ## Briefing
 
-> 交付对象：Deliz 侧（app 编排）。ember 侧实现已完成，本文是契约全文。
-> 简报 = 拼装式（ember 查表组装，**零 LLM、零 token 成本**），截断驱动。
+2026-11-01：当前契约以 [API.md](API.md#8-briefing) 和 [MEMORY_LIFECYCLE_SPEC.md](MEMORY_LIFECYCLE_SPEC.md#6-promise-与-briefing) 为准。
 
-### 1. 它是什么、什么时候发生
+POST /ember/briefing/refresh 接收 session_id、keep_from_message_id，可附精确 context_message_ids；截断、新会话、断线重进需要新简报时调用。先从共享游标拉原文增量，等待尚未完成的关系压缩/抽点，再拼装五档并原子保存 revision、refreshed_at 和完整文本。拼装不调用 LLM，前置等待可能调用模型，应设置足够超时。
 
-- 用户上下文采用**丢头留尾式截断**：截断时头部丢弃、尾部（最近一天左右的对话）留在上下文。
-- 旧简报文本在头部——**随截断一起丢掉**。所以每次截断时生成的新简报必须**自包含**（重新带上所有还活着的认知），app 拿到后注入到留下的上下文开头。
-- 断线重进/新会话开场：app 随时可用 GET 接口取当前简报重新注入。
+五档依次为关系时间线、其他 pinned Event 原文、72 小时非关系/非 promise（8–10 分 core / 1–7 分 summary）、pinned 认知/规律、到期 open 约定和待处理数量。现场来源完整保留则 Event 不进。未 pin 的 10 分无永久常驻特权，旧“召回次数最高一条”取消；pinned promise 不计曝光及待处理。
 
-### 2. 接口
-
-#### 2.1 POST /ember/briefing/refresh（截断时调用）
-
-请求体：
-
-```json
-{"session_id": "main", "keep_from_message_id": 1024}
-```
-
-- `session_id`：必填。
-- `keep_from_message_id`：**现场起点的后端消息行 id**——截断后留在上下文里的最早那条消息的 seq。现场区间的记忆一律不进简报（原文就在上下文里，带了就是复读）。ember 经 turn_ledger 换算成起点轮（app 不接触内部 turn 坐标，与 API.md §9「对外只有 message_id 一套」一致）；换算不到（该消息没进过账本）→ 缺省同 0 = 不做现场排除（保守多带）。
-  - 现场判定口径（2026-10-17 修）：只看**本会话**的事件，且以**经历区间**（turn_spans，内容真实所在轮次）是否伸进保留窗口为准——记忆可以在很新的轮次里写下很旧的事，出生轮次（turn_refs）不作数（turn_span.py 2026-10-12 裁决：出生时刻不冒充经历时刻）；区间未回填 = 未知出处，不算现场。
-
-响应 200（`text` 就是注入文本，直接贴上下文开头）：
-
-```json
-{"status": "ok",
- "text": "◆ [10-15] ……\n• [10-17] ……",
- "chars": 2381, "session_id": "main",
- "stats": {"pinned": 1, "sig10": 1, "new72": 8, "recalled_top": "EVT-014-ab12cd",
-            "dropped": {"core": 0, "summary": 2}}}
-```
-
-- `text` 是**纯条目列表，无标题行**（2026-10-18 momo 拍板）——标题（如「近况」）由 app 注入时自己加，ember 不替 app 定文案。
-- 每条条目明确标注 `[日期：YYYY-MM-DD]`，同年也保留年份。`event_time` 缺失、null 或空白时显示 `[时间缺失]`；存在但不可解析时显示 `[时间解析失败]`，不使用写入时间兜底、不猜日期（2026-10-24）。该日期来自存储的 `event_time`；普通写记忆目前将其设为写入时刻，不保证补记历史事件的实际发生日期。已有缓存由下一次正常 refresh 更新，不因读取而重新选材或记账。
-
-#### 2.2 GET /ember/briefing（取当前简报）
-
-返回最近一次 refresh 的结果原样；从未刷新过 → `{"status": "empty"}`。
-
-#### 2.3 钉住
-
-- 工具：前端 AI 的 `pin_memory` / `unpin_memory`（用户明确说「钉住」时调）。
-- HTTP：`POST /ember/memory/pin`、`POST /ember/memory/unpin`，体 `{"event_id": "..."}`，幂等。
-- 联动：钉住的**必进简报（原文层）**且**自动召回不再浮现**（search 主动检索不受影响）。
-
-### 3. 入选与分层（ember 拼装规则，app 无需关心，列出供理解）
-
-| 类 | 入选 | 层次 |
-|---|---|---|
-| pin + significance 10 | 必进（现场除外） | **原文**：core + ±3 轮原文（事件是真区间则按区间；单句扩 ±3 轮，不足有多少拉多少；原文不可达退 key_quotes） |
-| 72h 新增（现场外） | 都要 | significance 8-9 → **core**；1-7 → **summary 一句** |
-| 召回过的旧记忆 | **只放最相关一条**（被召回次数最多，平局取最近；简报在场不计入召回次数） | core |
-| 现场尾部（本会话、经历区间 ≥ 起点轮） | **不进** | —— |
-| 观察事件（origin=observe） | **不进** | ——（习惯不是「正在进行」） |
-
-- 层次依据 = 写入时前端 AI 标的 `significance`（**2026-10-17 起格式为 `"N：一句话理由"`，N∈1-10**，写入端硬校验）。旧事件无数字前缀按 5 计。
-- 预算 **6000 字**（`EMBER_BRIEFING_BUDGET` 可调）：超了从低往高砍——先砍 summary 行，再按 significance 从低砍 core 行；**pin 和 10 分永不砍**。`stats.dropped` 如实报砍了几条。
-- 去重：同一事件在一份简报里只出现一次（类间取最高层）。
-
-### 4. 与召回的去重（ember 内部已实现，app 无需动作）
-
-- 简报注入 = 一次「在场」：简报带过的事件记入在场账（ledger route=briefing），**之后 2h 内被召回时只走轻量行报到**，不重复展开。
-- 钉住的事件：永久不自动浮现（既有裁决），简报是它们唯一的常驻出口。
-
-### 5. app 侧要做的
-
-1. 截断动作处：取留尾的起始消息 seq（`keep_from_message_id`）→ 调 `POST /ember/briefing/refresh` → 把 `text` 注入留下上下文的开头（标注来源「近况简报」即可）。
-2. 新会话/断线重进：调 `GET /ember/briefing`，非 empty 就注入。
-3. 用户在 UI 钉/取消钉记忆（如果做 UI 的话）：调 pin/unpin 端点。
-4. 前端 AI 的写入行为有变：`significance` 必须是 `"N：理由"` 格式（写入端会拒），participants 别漏 ai。
-
+GET /ember/briefing 只读冻结快照；未创建返回 empty，损坏返回 briefing_snapshot_unreadable。对话中不替换旧快照。App 应将 refresh 的完整结果注入截断后上下文开头，并消费 hooks 的临时召回和 system_reminders；App 原文增量契约见 API.md。
 
 <a id="recall-refs"></a>
 

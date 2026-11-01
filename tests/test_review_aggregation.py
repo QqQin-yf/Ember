@@ -10,7 +10,7 @@ from ember.turn_slices import TurnSliceStore
 from ember.service import EmberService
 from ember.store import EmberStore
 from ember.llm import MockLLMClient
-from ember.sleep_knowledge import SleepKnowledge
+from tests.legacy_sleep_fixture import SleepKnowledge
 from ember.memory_maintenance import catalog, knowledge_reviews
 
 

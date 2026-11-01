@@ -186,7 +186,7 @@ def validate_result(result, payload):
 
 
 def apply_result(service,payload,output):
-    from .sleep_review import patch_members
+    from .knowledge_review import patch_members
     life=Lifecycle(service.store.root,service.source_instance)
     store=KnowledgeStore(service.store.root,service.source_instance)
     known={r['id']:r for r in payload['materials']}

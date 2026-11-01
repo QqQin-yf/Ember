@@ -2,8 +2,8 @@ import json
 import unittest
 from unittest.mock import patch
 
-from ember.sleep_knowledge import SleepKnowledge
-from ember.knowledge_tools import append_recall, dispatch, tool_specs
+from tests.legacy_sleep_fixture import SleepKnowledge
+from tests.legacy_knowledge_tools import append_recall, dispatch, tool_specs
 import tests.test_pool_knowledge as pool_fixture
 
 
@@ -104,7 +104,7 @@ class SleepKnowledgeTests(unittest.TestCase):
     def test_uncertain_write_never_reexecutes(self):
         self.stage.start(self.identity)
         self.read()
-        with patch('ember.sleep_knowledge.dispatch',side_effect=RuntimeError('crash after acceptance')) as execute:
+        with patch('tests.legacy_sleep_fixture.dispatch',side_effect=RuntimeError('crash after acceptance')) as execute:
             first=self.call('write_memory_knowledge',self.args(),'write')
             second=self.call('write_memory_knowledge',self.args(),'write')
         self.assertEqual(first['code'],'sleep_tool_outcome_unknown')

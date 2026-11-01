@@ -92,3 +92,5 @@ python -B -X utf8 scripts/check_memory_health.py --data-dir 'D:\your-heart\data\
 修正 8：对应《给 Codex 的修正》第 8 条。时间线用独立 SQLite 待办记录关系写入、pin 变化、失败重试期限；启动只恢复扫描一次，空闲 tick 不遍历 Event，不 synchronize。待办版本防止模型执行期间的新写入被清掉，独立数据库避免模型长事务阻塞写入通知。
 
 8. 独立提取：对应《Briefing 与提取工具》第 2 节、《原文切片调整》第 5.1 节。新增无上级有信息量切片的向量+LLM 归组、持久批次与结论确认；可停、重取、按字数分批，超限单组无损分段。开放普通 MCP 认知/规律写入和审阅，附相似知识；source_slice_ids 仍走成对 Event 写入工具。
+
+9. Sleep 清理：对应《Briefing 与提取工具》第 4 节及《整体流程》第 5 节。专属 knowledge HTTP 材料接口统一退役 410，移除生产 Sleep 材料模块与上下文 gate；旧协议回归仅保留为 tests 夹具，做梦及 sediment evidence 接口未改。重写 MEMORY_LIFECYCLE_SPEC.md，统一 README / API / briefing 协议和 22 项普通 MCP 实际回执导出。

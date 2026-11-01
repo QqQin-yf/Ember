@@ -125,3 +125,27 @@ class ExtractionTests(unittest.TestCase):
         self.assertEqual(self.queue.batch()['groups'],[])
         self.discover();new=self.queue.batch()['groups'][0]
         self.assertNotEqual(new['group_id'],part['group_id'])
+
+    def test_generation_bound_extraction_writes_and_durable_ack_without_raw_receipts(self):
+        source=self.source(1);self.discover()
+        with patch('ember.slice_recall.SliceEmbeddingConfig.load',return_value=self.config), \
+                patch('ember.slice_embedding.SliceEmbeddingClient.embed',return_value=[1.,0.]):
+            self.service.hook_turn_start('current','review past decisions',user_message_id=101,recall_id='extract')
+        def call(name,args,cid):
+            return self.service.sidecar_call_tool(name,args,recall_id='extract',tool_call_id=cid)
+        batch=call('get_memory_extraction_batch',{},'read-batch')
+        self.assertEqual(batch['status'],'ok',batch)
+        part=batch['groups'][0]
+        created=call('write_memory_knowledge',{'kind':'pattern','content':'A decision habit',
+            'recall_cues':['decisions'],'source_slice_ids':[source['slice_id']],'confidence':8},'write')
+        self.assertEqual(created['status'],'created',created)
+        args={'group_id':part['group_id'],'part_id':part['part_id'],'conclusion':'written',
+              'result_ids':[created['memory_id']]}
+        ack=call('finish_memory_extraction_group',args,'ack')
+        self.assertEqual(ack['state'],'completed',ack)
+        read_receipt=self.service.generations.call('extract','read-batch')
+        self.assertNotIn('concrete decision',read_receipt['result_json'] or '')
+        restarted=EmberService(EmberStore(self.tmp.name),MockLLMClient())
+        self.assertEqual(restarted.sidecar_call_tool('finish_memory_extraction_group',args,
+                         recall_id='extract',tool_call_id='ack'),ack)
+        self.assertEqual(Extraction(restarted).batch()['groups'],[])

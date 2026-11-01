@@ -432,28 +432,12 @@ async def _slice_recall_trace(request: Request) -> JSONResponse:
 
 # ---------- Sleep材料交付与退役入口 ----------
 
-async def _sleep_knowledge(request: Request) -> JSONResponse:
-    from ember.sleep_knowledge import SleepKnowledge
-    svc = _service_or_404(request)
-    if isinstance(svc, JSONResponse):
-        return svc
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({'status':'failed','code':'invalid_json'},status_code=400)
-    operation = request.path_params['operation']
-    method = {'start':'start','tool':'call','finish':'finish'}.get(operation)
-    if method is None:
-        return JSONResponse({'status':'failed','code':'unknown_operation'},status_code=404)
-    result = await asyncio.to_thread(getattr(SleepKnowledge(svc),method),body)
-    return JSONResponse(result)
-
 async def _retired_sleep_step(request: Request) -> JSONResponse:
     svc = _service_or_404(request)
     if isinstance(svc, JSONResponse):
         return svc
     return JSONResponse({'status':'retired','code':'legacy_sleep_step_retired',
-                         'hint':'Use Sleep knowledge materials; judgment and slice/knowledge indexing run independently.'}, status_code=410)
+                         'hint':'Use ordinary MCP extraction and promise tools; Sleep keeps dream and sediment only.'}, status_code=410)
 
 
 async def _sleep_sediment_evidence(request: Request) -> JSONResponse:
@@ -548,7 +532,7 @@ app = BearerAuthMiddleware(Starlette(
         Route("/ember/slices/jobs/{job_id}", _slice_ingestion_status, methods=["GET"]),
         Route("/ember/recall/slices/preview", _slice_recall_preview, methods=["POST"]),
         Route("/ember/recall/slices/{trace_id}", _slice_recall_trace, methods=["GET"]),
-        Route("/ember/sleep/knowledge/{operation}", _sleep_knowledge, methods=["POST"]),
+        Route("/ember/sleep/knowledge/{operation}", _retired_sleep_step, methods=["POST"]),
         Route("/ember/sleep/link/batches", _retired_sleep_step,
               methods=["GET"]),
         Route("/ember/sleep/link/submit", _retired_sleep_step,

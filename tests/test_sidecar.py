@@ -97,7 +97,7 @@ def _run_tests():
 
         print("== S1 轮前钩子：heart turn_id 记账映射 ==")
         r1 = service.hook_turn_start("sc1", "今天我们决定把 Ember 的传播模型改成 Route Search。",
-                                     heart_turn_id="t-900001")
+                                     heart_turn_id="t-900001", user_message_id=901)
         check("开轮 turn=1", r1["turn"] == 1)
         check("映射账本记下 heart 钉子",
               service.turn_ledger.heart_id_of("sc1", 1) == "t-900001",
@@ -122,19 +122,15 @@ def _run_tests():
         check("heart 钉子可从账本换算（梦通道地基）",
               service.turn_ledger.heart_id_of("sc1", 1) == "t-900001")
 
-        print("== S3 key_quotes 逐字核对：真话留下，编造丢弃 ==")
-        check("真话保留", any(q.get("text") == "决定把 Ember 的传播模型改成"
-                              for q in ev.key_quotes), str(ev.key_quotes))
-        r3 = service.sidecar_create_memory_event(write_args(
-            user_quote="决定把 Ember 的传播模型改成",
-            extra_ai_quote="这句从来没说过"))
-        check("编造句进 dropped_quotes",
-              len(r3.get("dropped_quotes", [])) == 1,
-              str(r3.get("dropped_quotes")))
+        print("== S3 focus 原话定位与拒绝编造 ==")
+        check("focus 内部解析为来源 ID", str(ev.focus) == "901", str(ev.focus))
+        fabricated=write_args();fabricated['event']['focus']='这句从来没说过'
+        r3 = service.sidecar_create_memory_event(fabricated)
+        check("编造 focus 给出可修正字段", r3.get('status')=='failed' and r3.get('field')=='event.focus', str(r3))
 
         print("== S4 轮后钩子：原文存档 + 翻原文读回 ==")
         reply1 = "好的，这个决定我记下了。"
-        e4 = service.hook_turn_end("sc1", reply1)
+        e4 = service.hook_turn_end("sc1", reply1, assistant_message_id=902)
         check("收轮成功", e4["ok"] is True and e4["turn"] == 1, str(e4))
         src = service.sidecar_read_memory_source(receipt["event_id"])
         check("旧无编号出处不冒充可读原文", src.get("status") == "not_archived", str(src)[:160])
@@ -188,11 +184,16 @@ def _run_tests():
         check("原工具与切片检索下钻工具齐全",
               names == {"write_event", "read_memory_source",
                         "revise_memory_event", "search_memory",
-                        "pin_memory", "unpin_memory", "read_memory_slices", "search_memory_slices"},
+                        "pin_memory", "unpin_memory", "read_memory_slices", "search_memory_slices",
+                        "write_promise", "list_pending_promises", "process_promise",
+                        "revise_entity_summary", "read_entity_events", "read_relationship_point",
+                        "list_memory_pins", "merge_memory_events", "get_memory_extraction_batch",
+                        "finish_memory_extraction_group", "write_memory_knowledge",
+                        "review_memory_knowledge", "set_knowledge_pin", "list_memory_knowledge"},
               str(names))
 
         print("== S11 hooks 与 MCP 共用召回/写入主路 ==")
-        started = service2.hook_turn_start("s_regress", "今天我们决定把 Ember 的传播模型改成 Route Search。")
+        started = service2.hook_turn_start("s_regress", "今天我们决定把 Ember 的传播模型改成 Route Search。", user_message_id=1001)
         check("hook 正常开轮", started["turn"] == 1)
         r11 = service2.sidecar_call_tool("write_event", write_args())
         check("MCP 显式写入 created", r11["status"] == "created", str(r11)[:160])

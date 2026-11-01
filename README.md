@@ -1,6 +1,6 @@
 # Ember
 
-旁路记忆服务，通过HTTP hooks和MCP提供写入、召回、来源下钻、briefing与Sleep正式产出。
+旁路记忆服务，通过HTTP hooks和MCP提供写入、召回、来源下钻、briefing与独立提取。
 对话和模型工具循环由App持有，Ember不代理聊天。运行要求Python 3.10+，依赖见requirements.txt。
 
 ## 启动
@@ -16,14 +16,16 @@ python sidecar.py
 
 ## 当前链路
 
-Event/Entity原有入口与原文切片向量入口并行。原文候选经过reranker，再按来源归属组织；认知/规律有独立召回及pin预算。
-Event/Entity最多持续在场三轮，临时召回不写入持久聊天记录。后台独立维护关系、归属、资格和待办，Sleep中由App AI正式提取、审阅、评分及pin/unpin。
-旧Sleep挂关系/结构维护HTTP入口只返回410，旧观察写入链已删除。历史记忆、关系、来源与retired route仍可读取，主动检索保留相应状态标注。
+Ember 提供 MCP + hooks。Event 按 daily / relationship / project / promise 分类；模型按原话或切片写入、pin、处理约定和独立提取。输入只算一次查询向量；Event 命中附 Entity summary，切片自身与上级分别过门槛，Direction 不参与自动召回。
+
+Event 落库后及 briefing 刷新时从共享游标拉原文增量，后台筛选、绑定新旧切片，维护主题、Entity 和只追加的关系时间线。提取队列只收无上级、有信息量切片，按字数分批，给结论才完成，可随时停。briefing 截断时保存五档冻结快照，普通轮次不替换。
+
+Sleep 只保留 App 的做梦与沉淀。Sleep 专属材料及旧 link / structure HTTP 入口均返回 410，生产代码不再要求 Sleep 上下文。详见下方生命周期说明。App 原文增量和 hooks 输出仍需由 App 侧适配；本分支提交不代表运行服务已升级。
 
 ## 技术文档
 
 - [API.md](API.md)：HTTP/MCP入口、鉴权、错误和数据字段。
-- [MEMORY_LIFECYCLE_SPEC.md](MEMORY_LIFECYCLE_SPEC.md)：当前召回、分池维护、待办聚合与Sleep材料契约，含切片实现细节。
+- [MEMORY_LIFECYCLE_SPEC.md](MEMORY_LIFECYCLE_SPEC.md)：当前召回、Event/Entity、关系时间线、pin、约定与独立提取契约。
 - [PROTOCOL_DETAILS.md](PROTOCOL_DETAILS.md)：briefing、召回引用/快照、主动run及来源恢复协议细节。
 - [OPERATIONS.md](OPERATIONS.md)：运行说明及只读离线检查。
 

@@ -1,19 +1,15 @@
-"""App AI tools: read classified sources, author memories, manage fixed budget."""
+"""Ordinary MCP knowledge tools and exact source reads."""
 import json
 
 from .knowledge import KnowledgeStore
 
 
-def tool_specs(sleep=False):
+def tool_specs():
     strings={'type':'array','items':{'type':'string'},'minItems':1,'maxItems':100,'uniqueItems':True}
     def spec(name,desc,properties,required=()):
         return {'type':'function','function':{'name':name,'description':desc,'parameters':{
             'type':'object','additionalProperties':False,'properties':properties,'required':list(required)}}}
-    from .writer import build_tools_spec
-    writer=build_tools_spec()[0]['function']['parameters']['properties']
     specs = [
-        spec('list_memory_groups','读取后台对旧切片的分组。分组不是事实结论；由你阅读原文后自主决定是否提炼认知、规律或 Event。',
-             {'include_reviewed':{'type':'boolean'}}),
         spec('read_memory_slices','按切片 ID 精确读取原文；也可按归类组或认知/规律/Event ID 下钻。保留分离来源，不扩展成连续区间。',
              {'slice_ids':strings,'group_id':{'type':'string'},'memory_id':{'type':'string'}}),
         spec('search_memory_slices','主动用自然语言检索原文切片，返回 ID、匹配分数及原文，供进一步下钻。',
@@ -25,8 +21,6 @@ def tool_specs(sleep=False):
               'confidence_basis':{'enum':['recently_disproved','outdated']},'confidence_evidence':{'type':'string'}},['kind','content','recall_cues','source_slice_ids','confidence']),
         spec('set_knowledge_pin','自主管理认知/规律的 briefing 常驻清单；该类条数满时先 unpin，再 pin；取消后仍可正常召回。',
              {'memory_id':{'type':'string'},'pinned':{'type':'boolean'}},['memory_id','pinned']),
-        spec('finish_memory_group','阅读并处理分组后标记 reviewed，或判断不值得提炼时 dismissed。不会删除原文。',
-             {'group_id':{'type':'string'},'state':{'enum':['reviewed','dismissed']}},['group_id','state']),
         spec('list_memory_knowledge','读取现有认知/规律与 pin 预算，供平时自主取舍。',{})]
     specs += [
         spec('review_memory_knowledge','审阅相似认知/规律：维持、改写补写或合并。每条必须列为keep/rewrite/merge目标或merge_ids成员，不能遗漏；每条最终保留项必须评分。只有近期经历明确打破或过时才能<=5，须提供逐字来源证据。',
@@ -36,21 +30,11 @@ def tool_specs(sleep=False):
                 'content':{'type':'string'},'recall_cues':strings,'merge_ids':strings,
                 'source_slice_ids':strings,
                 'confidence':{'type':'integer','minimum':0,'maximum':10},
-                'confidence_basis':{'enum':['recently_disproved','outdated']},'confidence_evidence':{'type':'string'}}}}},['group_id','items']),
-        spec('extract_memory_entity','从Event主题材料中正式提取确定的Entity。先读原文；无法确定可dismiss，不必提取。',
-            {'group_id':{'type':'string'},'name':{'type':'string','minLength':1},'summary':{'type':'string','minLength':1},
-             'aliases':{'type':'array','items':{'type':'string'}},'event_ids':strings},['group_id','name','summary','event_ids']),
-        spec('set_slice_recall_state','阅读后标注过时或与当前上下文矛盾的切片，不删除原文。提供逐字证据。',
-            {'group_id':{'type':'string'},'slice_ids':strings,'reason':{'type':'string','minLength':1},
-             'evidence':{'type':'string','minLength':1}},['group_id','slice_ids','reason','evidence'])]
-    return ([s for s in specs if s['function']['name']!='search_memory_slices'] if sleep else
-            [s for s in specs if s['function']['name'] in ('read_memory_slices','search_memory_slices','write_memory_knowledge','review_memory_knowledge','set_knowledge_pin','list_memory_knowledge')])
+                'confidence_basis':{'enum':['recently_disproved','outdated']},'confidence_evidence':{'type':'string'}}}}},['group_id','items'])]
+    return specs
 
 
-TOOL_NAMES={'list_memory_groups','read_memory_slices','search_memory_slices','write_memory_knowledge',
-            'set_knowledge_pin','finish_memory_group','list_memory_knowledge',
-            'review_memory_knowledge','extract_memory_entity','set_slice_recall_state'}
-SLEEP_ONLY_TOOLS=TOOL_NAMES-{'read_memory_slices','search_memory_slices','write_memory_knowledge','review_memory_knowledge','set_knowledge_pin','list_memory_knowledge'}
+TOOL_NAMES={'list_memory_knowledge', 'set_knowledge_pin', 'search_memory_slices', 'read_memory_slices', 'write_memory_knowledge', 'review_memory_knowledge'}
 VOLATILE_TOOLS={'read_memory_slices','search_memory_slices','list_pending_promises','get_memory_extraction_batch'}
 
 
@@ -121,28 +105,10 @@ def write_event(service, args, context):
 def dispatch(service,name,args,context=None):
     store=KnowledgeStore(service.store.root,service.source_instance)
     try:
-        if name in SLEEP_ONLY_TOOLS and (context is None or context.get('kind')!='sleep'):
-            return {'status':'failed','code':'sleep_context_required'}
-        if context and context.get('kind')=='sleep':
-            if name == 'write_memory_knowledge' and 'source_ids' in context:
-                ids=args.get('source_slice_ids')
-                if not isinstance(ids,list) or not all(isinstance(s,str) and s in context['source_ids'] for s in ids):
-                    return {'status':'failed','code':'source_outside_sleep_materials'}
-                if 'read_source_ids' in context and not set(ids)<=context['read_source_ids']:
-                    return {'status':'failed','code':'source_not_read_in_sleep'}
-                if 'frozen_sources' in context:
-                    store.read_sources([context['frozen_sources'][sid] for sid in ids])
-            if name=='finish_memory_group' and 'group_ids' in context and args.get('group_id') not in context['group_ids']:
-                return {'status':'failed','code':'group_outside_sleep_materials'}
-        if name=='list_memory_groups':
-            return {'status':'ok','groups':store.groups(pending=not args.get('include_reviewed',False)),
-                    'instruction':'这些是旧原文的分组，不是已成立的记忆；阅读后自行决定提炼或 dismiss。'}
-        if name=='finish_memory_group':
-            return store.finish_group(args.get('group_id'),args.get('state'))
         if name=='write_memory_knowledge':
             if context is None and service._live_turn is None:
                 raise ValueError('A live App generation is required to author knowledge')
-            from .sleep_review import score, set_confidence
+            from .knowledge_review import score, set_confidence
             score(args)
             if args.get('confidence',8)<=5:
                 originals=store.read_sources(store.sources(args['source_slice_ids']))
@@ -154,24 +120,12 @@ def dispatch(service,name,args,context=None):
                 result['pin']={'status':'ok','pinned':False,'reason':'low_confidence_no_recall'}
             return result
         if name=='review_memory_knowledge':
-            from .sleep_review import review_knowledge
+            from .knowledge_review import review_knowledge
             return review_knowledge(service,args,context)
-        if name=='extract_memory_entity':
-            from .sleep_review import extract_entity
-            return extract_entity(service,args,context)
-        if name=='set_slice_recall_state':
-            from .sleep_review import group
-            item=group(service,args['group_id'],context)
-            selected=[s for s in item['sources'] if s['slice_id'] in args['slice_ids']]
-            if len(selected)!=len(args['slice_ids']):
-                raise ValueError('slice_outside_group')
-            from .memory_lifecycle import Lifecycle
-            for row in store.read_sources(selected):
-                if not any(args['evidence'] in m['content'] for m in row['messages']):
-                    raise ValueError('slice_evidence_invalid')
-            for s in selected:
-                Lifecycle(store.root,store.instance).mark(s['slice_id'],'no_recall',args['reason'],[args['evidence']])
-            return {'status':'ok','slice_ids':args['slice_ids'],'recall_state':'no_recall'}
+        if name=='list_memory_knowledge':
+            return {'status':'ok','briefing':store.briefing(),'items':[
+                {key:row[key] for key in ('memory_id','kind','content','cues','pinned','sources','confidence')}
+                for row in store.all()]}
         if name=='set_knowledge_pin':
             return store.pin(args.get('memory_id'),args.get('pinned'))
         if name=='read_memory_slices':
@@ -180,9 +134,8 @@ def dispatch(service,name,args,context=None):
             if args.get('memory_id'):
                 return read_memory(service,args['memory_id']) or {'status':'failed','code':'memory_not_found'}
             if args.get('group_id'):
-                group=(context or {}).get('snapshot_groups',{}).get(args['group_id']) or next((r for r in store.groups(False) if r['group_id']==args['group_id']),None)
-                if group is None:
-                    raise ValueError('group_not_found')
+                from .extraction import Extraction
+                group=Extraction(service).live_group(args['group_id'])
                 sources=group['sources']
             else:
                 sources=store.sources(args['slice_ids'])

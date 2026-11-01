@@ -3,10 +3,10 @@ from contextlib import contextmanager
 import copy
 import json
 
-from .generations import fingerprint, identity
-from .knowledge import KnowledgeStore
-from .knowledge_tools import dispatch, tool_specs, VOLATILE_TOOLS
-from .tool_validation import validate_tool_input
+from ember.generations import fingerprint, identity
+from ember.knowledge import KnowledgeStore
+from tests.legacy_knowledge_tools import dispatch, tool_specs, VOLATILE_TOOLS
+from ember.tool_validation import validate_tool_input
 
 
 def fail(code):
@@ -72,13 +72,13 @@ class SleepKnowledge:
             old=self.run(body['sleep_id'])
             if old:
                 return self.response(old) if old['session_id']==body['session_id'] else fail('sleep_context_conflict')
-            from .memory_lifecycle import Lifecycle
-            from .review_aggregation import consolidate
+            from ember.memory_lifecycle import Lifecycle
+            from ember.review_aggregation import consolidate
             consolidate(Lifecycle(self.store.root,self.store.instance))
             groups=self.store.groups()
             # Knowledge review needs recent experiences, not only the two old
             # statements being compared. Freeze completed source IDs at Sleep start.
-            from .turn_slices import TurnSliceStore
+            from ember.turn_slices import TurnSliceStore
             slices=TurnSliceStore(str(self.store.root))
             recent=[]
             if slices.path.exists():
@@ -188,7 +188,7 @@ class SleepKnowledge:
                 db.execute('UPDATE sleep_knowledge_runs SET state=? WHERE sleep_id=?',
                     ('unknown' if unknown else body['state'],body['sleep_id']))
             self.service._sleep_knowledge_read_ids.pop(body['sleep_id'],None)
-            from .memory_lifecycle import Lifecycle
-            from .review_aggregation import consolidate
+            from ember.memory_lifecycle import Lifecycle
+            from ember.review_aggregation import consolidate
             consolidate(Lifecycle(self.store.root,self.store.instance))
             return self.response(self.run(body['sleep_id']))
