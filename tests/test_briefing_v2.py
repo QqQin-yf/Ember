@@ -49,6 +49,9 @@ class FiveLayerBriefingTests(unittest.TestCase):
         self.event('pin',pin=True)
         self.event('recent-core',score=9);self.event('recent-summary',score=6)
         self.event('ten',score=10)
+        old=self.event('old-ten',score=10)
+        old.ingest_time=old.event_time=(datetime.now(timezone.utc)-timedelta(days=4)).isoformat()
+        self.service.store.write_event(old)
         self.event('future','promise',due=(datetime.now(timezone.utc)+timedelta(days=1)).isoformat())
         self.event('no-due','promise')
         self.event('due','promise',due=(datetime.now(timezone.utc)-timedelta(hours=1)).isoformat())
@@ -64,7 +67,9 @@ class FiveLayerBriefingTests(unittest.TestCase):
             self.assertLess(text.index(earlier),text.index(later))
         self.assertEqual(text.count('CORE-relationship'),1)
         self.assertIn('SUMMARY-recent-summary',text);self.assertNotIn('CORE-recent-summary',text)
-        for excluded in ('CORE-ten','CORE-future','CORE-no-due'):
+        self.assertIn('CORE-ten',text)
+        self.assertNotIn('SUMMARY-ten',text)
+        for excluded in ('CORE-old-ten','CORE-future','CORE-no-due'):
             self.assertNotIn(excluded,text)
         self.assertTrue(text.endswith('还有 2 条进过上下文的约定没处理'))
         self.assertNotIn('sig10',report['stats']);self.assertNotIn('recalled_top',report['stats'])

@@ -120,7 +120,7 @@ def _refresh(service,args,sid,mid,ids):
     for event in service.store.all_events():
         if (event.kind in ('relationship','promise') or event.event_id in pin_ids or
                 not life.eligible(event.event_id) or not service.sleep_state.recall_allowed(event.event_id) or onstage(event)
-                or event.origin=='observe' or event.significance==10):
+                or event.origin=='observe'):
             continue
         try:
             created=datetime.fromisoformat(event.ingest_time.replace('Z','+00:00'))
@@ -128,7 +128,7 @@ def _refresh(service,args,sid,mid,ids):
                 continue
         except (ValueError,TypeError,AttributeError):
             continue
-        core=event.significance in (8,9)
+        core=event.significance in (8,9,10)
         line=f"• [{service._briefing_when(event)}] {event.core if core else event.summary}"
         recent.append({'event':event,'line':line,'core':core,'created':created})
     recent.sort(key=lambda row:(-row['event'].significance,-row['created'].timestamp(),row['event'].event_id))
