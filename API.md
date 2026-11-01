@@ -349,3 +349,12 @@ Event 后台维护使用 config/models.json 的 memory_group / entity_identity /
 Entity 名称或别名命中只给 summary；Event 命中附所属 Entity 的 summary，卡片去重且不占 Event 三席。Direction 不再参与自动召回。core、cue、切片和主题复用同一 embed 空间及每次输入的同一 query 向量。项目新事实可让旧 Event 退出自动召回，原件和出处不删除。
 
 revise_entity_summary(entity_id,summary) 直接修订卡片并提交变化检查；read_entity_events(entity_id) 下钻具体 Event，再通过原文工具读取原话。Entity 只在新建、别名或 summary 变化时查重；确认同一对象才合并，保留较早卡片、别名、成员及旧 ID 映射。后台失败保留待重试状态，修订期间材料变化则重做，避免覆盖新修改。
+
+
+### 关系时间线（2026-11-01）
+
+关系 Event 后台逐件压一份，pin 住的也缓存压缩版；原件不删除。关系只挂 continues / responds_to 边，不相互取代，不提 Entity。拼装时按总量上下限，从早到晚逐件换压缩版；压缩区超限再按批抽点。要点只追加新文字或“后来……”；每条存来源 Event 和可能断开的时间区间。briefing 只放要点文字，read_relationship_point(point) 可按完整要点文字或 point_id 返回来源 Event 和时间，再下钻原话。
+
+POST /ember/briefing/refresh 现在会等待时间线上尚未完成的压缩和抽点，不使用旧完成状态替代。真正模型失败并重试仍失败时，未压缩条保留原样、未抽点批保留压缩版；内容保持准确，可能暂时超预算。后台继续重试，普通轮次不替换 briefing。只有当前 briefing 中被压缩/抽点的关系 Event 参与自动召回；原样在场的不重复召回，关系切片不作为入口。
+
+关系预算、压缩区预算、上下限、抽点批大小、失败重试次数和 5:5 比例阈值均在 config/lifecycle.json。check_memory_health.py 通过 SQLite 副本报告 relationship_timeline_budget_ratio（应调高关系时间线预算）、压缩/抽点失败和暂时超预算，不调用模型，不输出记忆内容。

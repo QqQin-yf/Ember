@@ -1550,6 +1550,9 @@ class EmberService:
                               context: dict | None = None,
                               recall_id: str | None = None,
                               tool_call_id: str | None = None) -> dict:
+        if name=='read_relationship_point':
+            from .timeline import Timeline
+            return Timeline(self).read_point(arguments.get('point',''))
         from .organization_tools import TOOL_NAMES as ORGANIZATION_TOOLS, dispatch as organization_dispatch
         if name in ORGANIZATION_TOOLS:
             return organization_dispatch(self,name,arguments)
@@ -1676,9 +1679,10 @@ class EmberService:
         from .knowledge_tools import tool_specs
         from .promises import tool_specs as promise_specs
         from .organization_tools import tool_specs as organization_specs
+        from .timeline import tool_specs as timeline_specs
         return (build_tools_spec() + [build_revise_tool_spec()[0]]
                 + build_search_tool_spec() + build_pin_tool_specs()
-                + tool_specs() + promise_specs() + organization_specs())
+                + tool_specs() + promise_specs() + organization_specs() + timeline_specs())
 
     def sidecar_create_memory_event(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """MCP 工具 create_memory_event 执行体：进行中的一轮 + 参数 → 落库。
@@ -2321,12 +2325,12 @@ class EmberService:
 
         def eligible(ev: Any) -> bool:
             from .memory_lifecycle import Lifecycle
-            return (Lifecycle(self.store.root,self.source_instance).eligible(ev.event_id)
+            return (ev.kind!='relationship' and Lifecycle(self.store.root,self.source_instance).eligible(ev.event_id)
                     and self.sleep_state.recall_allowed(ev.event_id)
                     and (getattr(ev, "origin", "") or "") != "observe")
 
         def in_new72(ev: Any) -> bool:
-            return ev.kind!='promise' and bool(ev.ingest_time) and ev.ingest_time >= horizon
+            return ev.kind not in ('promise','relationship') and bool(ev.ingest_time) and ev.ingest_time >= horizon
 
         # —— 候选池 ——
         pinned: list[Any] = []
@@ -2435,8 +2439,12 @@ class EmberService:
         pending=len(promises.pending())
         if pending:
             text+=f'\n还有 {pending} 条进过上下文的约定没处理'
+        from .timeline import Timeline
+        timeline=Timeline(self).render(onstage)
+        if timeline['text']:
+            text=timeline['text']+'\n'+text
         report = {"status": "ok", "text": text, "chars": len(text),
-                  "session_id": session_id, "source_sync": source_sync,
+                  "session_id": session_id, "source_sync": source_sync, "timeline": timeline['health'],
                   "stats": {"pinned": len(pinned), "sig10": len(sig10),
                             "new72": len(new72),
                             "recalled_top": top_id,

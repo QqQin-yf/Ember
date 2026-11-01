@@ -56,7 +56,7 @@ class _Check:
     def inventory(self):
         result = {}
         for path in self.root.iterdir():
-            if path.suffix == ".jsonl" or path.name in (
+            if path.suffix in (".jsonl", ".sqlite3") or path.name.endswith(("-wal", "-shm", "-journal")) or path.name in (
                     "generations.sqlite3", "generations.sqlite3-wal", "generations.sqlite3-shm", "generations.sqlite3-journal"):
                 if path.is_symlink():
                     result[path.name] = ("symlink",)
@@ -64,6 +64,45 @@ class _Check:
                     stat = path.stat()
                     result[path.name] = (stat.st_size, stat.st_mtime_ns)
         return result
+
+    def lifecycle(self):
+        """Read only private copies, including committed WAL frames."""
+        from contextlib import closing
+        for name in ('relationship_timeline.sqlite3','organization.sqlite3','source_sync.sqlite3'):
+            original=self.root/name
+            if not original.exists():
+                continue
+            try:
+                if original.is_symlink():
+                    self.issue('warning','nonregular_file_skipped',name)
+                    continue
+                with tempfile.TemporaryDirectory(prefix='ember-lifecycle-health-') as temp:
+                    target=Path(temp)/name
+                    shutil.copyfile(original,target)
+                    for suffix in ('-wal','-journal'):
+                        extra=self.root/(name+suffix)
+                        if extra.exists() and not extra.is_symlink():
+                            shutil.copyfile(extra,Path(str(target)+suffix))
+                    with closing(sqlite3.connect(target.resolve().as_uri()+'?mode=ro',uri=True)) as db:
+                        if name=='relationship_timeline.sqlite3':
+                            row=db.execute("SELECT value FROM metadata WHERE key='health'").fetchone()
+                            if row:
+                                data=json.loads(row[0])
+                                for code in data['codes']:
+                                    self.issue('warning',code,name)
+                                self.stats['relationship_compressed_and_points_chars']=data['compressed_and_points_chars']
+                                self.stats['relationship_original_chars']=data['original_chars']
+                        elif name=='organization.sqlite3':
+                            count=db.execute('SELECT COUNT(*) FROM processed WHERE error IS NOT NULL').fetchone()[0]
+                            self.stats['organization_pending_errors']=count
+                            if count:
+                                self.issue('warning','organization_maintenance_pending',name)
+                        else:
+                            count=db.execute('SELECT COUNT(*) FROM sync WHERE error IS NOT NULL').fetchone()[0]
+                            if count:
+                                self.issue('warning','source_increment_pending',name)
+            except (OSError,sqlite3.Error,ValueError,KeyError,TypeError):
+                self.issue('warning','lifecycle_diagnostics_unavailable',name)
 
     def rows(self, name):
         path = self.root / name
@@ -256,6 +295,7 @@ def check_memory(data_dir, *, max_findings=200):
                 check.issue("warning", "no_memory_store_detected", ".")
             events = check.jsonl()
             check.sqlite(events)
+            check.lifecycle()
             if initial != check.inventory():
                 check.issue("warning", "data_changed_during_check", ".")
         except OSError:

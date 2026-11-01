@@ -68,3 +68,5 @@ python -B -X utf8 scripts/check_memory_health.py --data-dir 'D:\your-heart\data\
 3. promise：对应《Event字段调整》第 3 节、《Briefing与提取工具》第 3 节及《整体流程》本地午夜约定。加入持久曝光账、处理工具与追加 log、改期、到期 briefing、低分完结退出召回、10 分无 due 默认 pin，以及每日午夜/启动补算过时效。低分完结主题概括在第 4 步接入共用归组。
 
 4. 归组与 Entity：对应《Entity》第 1–4 节、《Event分类维护》第 2–3 节、《Event字段调整》第 3 节主题概括。加入共用归组、不可变日常副本及重聚合、完结约定主题层、Entity summary 更新/防重/合并和旧 ID 映射、项目取代；自动召回改为 Event 三席与独立去重卡片，不再走 Direction。关系时间线由第 5 步继续接入。
+
+5. 关系时间线：对应《Event分类维护》第 4 节。实现写入后的独立压缩缓存、总量上下限选择、按批追加要点、event_id 和断开时间区间溯源、要点下钻、pin 历史恢复原样、briefing 等待及模型失败准确降级。健康检查通过副本报告 5:5 比例和失败/超量；关系边仅延续或回应，不取代。
