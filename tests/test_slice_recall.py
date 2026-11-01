@@ -148,7 +148,7 @@ class SliceRecallTests(unittest.TestCase):
             event_time='2026-01-01', ingest_time='2026-01-01', summary='beacon', core='old body'))
         svc.store.write_route(RecallRoute(route_id='cue', event_id='old', matcher='lexical',
                                          cue_type='lexical', cue='beacon'))
-        with patch.object(svc, 'legacy_event_recall_pipeline', wraps=svc.legacy_event_recall_pipeline) as legacy, \
+        with patch('ember.recall.EntityRecall.recall', side_effect=AssertionError('retired path')) as legacy, \
                 patch.object(SliceEmbeddingClient, 'embed', return_value=[1., 0.]) as embed:
             first = svc.hook_turn_start('s', 'beacon', user_message_id=100, recall_id='rid')
             retry = svc.hook_turn_start('s', 'beacon', user_message_id=100, recall_id='rid')

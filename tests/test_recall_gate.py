@@ -27,7 +27,7 @@ from ember.llm import MockLLMClient
 from ember.models import (Event, PresentationContext, RecallTrace, RouteHit)
 from tests.test_sidecar import write_args
 from ember.recall import EntityHit, EntityRecall
-from ember.service import select_recall_units
+from tests.legacy_event_fixture import select_recall_units
 from tests.legacy_event_fixture import LegacyEventService as EmberService
 from ember.store import EmberStore
 from ember.direction import DirectionMatcher, DirectionVectorStore

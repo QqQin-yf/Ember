@@ -28,8 +28,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from ember.service import (EmberStore as _ES_unused,
-                           select_recall_units)
+from tests.legacy_event_fixture import select_recall_units
 from tests.legacy_event_fixture import LegacyEventService as EmberService
 from ember.store import EmberStore
 from ember.llm import MockLLMClient
