@@ -18,10 +18,11 @@ from ember.promises import tool_specs as promise_specs, Promises, dispatch as pr
 from ember.organization_tools import tool_specs as organization_specs,dispatch as organization_dispatch
 from ember.timeline import tool_specs as timeline_specs,Timeline
 from ember.pin_policy import tool_specs as pin_specs
+from ember.extraction import tool_specs as extraction_specs, Extraction
 
 
 def specifications():
-    ordinary=build_tools_spec()+build_revise_tool_spec()+build_search_tool_spec()+build_pin_tool_specs()+tool_specs()+promise_specs()+organization_specs()+timeline_specs()+pin_specs()
+    ordinary=build_tools_spec()+build_revise_tool_spec()+build_search_tool_spec()+build_pin_tool_specs()+tool_specs()+promise_specs()+organization_specs()+timeline_specs()+pin_specs()+extraction_specs()
     sleep=tool_specs(sleep=True)
     by_name={s['function']['name']:s['function'] for s in ordinary+sleep}
     return by_name,{s['function']['name'] for s in ordinary},{s['function']['name'] for s in sleep}
@@ -185,10 +186,23 @@ def isolated_receipts():
             results['set_slice_recall_state']=call('set_slice_recall_state',{'group_id':generic,'slice_ids':[ids[0]],
                 'reason':'Fixture-only outdated example','evidence':sources[0]['messages'][0]['content']})
             results['finish_memory_group']=call('finish_memory_group',{'group_id':generic,'state':'reviewed'})
+            orphan=slices.save('fixture-orphan',[{'message_id':21,'role':'user','content':'Fixture standalone source for extraction.'},
+                {'message_id':22,'role':'assistant','content':'A standalone reply.'}])
+            slices.save_embedding(orphan,embedding.space,[1.,0.])
+            extraction=Extraction(service)
+            with patch('ember.extraction.SliceEmbeddingConfig.load',return_value=embedding),patch('ember.extraction.ask',return_value={
+                'groups':[{'description':'Fixture extraction group','slice_ids':[orphan['slice_id']]}]}):
+                extraction.discover(embedding)
+                results['get_memory_extraction_batch']=extraction.batch()
+                part=results['get_memory_extraction_batch']['groups'][0]
+                results['finish_memory_extraction_group']=extraction.finish({'group_id':part['group_id'],
+                    'part_id':part['part_id'],'conclusion':'skipped'})
     return results
 
 
 HANDLERS={
+ 'get_memory_extraction_batch':[('ember/extraction.py','batch'),('ember/extraction.py','materialize')],
+ 'finish_memory_extraction_group':[('ember/extraction.py','finish')],
  'write_event':[('ember/service.py','sidecar_create_memory_event'),('ember/service.py','_create_memory_in_context'),('ember/service.py','write_validated_event'),('ember/writer.py','writer_error_result')],
  'read_memory_source':[('ember/service.py','read_source_event')],
  'revise_memory_event':[('ember/service.py','sidecar_revise_memory_event')],

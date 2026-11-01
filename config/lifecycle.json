@@ -47,7 +47,12 @@
     "total_chars": 6000
   },
   "extraction": {
-    "batch_chars": 8000
+    "batch_chars": 8000,
+    "group_threshold": 0.6,
+    "group_size": 16,
+    "knowledge_threshold": 0.5,
+    "similar_limit": 5,
+    "worker_seconds": 30
   },
   "recall": {
     "event_limit": 3,

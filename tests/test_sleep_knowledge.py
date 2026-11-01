@@ -30,15 +30,15 @@ class SleepKnowledgeTests(unittest.TestCase):
         self.assertEqual(result['status'],'ok')
         return result
 
-    def test_normal_turn_neither_prompts_nor_can_author_from_group(self):
+    def test_normal_turn_does_not_prompt_but_can_author_knowledge(self):
         result=append_recall(self.service,{'prefix':'','presentations':[]},'unrelated')
         self.assertEqual(result['prefix'],'')
         self.assertNotIn('pending_groups',result)
         names={s['function']['name'] for s in tool_specs()}
-        self.assertEqual(names,{'read_memory_slices','search_memory_slices'})
+        self.assertTrue({'read_memory_slices','search_memory_slices','write_memory_knowledge','review_memory_knowledge'}<=names)
         result=dispatch(self.service,'write_memory_knowledge',self.args(),{'session':None,'turn':1})
-        self.assertEqual(result['code'],'sleep_context_required')
-        self.assertEqual(self.fixture.store.all(),[])
+        self.assertEqual(result['status'],'created')
+        self.assertEqual(len(self.fixture.store.all()),1)
 
     def test_sleep_reads_writes_marks_and_replays_receipt_after_completion(self):
         started=self.stage.start(self.identity)

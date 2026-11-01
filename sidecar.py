@@ -136,8 +136,9 @@ async def _list_tools() -> list[types.Tool]:
     from ember.timeline import tool_specs as timeline_specs
     from ember.organization_tools import tool_specs as organization_specs
     from ember.promises import tool_specs as promise_specs
+    from ember.extraction import tool_specs as extraction_specs
     specs = (build_tools_spec() + [build_revise_tool_spec()[0]]
-             + build_search_tool_spec() + build_pin_tool_specs() + knowledge_tool_specs() + promise_specs() + organization_specs() + timeline_specs() + pin_specs())
+             + build_search_tool_spec() + build_pin_tool_specs() + knowledge_tool_specs() + promise_specs() + organization_specs() + timeline_specs() + pin_specs() + extraction_specs())
     out: list[types.Tool] = []
     for spec in specs:
         fn = spec["function"]
@@ -232,6 +233,9 @@ async def _lifespan(app):
         from ember.timeline import TimelineWorker
         timeline_worker=TimelineWorker(REGISTRY)
         timeline_task=asyncio.create_task(timeline_worker.run())
+        from ember.extraction import ExtractionWorker
+        extraction_worker=ExtractionWorker(REGISTRY)
+        extraction_task=asyncio.create_task(extraction_worker.run())
         try:
             yield
         finally:
@@ -240,7 +244,8 @@ async def _lifespan(app):
             knowledge_worker.stop_event.set()
             memory_worker.stop_event.set()
             timeline_worker.stop_event.set()
-            await asyncio.gather(maintaining, embedding_knowledge, memory_maintenance, timeline_task)
+            extraction_worker.stop_event.set()
+            await asyncio.gather(maintaining, embedding_knowledge, memory_maintenance, timeline_task, extraction_task)
             cleanup.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await cleanup

@@ -7,7 +7,15 @@ from .memory_lifecycle import Lifecycle
 
 
 def group(service, gid, context):
-    if context is None or context.get('kind')!='sleep' or gid not in context.get('group_ids',set()):
+    if context is None or context.get('kind')!='sleep':
+        from .extraction import Extraction
+        extraction=Extraction(service);row=extraction.live_group(gid)
+        if not row['payload']:
+            raise ValueError('extraction_group_not_delivered')
+        payload=json.loads(row['payload'])
+        return {'group_id':gid,'kind':'knowledge_review','sources':row['sources'],
+                'material':{'memory_ids':[r['memory_id'] for r in payload['similar_knowledge']]}}
+    if gid not in context.get('group_ids',set()):
         raise ValueError('sleep_group_required')
     store=KnowledgeStore(service.store.root,service.source_instance)
     item=next((g for g in store.groups(False) if g['group_id']==gid),None)

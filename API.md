@@ -386,3 +386,13 @@ POST /ember/briefing/refresh 收 session_id、keep_from_message_id，可附精�
 钉住的约定（包括默认钉住的 10 分无 due）从任何入口进入上下文都不记曝光、不计待处理。process_promise 允许主动处理钉住的约定，无需曝光，仍要求非空 log，spans 可为空；普通未 pin 约定仍要求待处理曝光。
 
 关系时间线后台按持久待办执行：关系事件写入、关系 pin 变化、失败重试到期触发；启动扫描恢复一次，空闲时不全量 synchronize。briefing 显式 refresh 仍等待时间线准备。
+
+### 独立提取工具（2026-11-01，第 8 步）
+
+普通 MCP 开放 write_memory_knowledge / review_memory_knowledge / set_knowledge_pin / list_memory_knowledge；置信度、切片来源与低置信度证据校验保留。review_memory_knowledge.group_id 使用已交付提取组的 group_id，组内附上的相似知识须逐条维持、改写或合并。
+
+get_memory_extraction_batch() 不调用归组模型，只读取后台排好的最早材料：description、slices、similar_knowledge、group_id、part_id。批次材料数组按 JSON 字符数受 extraction.batch_chars 约束；整组放不下留到下一批，仅单组独自超限才切为 material_fragment，按 offset 连续拼接，total_chars 是完整材料长度。返回 remaining_groups / remaining_chars（不含本批材料）和 grouping_errors；模型可继续或停。
+
+finish_memory_extraction_group(group_id,part_id,conclusion,result_ids?) 接受 written / merged / skipped。写了或并进旧的须给已存在的 Event/knowledge ID；不写可省 result_ids。全部分段给结论才完成组。未确认分段下次重现，重复相同结论幂等，冲突结论拒绝。原文版本改变会拒绝旧材料；切片后来被 Event 覆盖则退出提取候选。
+
+第三方只整理没有上级、有信息量且向量有效的切片，不从每轮召回 trace 建池，不代写正式记忆。后台按 extraction.worker_seconds 扫描，group_size / group_threshold / knowledge_threshold / similar_limit 也在 config/lifecycle.json。模型 purpose 为 slice_groups。提取原文回执易失，持久调用账不复制原文。

@@ -90,3 +90,5 @@ python -B -X utf8 scripts/check_memory_health.py --data-dir 'D:\your-heart\data\
 修正 7：对应《给 Codex 的修正》第 7 条，移除生产 EmberService 中旧 EntityRecall / DirectionMatcher 实例及调用；历史协议测试将旧路径放入 tests/legacy_event_fixture.py。direction.py 仍由离线脚本、历史测试及 embedding 帮助函数使用，保留；自动召回使用现行 Event/切片分支。
 
 修正 8：对应《给 Codex 的修正》第 8 条。时间线用独立 SQLite 待办记录关系写入、pin 变化、失败重试期限；启动只恢复扫描一次，空闲 tick 不遍历 Event，不 synchronize。待办版本防止模型执行期间的新写入被清掉，独立数据库避免模型长事务阻塞写入通知。
+
+8. 独立提取：对应《Briefing 与提取工具》第 2 节、《原文切片调整》第 5.1 节。新增无上级有信息量切片的向量+LLM 归组、持久批次与结论确认；可停、重取、按字数分批，超限单组无损分段。开放普通 MCP 认知/规律写入和审阅，附相似知识；source_slice_ids 仍走成对 Event 写入工具。

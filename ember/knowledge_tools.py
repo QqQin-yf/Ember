@@ -27,7 +27,7 @@ def tool_specs(sleep=False):
              {'memory_id':{'type':'string'},'pinned':{'type':'boolean'}},['memory_id','pinned']),
         spec('finish_memory_group','阅读并处理分组后标记 reviewed，或判断不值得提炼时 dismissed。不会删除原文。',
              {'group_id':{'type':'string'},'state':{'enum':['reviewed','dismissed']}},['group_id','state']),
-        spec('list_memory_knowledge','读取现有认知/规律与 pin 预算，供 Sleep 时自主取舍。',{})]
+        spec('list_memory_knowledge','读取现有认知/规律与 pin 预算，供平时自主取舍。',{})]
     specs += [
         spec('review_memory_knowledge','审阅相似认知/规律：维持、改写补写或合并。每条必须列为keep/rewrite/merge目标或merge_ids成员，不能遗漏；每条最终保留项必须评分。只有近期经历明确打破或过时才能<=5，须提供逐字来源证据。',
             {'group_id':{'type':'string'},'items':{'type':'array','minItems':1,'items':{'type':'object',
@@ -44,14 +44,14 @@ def tool_specs(sleep=False):
             {'group_id':{'type':'string'},'slice_ids':strings,'reason':{'type':'string','minLength':1},
              'evidence':{'type':'string','minLength':1}},['group_id','slice_ids','reason','evidence'])]
     return ([s for s in specs if s['function']['name']!='search_memory_slices'] if sleep else
-            [s for s in specs if s['function']['name'] in ('read_memory_slices','search_memory_slices')])
+            [s for s in specs if s['function']['name'] in ('read_memory_slices','search_memory_slices','write_memory_knowledge','review_memory_knowledge','set_knowledge_pin','list_memory_knowledge')])
 
 
 TOOL_NAMES={'list_memory_groups','read_memory_slices','search_memory_slices','write_memory_knowledge',
             'set_knowledge_pin','finish_memory_group','list_memory_knowledge',
             'review_memory_knowledge','extract_memory_entity','set_slice_recall_state'}
-SLEEP_ONLY_TOOLS=TOOL_NAMES-{'read_memory_slices','search_memory_slices'}
-VOLATILE_TOOLS={'read_memory_slices','search_memory_slices','list_pending_promises'}
+SLEEP_ONLY_TOOLS=TOOL_NAMES-{'read_memory_slices','search_memory_slices','write_memory_knowledge','review_memory_knowledge','set_knowledge_pin','list_memory_knowledge'}
+VOLATILE_TOOLS={'read_memory_slices','search_memory_slices','list_pending_promises','get_memory_extraction_batch'}
 
 
 def read_memory(service, memory_id, canonicalize=True):

@@ -12,7 +12,7 @@ from ember.turn_slices import TurnSliceStore
 
 
 class KnowledgeMCPTests(unittest.TestCase):
-    def test_app_reads_over_mcp_and_authors_only_in_sleep(self):
+    def test_app_reads_and_authors_knowledge_over_ordinary_mcp(self):
         import sidecar
         from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
         with tempfile.TemporaryDirectory() as directory:
@@ -33,11 +33,13 @@ class KnowledgeMCPTests(unittest.TestCase):
             with patch.object(sidecar,'REGISTRY',registry),patch.object(sidecar,'TOKEN',''), \
                     patch.object(sidecar,'session_manager',manager), \
                     patch('ember.knowledge.KnowledgeEmbeddingWorker.process_one',return_value=False), \
+                    patch('ember.extraction.Extraction.discover',return_value=False), \
                     TestClient(sidecar.app) as client:
                 headers={'Accept':'application/json, text/event-stream'}
                 listed=client.post('/mcp/',headers=headers,json={'jsonrpc':'2.0','id':1,'method':'tools/list','params':{}}).json()
                 names={t['name'] for t in listed['result']['tools']}
-                self.assertNotIn('write_memory_knowledge',names)
+                self.assertIn('write_memory_knowledge',names)
+                self.assertIn('get_memory_extraction_batch',names)
                 self.assertIn('read_memory_slices',names)
                 for path,method in [('link/batches','GET'),('link/progress','GET'),('link/submit','POST'),('structure/run','POST')]:
                     retired=client.request(method,'/ember/sleep/'+path,json={} if method=='POST' else None)
@@ -58,9 +60,9 @@ class KnowledgeMCPTests(unittest.TestCase):
                 self.assertIn('午饭',read['slices'][0]['messages'][0]['content'])
                 args={'confidence':8,'kind':'pattern','content':'倾向于固定午饭选择以减少决策负担','recall_cues':['黄焖鸡'],
                       'source_slice_ids':[source['slice_id']]}
-                invalid,error=call('write_memory_knowledge',args,'ordinary-write')
-                self.assertTrue(error)
-                self.assertEqual(invalid['code'],'sleep_context_required')
+                ordinary,error=call('write_memory_knowledge',args,'ordinary-write')
+                self.assertFalse(error)
+                self.assertEqual(ordinary['status'],'created')
                 identity={'sleep_id':'sleep-http','session_id':'new'}
                 started=client.post('/ember/sleep/knowledge/start',json=identity).json()
                 self.assertEqual(started['remaining'],1)
