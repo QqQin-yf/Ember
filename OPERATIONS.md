@@ -96,3 +96,5 @@ python -B -X utf8 scripts/check_memory_health.py --data-dir 'D:\your-heart\data\
 9. Sleep 清理：对应《Briefing 与提取工具》第 4 节及《整体流程》第 5 节。专属 knowledge HTTP 材料接口统一退役 410，移除生产 Sleep 材料模块与上下文 gate；旧协议回归仅保留为 tests 夹具，做梦及 sediment evidence 接口未改。重写 MEMORY_LIFECYCLE_SPEC.md，统一 README / API / briefing 协议和 22 项普通 MCP 实际回执导出。
 
 修正 8 补充：截断 refresh 产生的压缩/抽点失败也登记持久重试期限，避免后台已空闲时遗漏重试；worker 完成时保守保留并发 refresh 刚登记的未来期限。专项覆盖到点唤醒及并发完成不丢期限。
+
+2026-11-01 本分支最终本地隔离验收：507 项 unittest 通过（ResourceWarning 作为错误）；独立 sidecar 38 项通过；工具 schema / 成功回执导出覆盖全部 22 个普通 MCP 工具，Sleep 专属 0 项；模型配置只读检查 status=ok。Direction 真实库离线验收因 data_real 缺失跳过，不记为通过。测试不代表线上模型、App 原文增量适配或生产部署已验证；本次未修改 Deliz/App、未部署或重启服务。

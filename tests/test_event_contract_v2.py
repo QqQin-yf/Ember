@@ -58,4 +58,3 @@ class EventContractTests(unittest.TestCase):
                        lambda a:a['event'].update(significance='8: reason')]:
             args=copy.deepcopy(write_args());mutate(args)
             self.assertIsNotNone(validate_writer_arguments(args)[1])
-

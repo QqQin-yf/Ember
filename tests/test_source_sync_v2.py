@@ -90,4 +90,3 @@ class IncrementalSliceTests(unittest.TestCase):
             self.assertEqual(passing_parents(self.tmp.name,candidate,[1.,0.],self.cfg,{'e':ev}),[])
         ev=self.event('promise',8,'done')
         self.assertEqual(passing_parents(self.tmp.name,candidate,[1.,0.],self.cfg,{'e':ev}),['e'])
-
