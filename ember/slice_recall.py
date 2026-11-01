@@ -81,7 +81,17 @@ class SliceRecall:
             from .knowledge import KnowledgeStore, knowledge_space
             knowledge_ready = any(not r['pinned'] and r['vector'] and r['space']==knowledge_space(config)
                                   for r in KnowledgeStore(self.root,self.instance).all())
-            if not rows and not knowledge_ready:
+            from .core_semantic import CoreVectorStore
+            event_ready=any(r['model']==config.space for r in CoreVectorStore(str(self.root)).all())
+            if not event_ready:
+                # Themes live in a separate layer; reading them does not construct a service.
+                if (self.root/'organization.sqlite3').exists():
+                    db=sqlite3.connect(self.root/'organization.sqlite3')
+                    try:
+                        event_ready=bool(db.execute('SELECT 1 FROM themes WHERE space=? LIMIT 1',(config.space,)).fetchone())
+                    finally:
+                        db.close()
+            if not rows and not knowledge_ready and not event_ready:
                 metadata['status'] = 'no_vectors'
             else:
                 # Exactly one fresh embedding for this whole input; no old Cue/Direction calls.

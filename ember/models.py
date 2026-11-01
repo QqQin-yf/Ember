@@ -59,6 +59,7 @@ class Event:
     log: list[dict[str, Any]] = field(default_factory=list)
     # Existing maintenance annotation, not a model-authored content field.
     change: str = ""
+    entity_refs: list[str] = field(default_factory=list)
     # provenance
     provenance_refs: list[str] = field(default_factory=list)
     # origin —— 事件出身："" = 实时写入（对话中模型自主触发）；

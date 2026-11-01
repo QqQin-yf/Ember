@@ -61,6 +61,9 @@ class Entity:
     summary_at: str = ""      # 最近一次 summary 生成时刻（ISO），观察字段（判断名片多旧）
     provenance_refs: list[str] = field(default_factory=list)
 
+    entity_type: str = "object"
+    created_at: str = ""
+
     ALLOWED_STATUS = ("open", "closed")
 
     def __post_init__(self):

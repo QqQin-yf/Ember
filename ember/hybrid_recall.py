@@ -4,8 +4,9 @@ from .knowledge_tools import append_recall
 
 
 def automatic_hybrid_recall(service,session,turn,text,context_start_id=None,deferred_entries=None,context_message_ids=None):
-    result=service.legacy_event_recall_pipeline(session,turn,text,
-        context_start_id=context_start_id,deferred_entries=deferred_entries,context_message_ids=context_message_ids)
+    raw=automatic_slice_recall(service,session,turn,text,context_start_id,context_message_ids)
+    from .event_recall import append_events
+    result=append_events(service,raw,session,turn,text,context_start_id,deferred_entries,context_message_ids)
     from .memory_lifecycle import Lifecycle, filter_recall
     life=Lifecycle(service.store.root,service.source_instance)
     blocked=filter_recall(service,result,session,context_start_id,context_message_ids)
@@ -16,10 +17,10 @@ def automatic_hybrid_recall(service,session,turn,text,context_start_id=None,defe
               (not p.get('version_id') or str(service.store.get_event(p['event_id']).version_id)==p['version_id'])))
             for p in old.get('presentations',[]))
     result=life.hold(session.session_id,turn,result,allowed)
-    raw=automatic_slice_recall(service,session,turn,text,context_start_id,context_message_ids)
-    result['slice_recall']=raw['slice_recall']
     from .slice_presentation import append_slice_presentations
     result=append_slice_presentations(service,result,text)
+    from .organization_tools import append_entity_cards
+    result=append_entity_cards(service,result)
     result=append_recall(service,result,text,session.session_id,context_message_ids)
     if result.get('prefix'):
         result['prefix']='记忆仅供参考；与当前对话中用户所说冲突时，以当前用户说法为准。\n'+result['prefix']

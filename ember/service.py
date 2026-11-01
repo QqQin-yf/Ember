@@ -1344,7 +1344,7 @@ class EmberService:
                     eid=p.get('event_id')
                     if eid and self.store.get_event(eid).kind=='promise':
                         effects.append(('promise_exposure',{'event_id':eid,
-                            'route':'recall' if p.get('via_slice_id') else 'cue',
+                            'route':p.get('route') or ('recall' if p.get('via_slice_id') else 'cue'),
                             'span':{'session_id':sid,'message_ids':[seq]},'at':_now_iso()}))
                 self.generations.commit_snapshot(rid, turn, out, metadata, effects)
                 self._reconcile_recall_effects(rid)
@@ -1550,6 +1550,9 @@ class EmberService:
                               context: dict | None = None,
                               recall_id: str | None = None,
                               tool_call_id: str | None = None) -> dict:
+        from .organization_tools import TOOL_NAMES as ORGANIZATION_TOOLS, dispatch as organization_dispatch
+        if name in ORGANIZATION_TOOLS:
+            return organization_dispatch(self,name,arguments)
         from .promises import TOOL_NAMES as PROMISE_TOOLS, dispatch as promise_dispatch
         if name in PROMISE_TOOLS:
             return promise_dispatch(self,name,arguments)
@@ -1672,9 +1675,10 @@ class EmberService:
         """MCP tools/list 工具清单（含修正、检索与钉住）。"""
         from .knowledge_tools import tool_specs
         from .promises import tool_specs as promise_specs
+        from .organization_tools import tool_specs as organization_specs
         return (build_tools_spec() + [build_revise_tool_spec()[0]]
                 + build_search_tool_spec() + build_pin_tool_specs()
-                + tool_specs() + promise_specs())
+                + tool_specs() + promise_specs() + organization_specs())
 
     def sidecar_create_memory_event(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """MCP 工具 create_memory_event 执行体：进行中的一轮 + 参数 → 落库。
@@ -1805,6 +1809,9 @@ class EmberService:
                              f"（可改: {', '.join(REVISE_ALLOWED_FIELDS)}"
                              "，或 recall_cues）"}
 
+        from .organization import Organization
+        with Organization(self).db() as conn:
+            conn.execute('DELETE FROM processed WHERE event_id=?',(resolved,))
         self.store.write_event(event)  # append 覆盖：加载时新行盖旧行
         self.store.rebuild_index()
         return {"status": "revised", "event_id": resolved,

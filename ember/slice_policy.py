@@ -1,6 +1,7 @@
 """Three slice classes and two independent similarity gates; no LLM labels."""
 import json
 import re
+from contextlib import closing
 
 from .core_semantic import CoreVectorStore, cosine
 from .event_slices import EventSliceLinks, sync_from_files
@@ -22,7 +23,19 @@ def parent_allowed(event, root):
         return False
     if event.kind=='promise' and event.significance<=lifecycle_config()['promise']['low_score_max'] and event.status!='open':
         return False
-    return Lifecycle(root).eligible(event.event_id)
+    if Lifecycle(root).eligible(event.event_id):
+        return True
+    if event.kind=='daily':
+        with Lifecycle(root).db() as conn:
+            row=conn.execute("SELECT reason FROM eligibility WHERE id=?",(event.event_id,)).fetchone()
+        if row and row[0]=='daily_aggregated':
+            import sqlite3
+            from pathlib import Path
+            path=Path(root)/'organization.sqlite3'
+            if path.exists():
+                with closing(sqlite3.connect(path)) as conn:
+                    return conn.execute("SELECT 1 FROM replacements WHERE event_id=?",(event.event_id,)).fetchone() is not None
+    return False
 
 
 def passing_parents(root, candidate, query, config, events):

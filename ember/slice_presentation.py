@@ -56,6 +56,18 @@ def append_slice_presentations(service,result,query):
                     for eid in parents:
                         if eid in presented:
                             continue
+                        from .organization import Organization
+                        replacement=Organization(service).replacement(eid)
+                        if replacement:
+                            if any(p.get('memory_id')==replacement['id'] for p in result.get('presentations',[])):
+                                continue
+                            blocks.append(f"[{replacement['id']}] {replacement['text']}")
+                            item={'presentation':'theme','memory_id':replacement['id'],'via_slice_id':source['slice_id']}
+                            result.setdefault('presentations',[]).append(item);selection['selected'].append(item)
+                            continue
+                        from .lifecycle_config import lifecycle_config
+                        if len(presented)>=lifecycle_config()['recall']['event_limit']:
+                            continue
                         event=service.store.get_event(eid)
                         block=f'[{eid} {event.kind}] {event.core}'
                         if used+len(block)>config.source_budget_chars:

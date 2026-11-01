@@ -90,6 +90,76 @@
       "provider": "ollama",
       "model": "qwen3:1.7b",
       "timeout_seconds": 600
+    },
+    "memory_group": {
+      "operation": "chat",
+      "provider": "zhipu",
+      "model": "glm-4.7",
+      "timeout_seconds": 90,
+      "temperature": 0,
+      "options": {
+        "batch_size": 16
+      }
+    },
+    "theme_summary": {
+      "operation": "chat",
+      "provider": "zhipu",
+      "model": "glm-4.7",
+      "timeout_seconds": 90,
+      "temperature": 0,
+      "options": {
+        "batch_size": 16
+      }
+    },
+    "entity_identity": {
+      "operation": "chat",
+      "provider": "zhipu",
+      "model": "glm-4.7",
+      "timeout_seconds": 90,
+      "temperature": 0,
+      "options": {
+        "batch_size": 16
+      }
+    },
+    "entity_summary": {
+      "operation": "chat",
+      "provider": "zhipu",
+      "model": "glm-4.7",
+      "timeout_seconds": 90,
+      "temperature": 0,
+      "options": {
+        "batch_size": 16
+      }
+    },
+    "relationship_compress": {
+      "operation": "chat",
+      "provider": "zhipu",
+      "model": "glm-4.7",
+      "timeout_seconds": 90,
+      "temperature": 0,
+      "options": {
+        "batch_size": 16
+      }
+    },
+    "relationship_points": {
+      "operation": "chat",
+      "provider": "zhipu",
+      "model": "glm-4.7",
+      "timeout_seconds": 90,
+      "temperature": 0,
+      "options": {
+        "batch_size": 16
+      }
+    },
+    "slice_groups": {
+      "operation": "chat",
+      "provider": "zhipu",
+      "model": "glm-4.7",
+      "timeout_seconds": 90,
+      "temperature": 0,
+      "options": {
+        "batch_size": 16
+      }
     }
   }
 }

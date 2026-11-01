@@ -340,3 +340,12 @@ Ember 在 Event 落库后后台拉取，以及 POST /ember/briefing/refresh 时�
 list_pending_promises 返回真正进过上下文而尚未写 log 的约定及其原文 span、时间、进入路径；process_promise 要求 event_id 和非空 log，可选 status=done/dropped、due=带时区 ISO 日期时间或 null。未曝光约定不能通过该工具修改。写 log 后才确认处理完；状态不变也必须写。追加 log 与曝光回执可在重启后核对恢复。
 
 到期仍 open 的约定追加在 briefing 末尾，不受预算裁切；未来到期或无 due 只按线索浮现，10 分无 due 写入时默认 pin。低分（默认 <=7）完结后 Event 与其独占的切片退出自动召回，主动下钻仍可达。按 config/lifecycle.json 的时区每日零点检查到期满 lapse_days 的 open 约定，写入 lapsed log；启动补算。Windows 需安装 requirements.txt 中的 tzdata。待处理数量只在刷新 briefing 时更新，普通轮次不替换 briefing。
+
+
+### 共用归组、Entity 与主题概括（2026-11-01）
+
+Event 后台维护使用 config/models.json 的 memory_group / entity_identity / entity_summary / theme_summary 用途。向量只提供候选，LLM 判断一类事或具体对象。低分日常先复制不可变副本；够数后按全部主题副本重概括，用概括替换自动召回里的零散 Event，原件仍可主动检索。低分完结约定池形成同一层的客观主题概括；这层独立于认知/规律。聚合后的 daily 切片仍比原 Event 的 core，命中带出替代主题。
+
+Entity 名称或别名命中只给 summary；Event 命中附所属 Entity 的 summary，卡片去重且不占 Event 三席。Direction 不再参与自动召回。core、cue、切片和主题复用同一 embed 空间及每次输入的同一 query 向量。项目新事实可让旧 Event 退出自动召回，原件和出处不删除。
+
+revise_entity_summary(entity_id,summary) 直接修订卡片并提交变化检查；read_entity_events(entity_id) 下钻具体 Event，再通过原文工具读取原话。Entity 只在新建、别名或 summary 变化时查重；确认同一对象才合并，保留较早卡片、别名、成员及旧 ID 映射。后台失败保留待重试状态，修订期间材料变化则重做，避免覆盖新修改。

@@ -15,10 +15,11 @@ from ember.writer import build_tools_spec,build_revise_tool_spec,build_search_to
 from ember.knowledge_tools import tool_specs,dispatch
 from ember.tool_validation import validate_tool_input
 from ember.promises import tool_specs as promise_specs, Promises, dispatch as promise_dispatch
+from ember.organization_tools import tool_specs as organization_specs,dispatch as organization_dispatch
 
 
 def specifications():
-    ordinary=build_tools_spec()+build_revise_tool_spec()+build_search_tool_spec()+build_pin_tool_specs()+tool_specs()+promise_specs()
+    ordinary=build_tools_spec()+build_revise_tool_spec()+build_search_tool_spec()+build_pin_tool_specs()+tool_specs()+promise_specs()+organization_specs()
     sleep=tool_specs(sleep=True)
     by_name={s['function']['name']:s['function'] for s in ordinary+sleep}
     return by_name,{s['function']['name'] for s in ordinary},{s['function']['name'] for s in sleep}
@@ -162,6 +163,9 @@ def isolated_receipts():
             Promises(service).enter(promise_id,'cue',{'session_id':'fixture-chat','message_ids':['1']})
             results['list_pending_promises']=promise_dispatch(service,'list_pending_promises',{})
             results['process_promise']=promise_dispatch(service,'process_promise',{'event_id':promise_id,'log':'Fixture promise still open'})
+            entity_id=results['extract_memory_entity']['entity_id']
+            results['revise_entity_summary']=organization_dispatch(service,'revise_entity_summary',{'entity_id':entity_id,'summary':'Fixture corrected object'})
+            results['read_entity_events']=organization_dispatch(service,'read_entity_events',{'entity_id':entity_id})
             results['set_slice_recall_state']=call('set_slice_recall_state',{'group_id':generic,'slice_ids':[ids[0]],
                 'reason':'Fixture-only outdated example','evidence':sources[0]['messages'][0]['content']})
             results['finish_memory_group']=call('finish_memory_group',{'group_id':generic,'state':'reviewed'})

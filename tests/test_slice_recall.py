@@ -141,7 +141,7 @@ class SliceRecallTests(unittest.TestCase):
         self.assertEqual(trace['error_code'], 'embedding_http_429')
         self.assertEqual(trace['rankings'], [])
 
-    def test_automatic_hook_retains_old_route_and_freezes_both_branches_on_retry(self):
+    def test_automatic_hook_uses_shared_query_and_freezes_both_branches_on_retry(self):
         self.add(1, [1., 0.])
         svc = EmberService(EmberStore(self.tmp.name), MockLLMClient())
         svc.store.write_event(Event(event_id='old', version_id='v', source_ref='x', raw_ref='x',
@@ -155,7 +155,7 @@ class SliceRecallTests(unittest.TestCase):
         self.assertEqual(first, retry)
         self.assertFalse(hasattr(svc, '_observe_extra_hit'))
         self.assertEqual(embed.call_count, 1)
-        legacy.assert_called_once()
+        legacy.assert_not_called()
         self.assertTrue(first['injected'])
         self.assertIn('old body', first['injected_text'])
         self.assertEqual(first['recall_refs']['events'][0]['event_id'], 'old')
