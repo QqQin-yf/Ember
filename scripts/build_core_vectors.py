@@ -24,7 +24,7 @@ import sys
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE)
 
-from ember.direction import embedding_model, embed_text  # noqa: E402
+from ember.recall_embedding import embedding_model, embed_text  # noqa: E402
 from ember.env import load_env  # noqa: E402
 from ember.store import EmberStore  # noqa: E402
 from ember.entity import EntityStore  # noqa: E402

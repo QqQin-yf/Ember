@@ -20,16 +20,13 @@ momo 2026-10-05 通电裁决：
 from __future__ import annotations
 
 import json
-import math
 import os
 
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from .entity import EntityStore
-from .env import load_env
-
-load_env(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from .recall_embedding import embedding_model, embed_text, cosine
 
 DIRECTION_VECTORS_FILE = "direction_vectors.jsonl"
 
@@ -37,32 +34,6 @@ DIRECTION_VECTORS_FILE = "direction_vectors.jsonl"
 # 2026-10-10；不是已证明设计。换模型或方向增多需重新取数）
 TOP1_FLOOR = 0.30
 MARGIN_FLOOR = 0.04
-
-
-def embedding_model():
-    from .model_config import settings
-    return settings('recall_embed',require_key=False).model
-
-
-def embed_text(text: str, timeout=None, retries=None) -> list[float]:
-    """Legacy Cue/Direction vector space, selected by the recall_embed purpose."""
-    from .model_gateway import call_model, ModelCallError
-    data=call_model('recall_embed',{'input':text},timeout_seconds=timeout,retries=retries)
-    try:
-        vector=data['data'][0]['embedding']
-        if (not isinstance(vector,list) or not vector or any(type(v) not in (int,float) or
-            not math.isfinite(v) for v in vector) or not any(vector)):
-            raise ValueError
-        return vector
-    except (KeyError,TypeError,ValueError,IndexError):
-        raise ModelCallError('response_invalid') from None
-
-
-def cosine(a: list[float], b: list[float]) -> float:
-    dot = sum(x * y for x, y in zip(a, b))
-    na = math.sqrt(sum(x * x for x in a))
-    nb = math.sqrt(sum(x * x for x in b))
-    return dot / (na * nb) if na and nb else 0.0
 
 
 class DirectionVectorStore:

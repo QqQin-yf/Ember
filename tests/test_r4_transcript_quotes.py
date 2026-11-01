@@ -18,7 +18,7 @@ from ember.llm import MockLLMClient
 from ember.store import EmberStore  # noqa: E402
 from ember.models import Event  # noqa: E402
 from ember.writer import validate_writer_arguments  # noqa: E402
-from ember.service import EmberService  # noqa: E402
+from tests.legacy_event_fixture import LegacyEventService as EmberService  # noqa: E402
 
 failures = []
 checks = 0

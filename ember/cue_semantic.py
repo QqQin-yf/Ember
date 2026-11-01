@@ -30,7 +30,7 @@ import os
 
 from typing import Any
 
-from .direction import cosine, embed_text
+from .recall_embedding import cosine, embed_text
 from .env import load_env
 
 load_env(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -107,7 +107,7 @@ def semantic_hits(input_text: str,
       vector_store CueVectorStore（无向量的 route 跳过——离线重建前
                    只参与词面，合法状态）
       floor        语义命中阈值（baseline 占位，见文件头铁律）
-      embed_fn     向量函数（缺省 direction.embed_text；测试注入 mock）
+      embed_fn     向量函数（缺省 recall_embedding.embed_text；测试注入 mock）
 
     返回 (命中列表, reason)：
       命中列表的元素是 (route, sim) 二元组——sim 是输入向量与该 cue

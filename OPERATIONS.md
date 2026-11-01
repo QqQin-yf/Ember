@@ -106,3 +106,7 @@ python -B -X utf8 scripts/check_memory_health.py --data-dir 'D:\your-heart\data\
 本条验收：18 项提取专项、517 项全量 unittest、38 项独立 sidecar 验收通过；22 个普通工具的实际 schema / 回执已重新导出。本地隔离测试，未部署。
 
 第 8–9 步修正 2：失败种子按来源版本和向量空间记录退避，退避中的切片不作种子或候选，后续材料继续归组；成功、来源变化或已处理后清理。extraction.retry_initial_seconds / retry_max_seconds / failure_warning_count 配置重试与告警。健康检查在数据库副本读取连续失败状态，输出 extraction_grouping_repeated_failure，不读原文或错误正文。
+
+第 8–9 步修正 3：移除生产 service 的旧前缀渲染器及 direction_focused / direction_reason / summary_fallback 参数、标签和诊断字段；历史渲染放入 tests/legacy_event_fixture.py。嵌入函数移至 ember/recall_embedding.py，主动搜索、Cue 和离线索引直接引用该模块，保留原 recall_embed 用途、凭据和验证行为。生产 service 导入不再加载 ember.direction。
+
+第 2、3 条联合验收：524 项全量 unittest 通过，sidecar 38 项与 Cue 14 项独立检查通过；22 个普通 MCP 工具回执导出成功。旧 test_r4_transcript_quotes.py 独立脚本仍依赖已删除的 key_quotes 字段并运行失败，不计入通过数；本次只将其渲染调用转向历史夹具。未部署或重启服务。

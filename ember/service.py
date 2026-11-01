@@ -14,7 +14,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from .models import Event, PresentationContext, RecallRoute
+from .models import Event, RecallRoute
 from .recall import (register_event_entity_refs,
                      _event_entity_refs)
 from .relation import RelationStore
@@ -22,7 +22,7 @@ from .sleep_state import SleepStateStore
 from .store import EmberStore, EVENTS_FILE
 from .entity import EntityStore
 from .sediment import SedimentStore
-from .direction import embed_text
+from .recall_embedding import embed_text
 from .turn_ledger import TurnLedger
 from .recall_ledger import RecallLedger
 from .turn_span import TurnSpanStore, spans_from_quotes
@@ -376,226 +376,6 @@ class EmberService:
         }
 
 
-    def _build_recall_prefix(self, ctx: PresentationContext,
-                             entity_hits: list | None = None,
-                             resolved_brought: list[tuple[str, str]] | None = None,
-                             summary_fallback: bool = False,
-                             direction_focused: str | None = None,
-                             units: list[dict] | None = None,
-                             strong_dropped: int = 0,
-                             presentations: list[dict] | None = None) -> str:
-        """结构化前缀块：被唤起的记忆挂在用户消息前面（momo 裁决格式）。
-
-        指向强度分层（momo 2026-10-01 裁决：无 must/may，纯运行时聚合）：
-        - Entity 明确指向 → 整个区域带出，标注"因提到〈实体名〉想起"
-        - Direction 聚焦（10-05 通电）→ 标注从哪个方向进入
-        - 多源共证（多路命中）→ 强指向；单线索补位 → 弱标注
-        - Relation 带回（v1）→ 标注"旧观点已被新认知取代"
-        summary_fallback（momo 10-04 裁决）：Direction 模糊/低分时不做
-        全文注入，降级为 Entity 层 summary——事件摘要 + id，留主动检索入口。
-
-        多源共证呈现（2026-10-15 设计夜定稿）：units 非空时按名额选中后的
-        单元序列渲染——实体块（概览+名下事件捆绑）在前、独立事件在后；
-        弱信号补位标「单线索」；在场去重（⑧）轻量续注只出一行；
-        strong_dropped > 0 时尾部给检索提示。units=None 按旧平铺逻辑。
-        """
-        entity_names = [h.name for h in (entity_hits or [])]
-        resolved_map = dict(resolved_brought or [])
-        lines = ["[记忆浮现]"]
-
-        def presented(kind: str, eid: str | None = None,
-                      entity_id: str | None = None, light: bool = False) -> None:
-            if presentations is None:
-                return
-            item: dict[str, Any] = {"presentation": kind}
-            if eid is not None:
-                event = self.store.get_event(eid)
-                item["event_id"] = eid
-                item["version_id"] = str(event.version_id) if event.version_id else None
-            if entity_id is not None:
-                item["entity_id"] = entity_id
-            if light:
-                item["light"] = True
-            presentations.append(item)
-
-        if summary_fallback:
-            # Entity 层 summary 回退：只给概览，不做全文注入
-            lines.append(f"你提到了{'、'.join('〈' + n + '〉' for n in entity_names)}，"
-                         "这里有一段与此相关的过往经历，但暂时说不准你想从哪个角度了解：")
-            # 实体名片（基本属性描述，§2.1 Entity.summary）：
-            # 有就插一行帮对话模型定位"这是关于什么的"；没生成过（空）就跳过
-            for h in (entity_hits or []):
-                try:
-                    ent = self.entity_store.get(h.entity_id)
-                except KeyError:
-                    continue
-                if (ent.summary or "").strip():
-                    lines.append(f"关于〈{h.name}〉：{ent.summary.strip()}")
-                    presented("entity_overview", entity_id=h.entity_id)
-            # 成员 summary 退役（2026-10-17 momo：entity summary 打头，
-            # 成员不单独抛头露面）——有归属且实体有描述的收敛为 id 清单
-            members = []
-            for eid in ctx.recalled_events:
-                event = self.store.get_event(eid)
-                ent_ref = _event_entity_of(self.store, eid)
-                ent_summary = ""
-                if ent_ref:
-                    try:
-                        ent_summary = (self.entity_store.get(
-                            ent_ref).summary or "").strip()
-                    except KeyError:
-                        pass
-                if ent_ref and ent_summary:
-                    members.append(eid)
-                    continue
-                lines.append(f"- {event.summary}（{eid}）")
-                presented("event_excerpt" if event.summary.strip() else "retrieval_hint", eid)
-            if members:
-                lines.append("（名下经历：" + "、".join(members) + "）")
-                presented("entity_overview")
-            lines.append("如果对方想深入某一条，可以再具体问问——那时再展开原文，"
-                         "或调用 read_memory_source(\"<event_id>\") 翻看。")
-            presented("retrieval_hint")
-            lines.append("[记忆概览结束——自然地运用，不要机械复述本结构]")
-            return "\n".join(lines) + "\n\n"
-
-        def _event_line(eid: str) -> None:
-            """单条事件行：修正承接 / 强度标注 / 原话 / 深挖指引。
-
-            高匹配内联当时对话（2026-10-18 momo 定稿：要罕见——上下文
-            撑不住）。三条件**合取**：
-            - significance 8-9（有实质影响的进展发现；10 分走简报原文
-              层常驻，不在这里重复占上下文）
-            - 本轮 ≥2 条独立线索共证（多 Cue 共命中，强度涌现口径）
-            - 语义路径过值：本轮该事件有语义锚点且 cosine 相似度 ≥
-              INLINE_SEMANTIC_FLOOR（2026-10-19 分数透传后启用真分数，
-              不再是「语义锚点存在即过值」）
-            任一不满足 → 原话行（key_quotes）+ 工具指引，照旧。
-            """
-            event = self.store.get_event(eid)
-            hits = [h for h in ctx.recall_trace.anchors if h.event_id == eid]
-            distinct_cues = sorted({h.cue for h in hits})
-            core = event.core or event.summary
-            if eid in resolved_map:
-                superseded = self.store.get_event(resolved_map[eid])
-                lines.append(f"- （修正承接）{core}")
-                lines.append(f"  你曾有过「{superseded.summary}」的认知，"
-                             "但它已被本次经历修正/取代——以上述新认知为准。")
-                quotes_line = self._format_key_quotes(event)
-                if quotes_line:
-                    lines.append(f"  {quotes_line}")
-                presented("event_text" if core.strip() else
-                          "event_excerpt" if quotes_line else "retrieval_hint", eid)
-                return
-            if entity_names and not hits:
-                strength = "实体区域"
-            elif len(distinct_cues) >= 2:
-                strength = "多个线索同时指向"
-            else:
-                strength = "隐约联想"
-            why = "、".join(f"「{c}」" for c in distinct_cues)
-            lines.append(f"- （{strength}）{core}")
-            # 高匹配（三条件合取）→ 内联当时对话；失败静默降级
-            semantic_hit = any(
-                h.matcher == "semantic" and (h.score or 0.0) >=
-                self.INLINE_SEMANTIC_FLOOR for h in hits)
-            high_match = (len(distinct_cues) >= 2 and semantic_hit
-                          and self._sig_level(event.significance) in (8, 9))
-            inlined = (high_match
-                       and self._inline_source_lines(eid, lines))
-            if not inlined:
-                quotes_line = self._format_key_quotes(event)
-                if quotes_line:
-                    lines.append(f"  {quotes_line}")
-            presented("event_text" if core.strip() else
-                      "event_excerpt" if inlined or self._format_key_quotes(event)
-                      else "retrieval_hint", eid)
-            if why:
-                hint = "" if inlined else (
-                    f"；需要原话时可调用 read_memory_source(\"{eid}\")")
-                lines.append(f"  触点：{why}{hint}")
-            elif not inlined:
-                lines.append(f"  需要原话时可调用 read_memory_source(\"{eid}\")")
-
-        def _light_line(eid: str) -> None:
-            """轻量续注一行（⑧ 在场去重）：2h 内已全量注入过，只报个到。
-
-            实体成员不打 member summary（2026-10-17 momo：entity
-            summary 打头）——挂实体名；散事件维持自己的 summary。
-            """
-            event = self.store.get_event(eid)
-            ent_ref = _event_entity_of(self.store, eid)
-            if ent_ref:
-                try:
-                    ent = self.entity_store.get(ent_ref)
-                except KeyError:
-                    ent = None
-                if ent is not None and (ent.summary or "").strip():
-                    lines.append(f"- （此前已浮现）〈{ent.name}〉名下的"
-                                 f"相关经历（{eid}）")
-                    presented("entity_overview", entity_id=ent_ref, light=True)
-                    return
-            lines.append(f"- （此前已浮现）{event.summary}（{eid}）")
-            presented("event_excerpt" if event.summary.strip() else "retrieval_hint",
-                      eid, light=True)
-
-        if units is not None:
-            # 多源共证呈现（2026-10-15 设计夜定稿）：实体块捆绑在前，
-            # 独立事件随后；块 = 「关于〈X〉：概览」+ 名下事件行；
-            # light unit（2h 内已注入）只出一行；weak 补位标「单线索」
-            entity_by_id = {h.entity_id: h for h in (entity_hits or [])}
-            lead_blocks = [u for u in units if u["kind"] == "entity_block"]
-            if lead_blocks:
-                names = "、".join(
-                    f"〈{entity_by_id[b['entity_id']].name}〉"
-                    for b in lead_blocks if b["entity_id"] in entity_by_id)
-                lead = f"你提到了{names}，与此相关的过往经历整体浮现"
-                if direction_focused:
-                    line_label = (direction_focused
-                                  .replace("dir_ember_", "").replace("_", " "))
-                    lead += f"（沿着「{line_label}」这条线）"
-                lines.append(lead + "：")
-            for u in units:
-                if u.get("light"):
-                    # 在场去重：近期已全量注入，轻量续注防唠叨
-                    if u["kind"] == "entity_block":
-                        h = entity_by_id.get(u["entity_id"])
-                        if h is not None:
-                            lines.append(f"- （此前已浮现）〈{h.name}〉名下的 "
-                                         f"{len(u['event_ids'])} 条经历，"
-                                         "需要细节按 id 检索")
-                            presented("entity_overview", entity_id=h.entity_id, light=True)
-                    else:
-                        _light_line(u["event_ids"][0])
-                    continue
-                if u["kind"] == "entity_block":
-                    h = entity_by_id.get(u["entity_id"])
-                    if h is not None:
-                        try:
-                            ent_summary = (self.entity_store.get(
-                                h.entity_id).summary or "").strip()
-                        except KeyError:
-                            ent_summary = ""
-                        if ent_summary:
-                            lines.append(f"关于〈{h.name}〉：{ent_summary}")
-                            presented("entity_overview", entity_id=h.entity_id)
-                    for eid in u["event_ids"]:
-                        _event_line(eid)
-                else:
-                    if u.get("weak") and u.get("cue_count", 0) <= 1:
-                        # 多 cue 弱补位不加此行：事件行的强度标注
-                        # （「多个线索同时指向」）已说明指向强度
-                        lines.append("- （单线索浮现，可能只是沾边）")
-                    _event_line(u["event_ids"][0])
-        else:
-            for eid in ctx.recalled_events:
-                _event_line(eid)
-        if strong_dropped > 0:
-            presented("retrieval_hint")
-            lines.append(f"（另有 {strong_dropped} 条高度相关的记忆因名额"
-                         "未展示——需要时可用 search_memory 按话题取回）")
-        lines.append("[记忆结束——自然地运用它们，不要机械复述本结构]")
-        return "\n".join(lines) + "\n\n"
 
     def _presented_event_refs(self, presentations: list[dict]) -> list[dict]:
         """Only actual event content; hidden entity members never become refs."""
@@ -931,8 +711,7 @@ class EmberService:
                     context_start_id=context_start_id, deferred_entries=entries,context_message_ids=context_message_ids)
                 stats = {k: rec[k] for k in (
                     "recalled_count", "entity_recalled", "entity_names", "filtered_by_sleep",
-                    "filtered_by_window", "resolved_brought", "direction_focused",
-                    "direction_reason", "summary_fallback", "semantic_matched", "semantic_reason")}
+                    "filtered_by_window", "resolved_brought", "semantic_matched", "semantic_reason")}
                 refs = {"recall_id": rid, "session_id": sid, "anchor_message_id": seq,
                         "events": rec["recall_refs"]["events"]}
                 out = {"injected": bool(rec["prefix"]), "injected_text": rec["prefix"] or None,
@@ -1246,7 +1025,6 @@ class EmberService:
         stats = {k: rec[k] for k in (
             "recalled_count", "entity_recalled", "entity_names",
             "filtered_by_sleep", "filtered_by_window", "resolved_brought",
-            "direction_focused", "direction_reason", "summary_fallback",
             "semantic_matched", "semantic_reason")}
         return {
             "injected": bool(rec["prefix"]),

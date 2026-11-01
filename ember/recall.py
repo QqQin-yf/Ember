@@ -15,12 +15,13 @@ Recall Cue 核心原则（momo 2026-09-30 22:52 + 2026-10-01 00:02 裁决）：
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from .models import Event, PresentationContext, RecallTrace, RouteHit
 from .store import EmberStore
 from .entity import EntityStore
-from .direction import DirectionMatcher
+if TYPE_CHECKING:
+    from .direction import DirectionMatcher
 from .cue_semantic import CueVectorStore, semantic_hits
 
 

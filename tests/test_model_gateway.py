@@ -48,6 +48,21 @@ class ModelGatewayTests(unittest.TestCase):
         with patch('urllib.request.urlopen') as send,self.assertRaises(ModelConfigError):call_model('embed',{'input':'text'})
         send.assert_not_called()
 
+    def test_shared_recall_embedding_keeps_purpose_provider_and_call_policy(self):
+        from ember.recall_embedding import embedding_model,embed_text
+        self.data['purposes']['recall_embed']['model']='fixture-recall-model';self.write()
+        self.assertEqual(embedding_model(),'fixture-recall-model')
+        with patch('urllib.request.urlopen',return_value=self.reply()) as send:
+            self.assertEqual(embed_text('query',timeout=7,retries=0),[1,0])
+        request=send.call_args.args[0]
+        self.assertEqual(json.loads(request.data),{'input':'query','model':'fixture-recall-model'})
+        self.assertEqual(request.full_url,'https://models.example/v1/embeddings')
+        self.assertEqual(request.get_header('Authorization'),'Bearer private-fixture-key')
+        self.assertEqual(send.call_args.kwargs['timeout'],7)
+        with patch('ember.model_gateway.call_model',return_value={'data':[{'embedding':[0,0]}]}):
+            with self.assertRaisesRegex(ModelCallError,'response_invalid'):
+                embed_text('query')
+
     def test_secrets_and_provider_cycles_are_invalid(self):
         self.data['providers']['remote']['api_key']='secret';self.write()
         with self.assertRaises(ModelConfigError):registry()

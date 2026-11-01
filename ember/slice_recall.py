@@ -216,7 +216,6 @@ def automatic_slice_recall(service, session, turn, text, context_start_id=None,c
         'recalled_count': 0, 'entity_recalled': 0, 'entity_names': [],
         'filtered_by_sleep': 0, 'filtered_by_window': matched.get('filtered_by_window', 0),
         'dropped_by_seats': 0, 'weak_pooled': 0, 'strong_dropped': 0,
-        'observe_extra': None, 'resolved_brought': [], 'direction_focused': None,
-        'direction_reason': 'retired_from_automatic_recall', 'summary_fallback': False,
+        'observe_extra': None, 'resolved_brought': [],
         'semantic_matched': 0, 'semantic_reason': matched['status'],
         'slice_recall': matched}

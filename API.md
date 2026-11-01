@@ -68,7 +68,7 @@ write_event / write_promise 需要绑定进行中的生成。
 ```
 
 - `injected_text`：注入本轮 system 的召回文本。
-- `memory`：召回统计。
+- `memory`：Event / Entity 命中、来源过滤和语义匹配统计。
 - `system_reminders`：需注入本轮的提醒数组。
 
 `presentations` 记录呈现单位，`recall_refs` 记录触发会话、真实锚点 seq 和呈现事件的出处。只有事件正文/摘录进入 `recall_refs.events`；实体概览不展开隐藏成员。旧事件或缺可靠消息身份保持 unresolved，路径由 app 解析。完整字段及限制见 [召回引用协议](PROTOCOL_DETAILS.md#recall-refs)。

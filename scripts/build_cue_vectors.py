@@ -8,7 +8,7 @@
 职责：
   读 {EMBER_DATA_DIR}/recall_routes.jsonl 中 status=active 且 matcher=lexical
   的全部 route（去重：同一 cue 文本只算一次向量），逐条调
-  ember.direction.embed_text（硅基流动 Qwen3-Embedding-8B）产出向量，
+  ember.recall_embedding.embed_text（硅基流动 Qwen3-Embedding-8B）产出向量，
   整文件重写 cue_vectors.jsonl（route_id → {cue, vector, model}）。
 
 不做：任何运行时判断；retired/非 lexical route 的向量（它们不参与召回）。
@@ -22,7 +22,7 @@ import sys
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE)
 
-from ember.direction import embedding_model, embed_text  # noqa: E402
+from ember.recall_embedding import embedding_model, embed_text  # noqa: E402
 from ember.env import load_env  # noqa: E402
 
 DATA = os.environ.get("EMBER_DATA_DIR", os.path.join(BASE, "data"))

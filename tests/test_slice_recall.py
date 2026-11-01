@@ -164,6 +164,19 @@ class SliceRecallTests(unittest.TestCase):
         snapshot = svc.sidecar_recall_snapshot('rid')['snapshot']
         self.assertEqual(snapshot['slice_recall'], first['slice_recall'])
 
+    def test_hook_and_pipeline_diagnostics_do_not_include_direction_fields(self):
+        svc=EmberService(EmberStore(self.tmp.name),MockLLMClient())
+        removed={'direction_focused','direction_reason','summary_fallback'}
+        with patch.object(SliceEmbeddingClient,'embed',return_value=[1.,0.]):
+            bound=svc.hook_turn_start('bound','a query',user_message_id=101,recall_id='diagnostics')
+            replay=svc.hook_turn_start('bound','a query',user_message_id=101,recall_id='diagnostics')
+            legacy=svc.hook_turn_start('unbound','another query',user_message_id=103)
+            direct=svc.run_recall_pipeline(svc.get_or_create_session('direct'),1,'a query')
+        self.assertEqual(replay,bound)
+        for result in (bound['memory'],replay['memory'],legacy['memory'],direct):
+            self.assertFalse(removed.intersection(result))
+            self.assertIn('semantic_matched',result)
+
     def test_active_search_memory_still_uses_event_content(self):
         svc = EmberService(EmberStore(self.tmp.name), MockLLMClient())
         svc.store.write_event(Event(event_id='old', version_id='v', source_ref='x', raw_ref='x',

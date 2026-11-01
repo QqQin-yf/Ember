@@ -69,7 +69,7 @@ Event 后台共用一套“向量候选 + LLM 判断”：一类事进入主题�
 
 Entity summary 标注“根据相关事件客观整理”，由后台写。项目按新事实重写现状，旧状态退出 summary；人、动物、地方只增补。先匹配现有对象，确定同一对象才复用并加别名；拿不准不合并。只对新建、别名或 summary 变化的卡片查重，保留较早主卡片、别名及成员，旧 ID 映射可用。模型可用 revise_entity_summary 直接订正。
 
-输入只命中 Entity 名称/别名时，仅给 summary；命中 Event 时附其全部所属 Entity summary，卡片一次一份，不带整区域 Event。read_entity_events 下钻成员。Direction 与 EntityRecall 的旧区域召回不再由生产 service 使用；direction.py 的离线脚本与历史测试仍保留。
+输入只命中 Entity 名称/别名时，仅给 summary；命中 Event 时附其全部所属 Entity summary，卡片一次一份，不带整区域 Event。read_entity_events 下钻成员。生产 service、轮前诊断和切片召回不含 Direction 参数、聚焦标签或回退标记。旧渲染器仅在历史测试夹具中；direction.py 保留离线匹配兼容。共享 recall_embed 嵌入和向量帮助函数位于 recall_embedding.py，账户、模型用途和向量空间不变。
 
 ## 5. 关系时间线与 pin
 

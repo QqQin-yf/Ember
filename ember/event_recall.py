@@ -90,8 +90,7 @@ def append_events(service,result,session,turn,text,start=None,entries=None,conte
     result.update(prefix=('[记忆浮现]\n'+'\n'.join(blocks)) if blocks else '',presentations=presentations,
                   recall_refs={'events':service._presented_event_refs(presentations)},
                   recalled_count=min(len(selected),cfg['event_limit']),entity_recalled=len(names),entity_names=names,
-                  filtered_by_sleep=len(blocked),filtered_by_window=0,resolved_brought=[],direction_focused=None,
-                  direction_reason='retired',summary_fallback=False,semantic_matched=sum(s>=cfg['core_threshold'] for _,_,s in selected),
+                  filtered_by_sleep=len(blocked),filtered_by_window=0,resolved_brought=[],semantic_matched=sum(s>=cfg['core_threshold'] for _,_,s in selected),
                   semantic_reason='shared_query_vector',dropped_by_seats=max(0,len(selected)-cfg['event_limit']),
                   weak_pooled=0,strong_dropped=0,observe_extra=None)
     return result
