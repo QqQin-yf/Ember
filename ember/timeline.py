@@ -272,7 +272,16 @@ class Timeline:
                 with self.db() as conn:
                     conn.execute('INSERT OR REPLACE INTO link_jobs VALUES (?,?,?,?)',
                         (event.event_id,digest,type(exc).__name__,time.time()+lifecycle_config()['slice']['retry_seconds']))
-            return
+            return True
+        return False
+
+    def next_retry(self):
+        with self.db() as conn:
+            deadlines=[r[0] for r in conn.execute("SELECT retry_at FROM timeline WHERE error IS NOT NULL UNION ALL SELECT retry_at FROM link_jobs WHERE error IS NOT NULL")]
+            point=conn.execute("SELECT value FROM metadata WHERE key='point_retry'").fetchone()
+            if point:
+                deadlines.append(float(point[0]))
+        return min(deadlines) if deadlines else None
 
     def read_point(self,point):
         with self.db() as conn:
@@ -291,18 +300,35 @@ def tool_specs():
 
 class TimelineWorker:
     def __init__(self,registry):
-        self.registry=registry;self.stop_event=asyncio.Event()
+        self.registry=registry;self.stop_event=asyncio.Event();self.recovered=set()
+
+    def process_one(self,name):
+        from .timeline_work import request, ready, finish
+        service=self.registry.service(name)
+        root=service.store.root
+        if name not in self.recovered:
+            # One startup recovery scan, never one scan per idle tick.
+            if any(e.kind=='relationship' for e in service.store.all_events()):
+                request(root)
+            self.recovered.add(name)
+        revision=ready(root)
+        if revision is None:
+            return False
+        timeline=Timeline(service)
+        try:
+            timeline.prepare()
+            while timeline.link():
+                pass
+            retry=timeline.next_retry()
+        except Exception:
+            retry=time.time()+lifecycle_config()['slice']['retry_seconds']
+        finish(root,revision,retry)
+        return True
 
     async def run(self):
         while not self.stop_event.is_set():
             for name in self.registry.names:
-                service=self.registry.service(name)
-                if any(e.kind=='relationship' for e in service.store.all_events()):
-                    try:
-                        await asyncio.to_thread(Timeline(service).prepare)
-                        await asyncio.to_thread(Timeline(service).link)
-                    except Exception:
-                        pass
+                await asyncio.to_thread(self.process_one,name)
             try:
                 await asyncio.wait_for(self.stop_event.wait(),timeout=1)
             except asyncio.TimeoutError:

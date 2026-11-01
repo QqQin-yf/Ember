@@ -30,8 +30,9 @@ def _now_iso() -> str:
 class PinStore:
     """钉住登记：jsonl 行 = {"event_id": ..., "pinned_at": ISO}。"""
 
-    def __init__(self, root: str):
+    def __init__(self, root: str, on_change=None):
         self.root = root
+        self.on_change = on_change
         # event_id -> pinned_at（保序：按钉住时间）
         self._items: dict[str, str] = {}
         self._load()
@@ -71,6 +72,8 @@ class PinStore:
             return False
         self._items[eid] = _now_iso()
         self._save()
+        if self.on_change:
+            self.on_change(eid)
         return True
 
     def remove(self, event_id: str) -> bool:
@@ -80,6 +83,8 @@ class PinStore:
             return False
         del self._items[eid]
         self._save()
+        if self.on_change:
+            self.on_change(eid)
         return True
 
     def is_pinned(self, event_id: str) -> bool:

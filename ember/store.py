@@ -28,6 +28,7 @@ class EmberStore:
         self._events: dict[str, Event] = {}
         self._routes: dict[str, RecallRoute] = {}
         self._load()
+        self._event_kinds = {eid: event.kind for eid,event in self._events.items()}
         # cue(小写) -> [route_id]  ——— 可重建的工程层索引
         self._cue_index: dict[str, set[str]] = defaultdict(set)
         self._rebuild_index()
@@ -75,6 +76,7 @@ class EmberStore:
     def reload(self) -> None:
         """公开入口：从存储文件重载 events/routes（行级 patch 后调用）。"""
         self._load()
+        self._event_kinds = {eid: event.kind for eid,event in self._events.items()}
         self._rebuild_index()
 
     def index_snapshot(self) -> dict[str, list[str]]:
@@ -84,8 +86,13 @@ class EmberStore:
     # ---------- 写入 ----------
 
     def write_event(self, event: Event) -> Event:
+        previous_kind = self._event_kinds.get(event.event_id)
         self._events[event.event_id] = event
         self._append(EVENTS_FILE, event)
+        self._event_kinds[event.event_id] = event.kind
+        if event.kind == 'relationship' or previous_kind == 'relationship':
+            from .timeline_work import request
+            request(self.root)
         return event
 
     def write_route(self, route: RecallRoute) -> RecallRoute:

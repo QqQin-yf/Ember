@@ -88,3 +88,5 @@ python -B -X utf8 scripts/check_memory_health.py --data-dir 'D:\your-heart\data\
 修正 6：对应《Event 字段调整》第 3 节“钉住的约定例外”。所有入口统一跳过 pinned promise 曝光，旧待处理在读账时清理；主动处理允许空 spans，非空 log 及状态/日期校验不变。
 
 修正 7：对应《给 Codex 的修正》第 7 条，移除生产 EmberService 中旧 EntityRecall / DirectionMatcher 实例及调用；历史协议测试将旧路径放入 tests/legacy_event_fixture.py。direction.py 仍由离线脚本、历史测试及 embedding 帮助函数使用，保留；自动召回使用现行 Event/切片分支。
+
+修正 8：对应《给 Codex 的修正》第 8 条。时间线用独立 SQLite 待办记录关系写入、pin 变化、失败重试期限；启动只恢复扫描一次，空闲 tick 不遍历 Event，不 synchronize。待办版本防止模型执行期间的新写入被清掉，独立数据库避免模型长事务阻塞写入通知。

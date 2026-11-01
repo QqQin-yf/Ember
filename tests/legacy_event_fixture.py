@@ -453,4 +453,3 @@ class LegacyEventService(EmberService):
 
 
     run_recall_pipeline = legacy_event_recall_pipeline
-

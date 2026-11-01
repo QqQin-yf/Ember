@@ -137,7 +137,12 @@ class EmberService:
         # 召回记账（10-08 定稿 §3.2）：候选组装与旧 Cue 收紧的共同前置，旁路只观察
         self.recall_ledger = RecallLedger(getattr(store, "root", ""))
         # 钉住登记（2026-10-17 设计夜：briefing 必带 + 自动召回不再浮现）
-        self.pin_store = PinStore(getattr(store, "root", ""))
+        def pin_changed(eid):
+            event = self.store._events.get(eid)
+            if event and event.kind == 'relationship':
+                from .timeline_work import request
+                request(self.store.root)
+        self.pin_store = PinStore(getattr(store, "root", ""), on_change=pin_changed)
         # 会话原文存档已退役（2026-10-14 去原文化）：原文只存后端消息树
         # 一份，ember 经 source_client 按 message_id 按需拉取（用完即弃）；
         # 轮次持久账 = turn_ledger（无条件记账，重启恢复计数用）
