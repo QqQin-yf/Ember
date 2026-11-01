@@ -74,6 +74,8 @@ class SourceSyncWorker:
 
     def process_one(self):
         for name in self.registry.names:
+            from .promises import Promises
+            Promises(self.registry.service(name)).sweep()
             root=self.registry.dir_of(name)
             if not (Path(root)/'source_sync.sqlite3').exists():
                 continue

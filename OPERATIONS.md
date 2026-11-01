@@ -64,3 +64,5 @@ python -B -X utf8 scripts/check_memory_health.py --data-dir 'D:\your-heart\data\
 1. Event 字段和写入工具：对应《Event字段调整》第 1–4 节、《写入工具与归组范围》第 1 节。移除旧内容字段，整数 significance，增加 kind / focus 和 promise 基础字段；成对工具共用来源与调用幂等校验，支持区间或离散切片来源；读取与 briefing 以 core 兜底。后续步骤完成前，原有分类维护和 briefing 组装尚未切换。
 
 2. 原文切片：对应《原文切片调整》第 1–7 节、《整体流程》2–3 节及共享游标约定。新增 provider 增量游标与幂等重放、规则/典型废话过滤、区间新旧绑定、按 kind 与上级 core 的独立相似度门槛；有上级只呈现 Event。停用逐轮摄取和逐轮 GLM 池归类。主题概括替换入口将在第 4 步接入，提取归组队列在第 8 步接入。配置均在 config/lifecycle.json；原文接口适配契约见 API.md。
+
+3. promise：对应《Event字段调整》第 3 节、《Briefing与提取工具》第 3 节及《整体流程》本地午夜约定。加入持久曝光账、处理工具与追加 log、改期、到期 briefing、低分完结退出召回、10 分无 due 默认 pin，以及每日午夜/启动补算过时效。低分完结主题概括在第 4 步接入共用归组。

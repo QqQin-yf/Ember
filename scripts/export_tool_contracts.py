@@ -14,10 +14,11 @@ sys.path.insert(0,str(ROOT))
 from ember.writer import build_tools_spec,build_revise_tool_spec,build_search_tool_spec,build_pin_tool_specs
 from ember.knowledge_tools import tool_specs,dispatch
 from ember.tool_validation import validate_tool_input
+from ember.promises import tool_specs as promise_specs, Promises, dispatch as promise_dispatch
 
 
 def specifications():
-    ordinary=build_tools_spec()+build_revise_tool_spec()+build_search_tool_spec()+build_pin_tool_specs()+tool_specs()
+    ordinary=build_tools_spec()+build_revise_tool_spec()+build_search_tool_spec()+build_pin_tool_specs()+tool_specs()+promise_specs()
     sleep=tool_specs(sleep=True)
     by_name={s['function']['name']:s['function'] for s in ordinary+sleep}
     return by_name,{s['function']['name'] for s in ordinary},{s['function']['name'] for s in sleep}
@@ -157,6 +158,10 @@ def isolated_receipts():
             results['extract_memory_entity']=call('extract_memory_entity',{'group_id':entity,'name':'Fixture object',
                 'summary':'An isolated object','event_ids':[r['id'] for r in events]})
             results['write_promise']=service.sidecar_call_tool('write_promise',{'event':dict(event,kind='promise',due=None),'recall_routes':args['recall_routes'],'source_slice_ids':ids})
+            promise_id=results['write_promise']['event_id']
+            Promises(service).enter(promise_id,'cue',{'session_id':'fixture-chat','message_ids':['1']})
+            results['list_pending_promises']=promise_dispatch(service,'list_pending_promises',{})
+            results['process_promise']=promise_dispatch(service,'process_promise',{'event_id':promise_id,'log':'Fixture promise still open'})
             results['set_slice_recall_state']=call('set_slice_recall_state',{'group_id':generic,'slice_ids':[ids[0]],
                 'reason':'Fixture-only outdated example','evidence':sources[0]['messages'][0]['content']})
             results['finish_memory_group']=call('finish_memory_group',{'group_id':generic,'state':'reviewed'})

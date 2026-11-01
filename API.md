@@ -333,3 +333,10 @@ Ember 在 Event 落库后后台拉取，以及 POST /ember/briefing/refresh 时�
 两个触发点共用一个持久游标和排他执行锁，切片以消息身份去重；绑定、筛选和向量写入成功才推进游标，失败保留游标供重试。briefing 返回 source_sync 状态；来源或模型不可达时保留准确的已有记忆，报告 unavailable，不假装增量已同步。刷新接口现会等待原文拉取与嵌入，应设置适当请求超时。App 原文服务适配此接口后再启用新链路。
 
 有上级的切片仅在切片自身与上级 core 分别过门槛后带出符合 kind 规则的上级 Event；不直接呈现原文。无上级且有信息量的切片才直接呈现。阈值、典型废话、页大小等见 config/lifecycle.json（EMBER_LIFECYCLE_CONFIG 可指定替代文件）；所有嵌入仍由 config/models.json 的 embed 用途和统一网关提供。
+
+
+### 约定处理（2026-11-01）
+
+list_pending_promises 返回真正进过上下文而尚未写 log 的约定及其原文 span、时间、进入路径；process_promise 要求 event_id 和非空 log，可选 status=done/dropped、due=带时区 ISO 日期时间或 null。未曝光约定不能通过该工具修改。写 log 后才确认处理完；状态不变也必须写。追加 log 与曝光回执可在重启后核对恢复。
+
+到期仍 open 的约定追加在 briefing 末尾，不受预算裁切；未来到期或无 due 只按线索浮现，10 分无 due 写入时默认 pin。低分（默认 <=7）完结后 Event 与其独占的切片退出自动召回，主动下钻仍可达。按 config/lifecycle.json 的时区每日零点检查到期满 lapse_days 的 open 约定，写入 lapsed log；启动补算。Windows 需安装 requirements.txt 中的 tzdata。待处理数量只在刷新 briefing 时更新，普通轮次不替换 briefing。

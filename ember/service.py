@@ -298,6 +298,8 @@ class EmberService:
         self._generation_lock = threading.RLock()
         self._generation_contexts: dict[str, dict] = {}
         self._volatile_tool_results: dict[tuple[str, str], dict] = {}
+        from .promises import Promises
+        Promises(self).sweep()
         try:
             self._reconcile_recall_effects()
         except Exception:
@@ -578,6 +580,8 @@ class EmberService:
             "route_count": len(routes),
             "recall_cues": [r["cue"] for r in routes],
         }
+        from .promises import Promises
+        Promises(self).written(event)
         from .source_sync import request_sync
         request_sync(self)
         # Derived memberships can be rebuilt after source completion.
@@ -1191,6 +1195,9 @@ class EmberService:
                 self.turn_ledger.record_start_once(effect["operation_id"], entry)
             elif effect["kind"] == "recall":
                 self.recall_ledger.record_once(effect["operation_id"], entry)
+            elif effect['kind']=='promise_exposure':
+                from .promises import Promises
+                Promises(self).enter(**entry)
             else:
                 raise ValueError("Unknown recall effect kind")
             self.generations.acknowledge_effect(effect["operation_id"])
@@ -1254,8 +1261,14 @@ class EmberService:
                     return self._generation_error("ledger_recovery_pending", "Earlier recall effects need recovery")
                 self.generations.supersede()
                 self._generation_contexts.clear()
-                return self._hook_turn_start_legacy(
+                result=self._hook_turn_start_legacy(
                     session_id, message, heart_turn_id, user_message_id, context_start_id)
+                from .promises import Promises
+                for item in result.get('presentations',[]):
+                    if item.get('event_id'):
+                        Promises(self).enter(item['event_id'],'cue',{'session_id':result.get('session_id'),
+                            'message_ids':[str(user_message_id)] if user_message_id is not None else [],'turn':result.get('turn')})
+                return result
         rid, sid, seq = identity(recall_id), identity(session_id), message_seq(user_message_id)
         if rid is None or sid is None or seq is None or not message.strip():
             return self._generation_error("invalid_identity", "recall_id, session_id and a real user_message_id are required")
@@ -1327,6 +1340,12 @@ class EmberService:
                 if heart_turn_id:
                     start_entry["heart_turn_id"] = str(heart_turn_id).strip()
                 effects = [("turn_start", start_entry)] + [("recall", entry) for entry in entries]
+                for p in out['presentations']:
+                    eid=p.get('event_id')
+                    if eid and self.store.get_event(eid).kind=='promise':
+                        effects.append(('promise_exposure',{'event_id':eid,
+                            'route':'recall' if p.get('via_slice_id') else 'cue',
+                            'span':{'session_id':sid,'message_ids':[seq]},'at':_now_iso()}))
                 self.generations.commit_snapshot(rid, turn, out, metadata, effects)
                 self._reconcile_recall_effects(rid)
             except Exception:
@@ -1531,6 +1550,9 @@ class EmberService:
                               context: dict | None = None,
                               recall_id: str | None = None,
                               tool_call_id: str | None = None) -> dict:
+        from .promises import TOOL_NAMES as PROMISE_TOOLS, dispatch as promise_dispatch
+        if name in PROMISE_TOOLS:
+            return promise_dispatch(self,name,arguments)
         from .knowledge_tools import TOOL_NAMES, dispatch
         if name in TOOL_NAMES:
             return dispatch(self, name, arguments, context)
@@ -1649,9 +1671,10 @@ class EmberService:
     def sidecar_tool_specs(self) -> list[dict[str, Any]]:
         """MCP tools/list 工具清单（含修正、检索与钉住）。"""
         from .knowledge_tools import tool_specs
+        from .promises import tool_specs as promise_specs
         return (build_tools_spec() + [build_revise_tool_spec()[0]]
                 + build_search_tool_spec() + build_pin_tool_specs()
-                + tool_specs())
+                + tool_specs() + promise_specs())
 
     def sidecar_create_memory_event(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """MCP 工具 create_memory_event 执行体：进行中的一轮 + 参数 → 落库。
@@ -2290,11 +2313,13 @@ class EmberService:
                        for _s, e in self.turn_spans.span_of_event(ev))
 
         def eligible(ev: Any) -> bool:
-            return (self.sleep_state.recall_allowed(ev.event_id)
+            from .memory_lifecycle import Lifecycle
+            return (Lifecycle(self.store.root,self.source_instance).eligible(ev.event_id)
+                    and self.sleep_state.recall_allowed(ev.event_id)
                     and (getattr(ev, "origin", "") or "") != "observe")
 
         def in_new72(ev: Any) -> bool:
-            return bool(ev.ingest_time) and ev.ingest_time >= horizon
+            return ev.kind!='promise' and bool(ev.ingest_time) and ev.ingest_time >= horizon
 
         # —— 候选池 ——
         pinned: list[Any] = []
@@ -2312,7 +2337,7 @@ class EmberService:
         for ev in self.store.all_events():
             if not eligible(ev) or onstage(ev) or ev.event_id in pinned_set:
                 continue
-            if self._sig_level(ev.significance) == 10:
+            if self._sig_level(ev.significance) == 10 and ev.kind!='promise':
                 sig10.append(ev)
             elif in_new72(ev):
                 new72.append(ev)
@@ -2392,6 +2417,17 @@ class EmberService:
             self.recall_ledger.record(session_id, 0, "briefing",
                                       list(dict.fromkeys(kept_ids)))
 
+        from .promises import Promises
+        promises=Promises(self)
+        for event in promises.overdue():
+            if onstage(event):
+                continue
+            text+='\n'+f'约定到期 [{event.event_id}] {event.core}（due={event.due}，open）'
+            messages=[str(mid) for (sid,_),mid in self.turn_ledger.user_msg.items() if sid==session_id]
+            promises.enter(event.event_id,'briefing',{'session_id':session_id,'message_ids':sorted(messages,key=int)})
+        pending=len(promises.pending())
+        if pending:
+            text+=f'\n还有 {pending} 条进过上下文的约定没处理'
         report = {"status": "ok", "text": text, "chars": len(text),
                   "session_id": session_id, "source_sync": source_sync,
                   "stats": {"pinned": len(pinned), "sig10": len(sig10),
