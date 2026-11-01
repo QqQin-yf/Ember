@@ -32,7 +32,7 @@ class KnowledgeMCPTests(unittest.TestCase):
             manager=StreamableHTTPSessionManager(app=sidecar.mcp_server,json_response=True,stateless=True)
             with patch.object(sidecar,'REGISTRY',registry),patch.object(sidecar,'TOKEN',''), \
                     patch.object(sidecar,'session_manager',manager), \
-                    patch('ember.pool_maintenance.KnowledgeEmbeddingWorker.process_one',return_value=False), \
+                    patch('ember.knowledge.KnowledgeEmbeddingWorker.process_one',return_value=False), \
                     TestClient(sidecar.app) as client:
                 headers={'Accept':'application/json, text/event-stream'}
                 listed=client.post('/mcp/',headers=headers,json={'jsonrpc':'2.0','id':1,'method':'tools/list','params':{}}).json()

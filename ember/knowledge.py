@@ -1,4 +1,5 @@
 """App-authored knowledge and exact, possibly disjoint slice provenance."""
+import asyncio
 from contextlib import contextmanager
 import json
 import math
@@ -223,3 +224,32 @@ def embed_knowledge(root, instance, config):
                 (json.dumps(vector),space,row['content_hash'],row['memory_id'],row['content_hash']))
         return True
     return False
+
+
+class KnowledgeEmbeddingWorker:
+    def __init__(self, registry):
+        self.registry=registry
+        self.stop_event=asyncio.Event()
+
+    def process_one(self):
+        from .slice_embedding import SliceEmbeddingConfig
+        import os
+        path=os.environ.get('EMBER_SLICE_EMBED_CONFIG')
+        for name in self.registry.names:
+            root=self.registry.dir_of(name)
+            if KnowledgeStore(root,name).all():
+                if embed_knowledge(root,name,SliceEmbeddingConfig.load(path)):
+                    return True
+        return False
+
+    async def run(self):
+        while not self.stop_event.is_set():
+            try:
+                processed=await asyncio.to_thread(self.process_one)
+            except Exception:
+                processed=False
+            if not processed:
+                try:
+                    await asyncio.wait_for(self.stop_event.wait(),timeout=5)
+                except asyncio.TimeoutError:
+                    pass

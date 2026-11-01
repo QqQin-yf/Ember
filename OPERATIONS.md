@@ -76,3 +76,5 @@ python -B -X utf8 scripts/check_memory_health.py --data-dir 'D:\your-heart\data\
 7. Briefing 重组：对应《Briefing与提取工具》第 1 节及《整体流程》第 3 节。实现五档顺序、剩余预算砍低分近期条目、关系与 pin 去重、去除自动 10 分及最高召回旧条、末尾待处理约定数；精确现场 ID 支持多会话离散来源，GET 读取冻结快照。约定处理材料按曝光 generation 的确切消息拉取，并保持原文响应易失。
 
 修正 1：对应《Event字段调整》1 与《Pin》2。focus 输入改为逐字原话，复用 quote_spans 的匹配规则，在来源区间内解析为内部消息 ID；聊天和切片写入均在落库前校验，失败返回字段与重摘提示。
+
+修正 2：对应《原文切片调整》5.1。删除逐 trace 入队及 GLM 归类的 PoolQueue / PoolMaintenanceWorker 和生命周期残留；知识嵌入 worker 归回 knowledge 模块。保留召回诊断 trace，但不把它作为归组任务，第 8 步仅从无上级、有信息量的切片供料。

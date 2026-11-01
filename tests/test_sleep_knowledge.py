@@ -12,7 +12,7 @@ class SleepKnowledgeTests(unittest.TestCase):
         self.fixture=pool_fixture.PoolKnowledgeTests()
         self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
-        self.fixture.test_pool_is_enqueued_before_any_reply_or_event_and_excludes_current()
+        self.fixture.seed_source_review()
         self.service=self.fixture.service
         self.stage=SleepKnowledge(self.service)
         self.identity={'sleep_id':'sleep-1','session_id':'current'}

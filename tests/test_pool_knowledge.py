@@ -7,7 +7,6 @@ from unittest.mock import patch
 
 from ember.knowledge import KnowledgeStore, knowledge_space, embed_knowledge
 from ember.knowledge_tools import dispatch, tool_specs
-from ember.pool_maintenance import PoolQueue, PoolMaintenanceWorker
 from ember.slice_recall import SliceRecall
 from ember.slice_embedding import SliceEmbeddingConfig
 from ember.maintenance_client import MaintenanceConfig
@@ -51,58 +50,50 @@ class PoolKnowledgeTests(unittest.TestCase):
         return [{'proposals':[{'kind':'pattern','direction':'Lunch choice habit','ids':old['slice_ids'],'reason':old['reason'],
             'evidence':[{'id':e['slice_id'],'quote':e['quote']} for e in old['evidence']]}]}]
 
-    def test_pool_is_enqueued_before_any_reply_or_event_and_excludes_current(self):
-        queue=PoolQueue(self.root)
-        queue.enqueue(self.trace())
-        worker=PoolMaintenanceWorker(SimpleNamespace(names=['default'],dir_of=lambda n:str(self.root),service=lambda n:self.service))
-        worker.last_discover=float('inf')
-        with patch('ember.pool_maintenance.MaintenanceConfig.load',return_value=MaintenanceConfig('https://example.invalid','test','test')), \
-                patch('ember.pool_maintenance.MaintenanceClient.judge',return_value=self.pool_judge()) as judge:
-            worker.process_one()
-        payload=judge.call_args.args[1]
-        self.assertEqual(set(payload),{'phase','subject','materials','known_groups'})
-        self.assertEqual(len(payload['materials']),2)
-        self.assertNotIn('本轮禁止进入维护',json.dumps(payload,ensure_ascii=False))
+    def seed_source_review(self):
+        from ember.memory_lifecycle import Lifecycle
+        Lifecycle(self.root).propose('pattern',self.store.sources([self.a['slice_id'],self.b['slice_id']]),
+            '两段原文体现相近习惯',{'direction':'Lunch choice habit'})
+
+    def test_source_review_fixture_does_not_create_memories(self):
+        self.seed_source_review()
         self.assertEqual(len(self.store.groups()),1)
         self.assertEqual(self.store.all(),[])
         self.assertEqual(self.service.store.all_events(),[])
-        with queue.db() as db:
-            self.assertEqual(db.execute('SELECT state FROM pool_jobs').fetchone()[0],'done')
 
     def test_preview_never_creates_pool_job(self):
-        queue=PoolQueue(self.root)
-        queue.enqueue(self.trace('preview'))
-        self.assertIsNone(queue.claim())
+        self.slices.save_embedding(self.a,self.config.space,[1.,0.])
+        with patch('ember.slice_recall.SliceEmbeddingConfig.load',return_value=self.config), \
+             patch('ember.slice_recall.SliceEmbeddingClient.embed',return_value=[1.,0.]), \
+             patch('ember.maintenance_client.MaintenanceClient.judge') as judge:
+            SliceRecall(self.root).match('preview',purpose='preview')
+        judge.assert_not_called()
+        with self.store.db() as db:
+            self.assertIsNone(db.execute("SELECT name FROM sqlite_master WHERE name='pool_jobs'").fetchone())
 
     def test_real_turn_start_does_not_enqueue_glm_pool_work(self):
         for source in (self.a,self.b):
             self.slices.save_embedding(source,self.config.space,[1.,0.])
         from ember.slice_reranker import RerankerConfig
         with patch('ember.slice_recall.SliceEmbeddingConfig.load',return_value=self.config), \
-                patch('ember.slice_recall.SliceEmbeddingClient.embed',return_value=[1.,0.]), \
-                patch('ember.slice_presentation.RerankerConfig.load',return_value=RerankerConfig()):
+             patch('ember.slice_recall.SliceEmbeddingClient.embed',return_value=[1.,0.]), \
+             patch('ember.slice_presentation.RerankerConfig.load',return_value=RerankerConfig()), \
+             patch('ember.maintenance_client.MaintenanceClient.judge') as judge:
             started=self.service.hook_turn_start('current','这轮不参与归类',user_message_id=101,recall_id='pool-born')
+        judge.assert_not_called()
         self.assertEqual(started['slice_recall']['candidate_count'],2)
-        with PoolQueue(self.root).db() as db:
-            job=db.execute('SELECT * FROM pool_jobs').fetchone()
-        self.assertIsNone(job)
+        with self.store.db() as db:
+            self.assertIsNone(db.execute("SELECT name FROM sqlite_master WHERE name='pool_jobs'").fetchone())
         self.assertEqual(self.service.store.all_events(),[])
-        self.assertEqual(self.service.generations.generation('pool-born')['state'],'running')
 
-    def test_forged_group_not_saved_and_no_memory_created(self):
-        queue=PoolQueue(self.root);queue.enqueue(self.trace())
-        worker=PoolMaintenanceWorker(SimpleNamespace(names=['default'],dir_of=lambda n:str(self.root),service=lambda n:self.service))
-        worker.last_discover=float('inf')
-        decisions=self.pool_judge();decisions[0]['proposals'][0]['ids'][0]='forged'
-        with patch('ember.pool_maintenance.MaintenanceConfig.load',return_value=MaintenanceConfig('https://example.invalid','test','test')), \
-                patch('ember.pool_maintenance.MaintenanceClient.judge',return_value=decisions):
-            worker.process_one()
-        self.assertEqual(self.store.groups(),[])
-        with queue.db() as db:
-            self.assertEqual(db.execute('SELECT state FROM pool_jobs').fetchone()[0],'retry')
+    def test_no_pool_classification_tool_can_be_invoked(self):
+        with patch('ember.maintenance_client.MaintenanceClient.judge') as judge:
+            result=self.service.sidecar_call_tool('classify_recall_pool',{})
+        self.assertEqual(result['status'],'failed')
+        judge.assert_not_called()
 
     def test_app_authors_knowledge_and_unpin_keeps_cues_and_sources(self):
-        self.test_pool_is_enqueued_before_any_reply_or_event_and_excludes_current()
+        self.seed_source_review()
         context={'kind':'sleep','session':self.service.get_or_create_session('current'),'turn':1}
         result=dispatch(self.service,'write_memory_knowledge',{'kind':'pattern','content':'选择固定午饭以减少决策负担',
             'recall_cues':['黄焖鸡'],'source_slice_ids':[self.a['slice_id'],self.b['slice_id']]},context)
@@ -182,15 +173,10 @@ class PoolKnowledgeTests(unittest.TestCase):
         self.assertEqual(material['source_kind'],'slices')
 
     def test_reviewed_group_does_not_return_on_same_pool_again(self):
-        self.test_pool_is_enqueued_before_any_reply_or_event_and_excludes_current()
+        self.seed_source_review()
         group=self.store.groups()[0]
         self.store.finish_group(group['group_id'],'dismissed')
-        trace=self.trace();trace['trace_id']='another'
-        queue=PoolQueue(self.root);queue.enqueue(trace)
-        worker=PoolMaintenanceWorker(SimpleNamespace(names=['default'],dir_of=lambda n:str(self.root),service=lambda n:self.service))
-        worker.last_discover=float('inf')
-        with patch('ember.pool_maintenance.MaintenanceConfig.load',return_value=MaintenanceConfig('https://example.invalid','test','test')), patch('ember.pool_maintenance.MaintenanceClient.judge',return_value=self.pool_judge()):
-            worker.process_one()
+        self.seed_source_review()
         self.assertEqual(self.store.groups(),[])
         self.assertEqual(len(self.store.groups(False)),1)
 

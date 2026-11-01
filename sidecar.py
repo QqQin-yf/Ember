@@ -54,9 +54,7 @@ from ember.instances import InstanceRegistry, parse_instances, resolve_root
 from ember.tool_validation import validate_tool_input
 from ember.slice_pipeline import SlicePipeline, IngestionJobs, complete_turn, complete_run
 from ember.slice_recall import SliceRecall
-from ember.slice_maintenance import SliceMaintenanceWorker
-from ember.pool_maintenance import PoolMaintenanceWorker, KnowledgeEmbeddingWorker
-from ember.memory_maintenance import MemoryMaintenanceWorker
+from ember.knowledge import KnowledgeEmbeddingWorker
 from ember.knowledge_tools import tool_specs as knowledge_tool_specs
 from ember.writer import (PIN_TOOL_NAME, UNPIN_TOOL_NAME,
                           READ_SOURCE_TOOL_NAME, REVISE_TOOL_NAME,
@@ -223,9 +221,7 @@ async def _lifespan(app):
         maintenance = SourceSyncWorker(REGISTRY)
         app.state.slice_maintenance = maintenance
         maintaining = asyncio.create_task(maintenance.run())
-        pool_worker = PoolMaintenanceWorker(REGISTRY)
         knowledge_worker = KnowledgeEmbeddingWorker(REGISTRY)
-        app.state.pool_maintenance = pool_worker
         app.state.knowledge_embedding = knowledge_worker
         # Per-query GLM pool classification is retired.
         embedding_knowledge = asyncio.create_task(knowledge_worker.run())
@@ -241,7 +237,6 @@ async def _lifespan(app):
         finally:
             pipeline.stop_event.set()
             maintenance.stop_event.set()
-            pool_worker.stop_event.set()
             knowledge_worker.stop_event.set()
             memory_worker.stop_event.set()
             timeline_worker.stop_event.set()
