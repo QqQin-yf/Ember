@@ -116,23 +116,24 @@ class KnowledgeStore:
             if target is None:
                 raise ValueError('knowledge_not_found')
             chosen = [r for r in rows if (r['memory_id']==mid and pinned) or (r['memory_id']!=mid and r['pinned'])]
-            text = '\n'.join(self.line(r) for r in chosen)
-            used = token_bound(text)
-            if pinned and used>KNOWLEDGE_BUDGET:
-                return {'status':'budget_review_required','budget_tokens':KNOWLEDGE_BUDGET,
-                    'token_upper_bound':used,'count_method':'utf8_bytes_upper_bound',
-                    'pinned':bool(target['pinned']),'items':[
-                        {'memory_id':r['memory_id'],'content':r['content'],'pinned':bool(r['pinned'])} for r in rows],
-                    'hint':'由 App AI 斟酌重要程度，先 unpin 再 pin；后台不会自动移除任何条目。'}
+            from .lifecycle_config import lifecycle_config
+            limit=lifecycle_config()['pin']['knowledge_limit']
+            if pinned and not target['pinned'] and len(chosen)>limit:
+                return {'status':'rejected','code':'pin_class_full','class':'knowledge','limit':limit,
+                    'pinned':False,'items':[{'memory_id':r['memory_id'],'content':r['content']} for r in rows if r['pinned']],
+                    'hint':'这类满了，先 unpin 一条。'}
             db.execute('UPDATE knowledge SET pinned=? WHERE memory_id=? AND instance=?',(int(pinned),mid,self.instance))
-        return {'status':'ok','memory_id':mid,'pinned':pinned,'budget_tokens':KNOWLEDGE_BUDGET,
-                'token_upper_bound':used,'count_method':'utf8_bytes_upper_bound'}
+        return {'status':'ok','memory_id':mid,'pinned':pinned,'class':'knowledge','used':len(chosen),'limit':limit}
 
     def briefing(self):
         from .memory_lifecycle import Lifecycle
-        chosen = [r for r in self.all() if r['pinned'] and Lifecycle(self.root,self.instance).eligible(r['memory_id'])]
-        text = '\n'.join(self.line(r) for r in chosen)
-        return {'text':text,'memory_ids':[r['memory_id'] for r in chosen], 'budget_tokens':KNOWLEDGE_BUDGET,
+        from .lifecycle_config import lifecycle_config
+        cfg=lifecycle_config()['pin']
+        chosen=[r for r in self.all() if r['pinned'] and Lifecycle(self.root,self.instance).eligible(r['memory_id'])]
+        clipped=[dict(r,content=r['content'][:cfg['knowledge_chars']]+('…（后面还有，可下钻）' if len(r['content'])>cfg['knowledge_chars'] else '')) for r in chosen]
+        text='\n'.join(self.line(r) for r in clipped)
+        return {'text':text,'memory_ids':[r['memory_id'] for r in chosen],
+                'chars':len(text),'limit':cfg['knowledge_limit'],'item_char_limit':cfg['knowledge_chars'],
                 'token_upper_bound':token_bound(text),'count_method':'utf8_bytes_upper_bound'}
 
     def event_sources(self, eid):

@@ -116,16 +116,18 @@ class PoolKnowledgeTests(unittest.TestCase):
         read=dispatch(self.service,'read_memory_slices',{'memory_id':mid})
         self.assertEqual({r['session_id'] for r in read['slices']},{'a','b'})
 
-    def test_budget_does_not_automatically_unpin_or_delete(self):
-        first=self.store.create('cognition','a'*500,['a'],[self.a['slice_id']])
-        second=self.store.create('pattern','b'*500,['b'],[self.b['slice_id']])
-        self.assertEqual(second['pin']['status'],'budget_review_required')
-        self.assertTrue(next(r for r in self.store.all() if r['memory_id']==first['memory_id'])['pinned'])
-        self.assertFalse(next(r for r in self.store.all() if r['memory_id']==second['memory_id'])['pinned'])
-        self.assertLessEqual(self.store.briefing()['token_upper_bound'],1000)
-        self.store.pin(first['memory_id'],False)
-        self.assertEqual(self.store.pin(second['memory_id'],True)['status'],'ok')
-        self.assertEqual(len(self.store.all()),2)
+    def test_knowledge_pins_use_count_limit_instead_of_old_token_budget(self):
+        from ember.lifecycle_config import lifecycle_config
+        created=[]
+        for index in range(lifecycle_config()['pin']['knowledge_limit']):
+            result=self.store.create('pattern',str(index)+'a'*500,['a'],[self.a['slice_id']])
+            self.assertEqual(result['pin']['status'],'ok')
+            created.append(result['memory_id'])
+        overflow=self.store.create('pattern','overflow',['overflow'],[self.a['slice_id']])
+        self.assertEqual(overflow['pin']['code'],'pin_class_full')
+        self.assertEqual(len(self.store.briefing()['memory_ids']),len(created))
+        self.store.pin(created[0],False)
+        self.assertEqual(self.store.pin(overflow['memory_id'],True)['status'],'ok')
 
     def test_vector_threshold_point_five_and_only_highest_extra_hit(self):
         import math

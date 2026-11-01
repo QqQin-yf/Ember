@@ -134,11 +134,12 @@ mcp_server = Server("memory")
 async def _list_tools() -> list[types.Tool]:
     # 工具清单全实例同源（纯函数构建，不触任何实例的数据）；
     # 组成必须与 EmberService.sidecar_tool_specs 保持一致
+    from ember.pin_policy import tool_specs as pin_specs
     from ember.timeline import tool_specs as timeline_specs
     from ember.organization_tools import tool_specs as organization_specs
     from ember.promises import tool_specs as promise_specs
     specs = (build_tools_spec() + [build_revise_tool_spec()[0]]
-             + build_search_tool_spec() + build_pin_tool_specs() + knowledge_tool_specs() + promise_specs() + organization_specs() + timeline_specs())
+             + build_search_tool_spec() + build_pin_tool_specs() + knowledge_tool_specs() + promise_specs() + organization_specs() + timeline_specs() + pin_specs())
     out: list[types.Tool] = []
     for spec in specs:
         fn = spec["function"]

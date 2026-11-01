@@ -597,7 +597,7 @@ class EmberService:
 
     READ_SOURCE_MAX_CHARS = 4000   # 单次返回总长上限（baseline）
 
-    def read_source_event(self, event_id: str) -> dict[str, Any]:
+    def read_source_event(self, event_id: str, *, truncate=True, merge_sources=True) -> dict[str, Any]:
         """翻原文单事件实现（只读；MCP 与召回呈现共用）。
 
         Frozen provenance supplies exact message IDs; the provider checks the
@@ -605,7 +605,22 @@ class EmberService:
         return not_archived. No current-session or neighbouring-turn fallback.
         """
         from .knowledge_tools import read_memory
-        explicit = read_memory(self, event_id)
+        if merge_sources:
+            from .memory_lifecycle import Lifecycle
+            from .pin_policy import Pins
+            event_id=Lifecycle(self.store.root).canonical(self._resolve_event_id(event_id) or event_id)
+            members=Pins(self).sources(event_id)
+            if members:
+                originals=[self.read_source_event(eid,truncate=False,merge_sources=False) for eid in members]
+                text='\n\n'.join(r.get('transcript','') for r in originals if r.get('transcript'))
+                clipped=truncate and len(text)>self.READ_SOURCE_MAX_CHARS
+                result={'status':'ok' if all(r.get('status')=='ok' for r in originals) else 'partial',
+                    'event_id':event_id,'source_event_ids':members,'transcript':text[:self.READ_SOURCE_MAX_CHARS] if clipped else text,
+                    'truncated':clipped}
+                if not truncate:
+                    result['messages']=[m for row in originals for m in (row.get('messages') or [m for item in row.get('slices',[]) for m in item['messages']])]
+                return result
+        explicit = read_memory(self, event_id, canonicalize=merge_sources)
         if explicit is not None:
             return explicit
         import re
@@ -657,7 +672,7 @@ class EmberService:
         transcript = "\n".join(
             f"[turn {r['turn']}] {r['role']}: {r['content']}" for r in rows)
         truncated = False
-        if len(transcript) > self.READ_SOURCE_MAX_CHARS:
+        if truncate and len(transcript) > self.READ_SOURCE_MAX_CHARS:
             transcript = transcript[:self.READ_SOURCE_MAX_CHARS]
             truncated = True
         return {
@@ -665,6 +680,7 @@ class EmberService:
             "event_id": resolved,
             "turns": turns,
             "context_expanded": context_expanded,
+            **({"messages":rows} if not truncate else {}),
             "transcript": transcript,
             "truncated": truncated,
         }
@@ -1195,6 +1211,9 @@ class EmberService:
                 self.turn_ledger.record_start_once(effect["operation_id"], entry)
             elif effect["kind"] == "recall":
                 self.recall_ledger.record_once(effect["operation_id"], entry)
+            elif effect['kind']=='pin_reminder':
+                from .pin_policy import Pins
+                Pins(self).acknowledge(entry['episode'])
             elif effect['kind']=='promise_exposure':
                 from .promises import Promises
                 Promises(self).enter(**entry)
@@ -1268,6 +1287,11 @@ class EmberService:
                     if item.get('event_id'):
                         Promises(self).enter(item['event_id'],'cue',{'session_id':result.get('session_id'),
                             'message_ids':[str(user_message_id)] if user_message_id is not None else [],'turn':result.get('turn')})
+                from .pin_policy import Pins
+                budget=Pins(self).budget()
+                result['system_reminders']=[budget['reminder']] if budget['reminder'] else []
+                if budget['reminder']:
+                    Pins(self).acknowledge(budget['episode'])
                 return result
         rid, sid, seq = identity(recall_id), identity(session_id), message_seq(user_message_id)
         if rid is None or sid is None or seq is None or not message.strip():
@@ -1346,6 +1370,11 @@ class EmberService:
                         effects.append(('promise_exposure',{'event_id':eid,
                             'route':p.get('route') or ('recall' if p.get('via_slice_id') else 'cue'),
                             'span':{'session_id':sid,'message_ids':[seq]},'at':_now_iso()}))
+                from .pin_policy import Pins
+                pin_budget=Pins(self).budget()
+                out['system_reminders']=[pin_budget['reminder']] if pin_budget['reminder'] else []
+                if pin_budget['reminder']:
+                    effects.append(('pin_reminder',{'episode':pin_budget['episode']}))
                 self.generations.commit_snapshot(rid, turn, out, metadata, effects)
                 self._reconcile_recall_effects(rid)
             except Exception:
@@ -1550,6 +1579,13 @@ class EmberService:
                               context: dict | None = None,
                               recall_id: str | None = None,
                               tool_call_id: str | None = None) -> dict:
+        if name in ('list_memory_pins','merge_memory_events'):
+            from .pin_policy import Pins
+            try:
+                with self._generation_lock:
+                    return Pins(self).listing() if name=='list_memory_pins' else Pins(self).merge(arguments)
+            except (ValueError,KeyError,TypeError) as exc:
+                return {'status':'failed','code':'invalid_pin_operation','error':str(exc)}
         if name=='read_relationship_point':
             from .timeline import Timeline
             return Timeline(self).read_point(arguments.get('point',''))
@@ -1680,9 +1716,10 @@ class EmberService:
         from .promises import tool_specs as promise_specs
         from .organization_tools import tool_specs as organization_specs
         from .timeline import tool_specs as timeline_specs
+        from .pin_policy import tool_specs as pin_specs
         return (build_tools_spec() + [build_revise_tool_spec()[0]]
                 + build_search_tool_spec() + build_pin_tool_specs()
-                + tool_specs() + promise_specs() + organization_specs() + timeline_specs())
+                + tool_specs() + promise_specs() + organization_specs() + timeline_specs() + pin_specs())
 
     def sidecar_create_memory_event(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """MCP 工具 create_memory_event 执行体：进行中的一轮 + 参数 → 落库。
@@ -1765,6 +1802,8 @@ class EmberService:
         if resolved is None:
             return {"status": "failed",
                     "error": f"找不到该 event_id: {eid}"}
+        from .memory_lifecycle import Lifecycle
+        resolved=Lifecycle(self.store.root).canonical(resolved)
         event = self.store.get_event(resolved)
 
         # 锁死字段显式拒绝（防模型绕过白名单）
@@ -1823,7 +1862,7 @@ class EmberService:
 
     def sidecar_read_memory_source(self, event_id: str) -> dict[str, Any]:
         """MCP 工具 read_memory_source 执行体（只读，共用来源核验）。"""
-        return self.read_source_event(event_id)
+        return self.read_source_event(event_id,truncate=False)
 
     # ---------- 共享Event行级维护 ----------
 
@@ -2131,6 +2170,9 @@ class EmberService:
                     item["superseded_by"] = [r.dst_event for r in res]
             elif self.is_faded(eid):
                 status = "faded"
+            if ev.merged_into:
+                status="merged"
+                item["merged_into"]=ev.merged_into
             item["status"] = status
             refs = _event_entity_of(self.store, eid)
             item["entity_id"] = refs or ""
@@ -2259,22 +2301,8 @@ class EmberService:
         return f"日期：{dt:%Y-%m-%d}"
 
     def _briefing_source_block(self, ev: Any) -> str:
-        """原文层条目：core + ±3 轮原文（复用 read_source_event）。
-
-        原文不可达时退到写入时逐字核对过的 key_quotes——简报不被
-        source 接口卡死。
-        """
-        when = self._briefing_when(ev)
-        head = f"◆ [{when}] {ev.core.strip()}"
-        try:
-            src = self.read_source_event(ev.event_id)
-        except Exception:  # noqa: BLE001 — 拉不到原文不挡简报
-            src = {"status": "failed"}
-        transcript = str(src.get("transcript") or "").strip()
-        if src.get("status") == "ok" and transcript:
-            lines = [f"  {ln}" for ln in transcript.splitlines()]
-            return head + "\n  【原文】\n" + "\n".join(lines)
-        return head
+        from .pin_policy import Pins
+        return Pins(self).event_block(ev)
 
     def sidecar_briefing_refresh(self, args: dict[str, Any]) -> dict[str, Any]:
         """截断时刷新简报（app 调用；自包含重写）。
@@ -2468,23 +2496,17 @@ class EmberService:
             return {"status": "empty"}
 
     def sidecar_pin_memory(self, args: dict[str, Any]) -> dict[str, Any]:
-        """钉住（pin_memory 工具 / HTTP 端点共用）：幂等。"""
-        eid = str((args or {}).get("event_id") or "").strip()
-        if not eid:
-            return {"status": "failed", "error": "缺少 event_id"}
+        from .pin_policy import Pins
         try:
-            self.store.get_event(eid)
-        except KeyError:
-            return {"status": "failed", "error": f"找不到记忆 {eid}"}
-        added = self.pin_store.add(eid)
-        return {"status": "ok", "event_id": eid, "pinned": True,
-                "already": not added}
+            with self._generation_lock:
+                return Pins(self).pin(str(args.get('event_id') or ''))
+        except (ValueError,KeyError) as exc:
+            return {'status':'failed','error':str(exc)}
 
     def sidecar_unpin_memory(self, args: dict[str, Any]) -> dict[str, Any]:
-        """取消钉住（幂等）。"""
-        eid = str((args or {}).get("event_id") or "").strip()
-        if not eid:
-            return {"status": "failed", "error": "缺少 event_id"}
-        removed = self.pin_store.remove(eid)
-        return {"status": "ok", "event_id": eid, "pinned": False,
-                "was_pinned": removed}
+        from .pin_policy import Pins
+        try:
+            with self._generation_lock:
+                return Pins(self).unpin(str(args.get('event_id') or ''))
+        except (ValueError,KeyError) as exc:
+            return {'status':'failed','error':str(exc)}

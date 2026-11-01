@@ -225,7 +225,7 @@ def test_inline_source_high_match():
         svc.turn_spans.fill(eid, [(5, 5)], filled_by="test")
         # This test is presentation eligibility, not path transport (covered by
         # test_source_paths and the real App probe). Supply a verified read result.
-        svc.read_source_event = lambda eid: {"status": "ok", "transcript": "[turn 5] user: 轮5的原话", "truncated": False}
+        svc.read_source_event = lambda eid, **kwargs: {"status": "ok", "transcript": "[turn 5] user: 轮5的原话", "truncated": False}
 
 
     def _prefix(svc, anchors):

@@ -17,10 +17,11 @@ from ember.tool_validation import validate_tool_input
 from ember.promises import tool_specs as promise_specs, Promises, dispatch as promise_dispatch
 from ember.organization_tools import tool_specs as organization_specs,dispatch as organization_dispatch
 from ember.timeline import tool_specs as timeline_specs,Timeline
+from ember.pin_policy import tool_specs as pin_specs
 
 
 def specifications():
-    ordinary=build_tools_spec()+build_revise_tool_spec()+build_search_tool_spec()+build_pin_tool_specs()+tool_specs()+promise_specs()+organization_specs()+timeline_specs()
+    ordinary=build_tools_spec()+build_revise_tool_spec()+build_search_tool_spec()+build_pin_tool_specs()+tool_specs()+promise_specs()+organization_specs()+timeline_specs()+pin_specs()
     sleep=tool_specs(sleep=True)
     by_name={s['function']['name']:s['function'] for s in ordinary+sleep}
     return by_name,{s['function']['name'] for s in ordinary},{s['function']['name'] for s in sleep}
@@ -173,6 +174,14 @@ def isolated_receipts():
                 db.execute('INSERT INTO points(id,text,event_ids,intervals) VALUES (?,?,?,?)',
                     ('PT-fixture','Fixture relationship point',json.dumps([relationship.event_id]),json.dumps([{'start':relationship.event_time,'end':relationship.event_time}])))
             results['read_relationship_point']=service.sidecar_call_tool('read_relationship_point',{'point':'PT-fixture'})
+            pin_promises=[]
+            for index in range(2):
+                written=service.sidecar_call_tool('write_promise',{'event':dict(event,kind='promise',significance=10,due=None),
+                    'recall_routes':args['recall_routes'],'source_slice_ids':ids})
+                pin_promises.append(written['event_id'])
+            results['list_memory_pins']=service.sidecar_call_tool('list_memory_pins',{})
+            results['merge_memory_events']=service.sidecar_call_tool('merge_memory_events',{'event_ids':pin_promises,
+                'summary':'One fixture promise','core':'One fixture commitment from both original spans'})
             results['set_slice_recall_state']=call('set_slice_recall_state',{'group_id':generic,'slice_ids':[ids[0]],
                 'reason':'Fixture-only outdated example','evidence':sources[0]['messages'][0]['content']})
             results['finish_memory_group']=call('finish_memory_group',{'group_id':generic,'state':'reviewed'})

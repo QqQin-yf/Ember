@@ -358,3 +358,14 @@ revise_entity_summary(entity_id,summary) 直接修订卡片并提交变化检查
 POST /ember/briefing/refresh 现在会等待时间线上尚未完成的压缩和抽点，不使用旧完成状态替代。真正模型失败并重试仍失败时，未压缩条保留原样、未抽点批保留压缩版；内容保持准确，可能暂时超预算。后台继续重试，普通轮次不替换 briefing。只有当前 briefing 中被压缩/抽点的关系 Event 参与自动召回；原样在场的不重复召回，关系切片不作为入口。
 
 关系预算、压缩区预算、上下限、抽点批大小、失败重试次数和 5:5 比例阈值均在 config/lifecycle.json。check_memory_health.py 通过 SQLite 副本报告 relationship_timeline_budget_ratio（应调高关系时间线预算）、压缩/抽点失败和暂时超预算，不调用模型，不输出记忆内容。
+
+
+### Pin 分类、原文与单次提醒（2026-11-01）
+
+list_memory_pins 按 relationship / ordinary / promise（10 分无 due）/ knowledge 列出 pin。三类按条数上限限制；10 分无 due 约定不限制条数，按总字数提醒。pin_memory / set_knowledge_pin 满额返回 rejected / pin_class_full、该类清单与先 unpin 的提示。旧 1000-token pin 拒绝规则取消，配置见 lifecycle.json 的 pin。
+
+pin 原文先取完整来源，再围绕 focus 消息居中取 event_chars，省略两端分别标前面还有/后面还有。focus 本身不展示。认知/规律有单条字数保护；原件不改。read_memory_source 下钻返回完整原文，不沿用旧 4000 字前缀限制。
+
+merge_memory_events(event_ids,summary,core) 合并意思相同的 10 分无 due 约定，保留写入最早一条；同秒按库中创建顺序判先后。原文来源可跨会话，保留各自冻结消息身份，不拼成虚假的连续区间；log 只追加合入，原条不删，标 merged_into 并保留旧 ID 到主条映射。旧 ID 读取、pin 和处理约定会到主条。
+
+钉住约定总字数超预算时，下一次 turn_start 响应给 system_reminders 数组；App 按该 hook 输出作为 system reminder 注入，无需另行通知 Ember。每次超额只提醒一次，整理到预算内后重新超出可再提醒。提醒和召回响应一起持久化，快照失败不会误消耗；同 recall_id 重试重放同一响应。提醒不写进持久 briefing。

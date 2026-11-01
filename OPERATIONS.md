@@ -70,3 +70,5 @@ python -B -X utf8 scripts/check_memory_health.py --data-dir 'D:\your-heart\data\
 4. 归组与 Entity：对应《Entity》第 1–4 节、《Event分类维护》第 2–3 节、《Event字段调整》第 3 节主题概括。加入共用归组、不可变日常副本及重聚合、完结约定主题层、Entity summary 更新/防重/合并和旧 ID 映射、项目取代；自动召回改为 Event 三席与独立去重卡片，不再走 Direction。关系时间线由第 5 步继续接入。
 
 5. 关系时间线：对应《Event分类维护》第 4 节。实现写入后的独立压缩缓存、总量上下限选择、按批追加要点、event_id 和断开时间区间溯源、要点下钻、pin 历史恢复原样、briefing 等待及模型失败准确降级。健康检查通过副本报告 5:5 比例和失败/超量；关系边仅延续或回应，不取代。
+
+6. Pin：对应《Pin》第 1–4 节。实现四类限额与清单、focus 居中原文、完整下钻、约定 Event 的最早主条合并、跨会话原文/log 保留和旧 ID 映射，以及随 hook 提交确认的单次超预算提醒。原知识 token 总预算改为分类条数与单条字数保护。

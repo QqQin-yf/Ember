@@ -53,6 +53,7 @@ class Promises:
             self.eligibility(event)
 
     def enter(self,event_id,route,span,at=None):
+        event_id=Lifecycle(self.service.store.root).canonical(event_id)
         event=self.service.store.get_event(event_id)
         if event.kind!='promise':
             return
@@ -67,7 +68,7 @@ class Promises:
             rows=[dict(r) for r in conn.execute('SELECT * FROM exposures WHERE processed=0 ORDER BY at,id')]
         result={}
         for row in rows:
-            event=self.service.store.get_event(row['event_id'])
+            event=self.service.store.get_event(Lifecycle(self.service.store.root).canonical(row['event_id']))
             # Recover a crash between durable Event log and exposure receipt.
             if any(row['id'] in entry.get('exposure_ids',[]) for entry in event.log):
                 with self.db() as conn:
@@ -80,7 +81,7 @@ class Promises:
 
     def process(self,args):
         with self.service._generation_lock:
-            event=self.service.store.get_event(args['event_id'])
+            event=self.service.store.get_event(Lifecycle(self.service.store.root).canonical(args['event_id']))
             pending=next((r for r in self.pending() if r['event']['event_id']==event.event_id),None)
             text=args.get('log')
             if not pending or not isinstance(text,str) or not text.strip():

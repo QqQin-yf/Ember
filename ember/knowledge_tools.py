@@ -18,12 +18,12 @@ def tool_specs(sleep=False):
              {'slice_ids':strings,'group_id':{'type':'string'},'memory_id':{'type':'string'}}),
         spec('search_memory_slices','主动用自然语言检索原文切片，返回 ID、匹配分数及原文，供进一步下钻。',
              {'query':{'type':'string','minLength':1},'k':{'type':'integer','minimum':1,'maximum':20}},['query']),
-        spec('write_memory_knowledge','由你从原文提炼认知或规律。必须提供来源切片和触点。默认尝试 pin 至 briefing，1000 tokens 预算超限会要求你自主 unpin/pin 取舍；后台不替你提炼。',
+        spec('write_memory_knowledge','由你从原文提炼认知或规律。必须提供来源切片和触点。默认尝试 pin 至 briefing；该类条数满时先 unpin，再 pin；后台不替你提炼。',
              {'kind':{'enum':['cognition','pattern']},'content':{'type':'string','minLength':1},
               'recall_cues':strings,'source_slice_ids':strings,
               'confidence':{'type':'integer','minimum':0,'maximum':10},
               'confidence_basis':{'enum':['recently_disproved','outdated']},'confidence_evidence':{'type':'string'}},['kind','content','recall_cues','source_slice_ids','confidence']),
-        spec('set_knowledge_pin','自主管理认知/规律的 briefing 常驻预算。超预算时先斟酌重要程度取消部分 pin，再 pin 新条目；取消后仍可正常召回。',
+        spec('set_knowledge_pin','自主管理认知/规律的 briefing 常驻清单；该类条数满时先 unpin，再 pin；取消后仍可正常召回。',
              {'memory_id':{'type':'string'},'pinned':{'type':'boolean'}},['memory_id','pinned']),
         spec('finish_memory_group','阅读并处理分组后标记 reviewed，或判断不值得提炼时 dismissed。不会删除原文。',
              {'group_id':{'type':'string'},'state':{'enum':['reviewed','dismissed']}},['group_id','state']),
@@ -54,9 +54,10 @@ SLEEP_ONLY_TOOLS=TOOL_NAMES-{'read_memory_slices','search_memory_slices'}
 VOLATILE_TOOLS={'read_memory_slices','search_memory_slices'}
 
 
-def read_memory(service, memory_id):
+def read_memory(service, memory_id, canonicalize=True):
     from .memory_lifecycle import Lifecycle
-    memory_id=Lifecycle(service.store.root,service.source_instance).canonical(memory_id)
+    if canonicalize:
+        memory_id=Lifecycle(service.store.root,service.source_instance).canonical(memory_id)
     store=KnowledgeStore(service.store.root,service.source_instance)
     sources=store.event_sources(memory_id)
     if sources is None:

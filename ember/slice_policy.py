@@ -19,6 +19,9 @@ def informative(source, config=None):
 
 
 def parent_allowed(event, root):
+    from .pin_store import PinStore
+    if PinStore(str(root)).is_pinned(event.event_id):
+        return False
     if event.kind not in ('daily','promise'):
         return False
     if event.kind=='promise' and event.significance<=lifecycle_config()['promise']['low_score_max'] and event.status!='open':
@@ -45,7 +48,7 @@ def passing_parents(root, candidate, query, config, events):
         return None
     vectors=CoreVectorStore(str(root))
     result=[]
-    for eid in sorted(owners):
+    for eid in sorted({Lifecycle(root).canonical(eid) for eid in owners}):
         ev=events.get(eid);row=vectors.get(eid)
         if not ev or not row or not parent_allowed(ev,root):
             continue

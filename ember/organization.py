@@ -208,7 +208,7 @@ class Organization:
             return False
         self.merge_changed(config)
         for event in self.service.store.all_events():
-            if event.kind=='relationship':
+            if event.kind=='relationship' or Lifecycle(self.root).canonical(event.event_id)!=event.event_id:
                 continue
             original=document(event);digest=fingerprint(original)
             with self.db() as conn:

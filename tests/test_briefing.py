@@ -93,7 +93,7 @@ class BriefingTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.svc = _service(Path(self._tmp.name))
-        self.svc.read_source_event = lambda eid: {"status": "ok", "transcript": "\n".join(f"原文{t}" for t in range(1, 8)), "truncated": False}
+        self.svc.read_source_event = lambda eid, **kwargs: {"status": "ok", "transcript": "\n".join(f"原文{t}" for t in range(1, 8)), "truncated": False}
         s = self.svc
         self._add("EVT-PIN", 1, "10：钉住的重大决定", OLD, pin=True)
         self._add("EVT-S10", 2, "10：十个分", OLD)
