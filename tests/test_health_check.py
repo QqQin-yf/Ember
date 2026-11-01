@@ -54,6 +54,22 @@ class MemoryHealthTests(unittest.TestCase):
         for private in ("PRIVATE SUMMARY", "PRIVATE CORE", "PRIVATE CUE"):
             self.assertNotIn(private, raw)
 
+    def test_repeated_extraction_failures_are_reported_without_reading_source_bodies(self):
+        with contextlib.closing(sqlite3.connect(self.root/'extraction.sqlite3')) as db:
+            db.execute('CREATE TABLE grouping_retries(slice_id TEXT,failures INTEGER,report_after INTEGER,error TEXT,retry_at REAL)')
+            db.executemany('INSERT INTO grouping_retries VALUES (?,?,?,?,?)',[
+                ('repeated',3,3,'PRIVATE failure',999999),('initial',1,3,'PRIVATE failure',999999)])
+            db.commit()
+        before=self.snapshot()
+        report=check_memory(self.root)
+        self.assertIn('extraction_grouping_repeated_failure',self.codes(report))
+        self.assertEqual(report['statistics']['extraction_grouping_pending_errors'],2)
+        self.assertEqual(report['statistics']['extraction_grouping_repeated_failures'],1)
+        warning=next(r for r in report['findings'] if r['code']=='extraction_grouping_repeated_failure')
+        self.assertEqual(warning['record_id'],'repeated')
+        self.assertNotIn('PRIVATE failure',json.dumps(report))
+        self.assertEqual(before,self.snapshot())
+
     def test_event_route_append_history_is_legal(self):
         newer = dict(self.event, summary="revised")
         self.put("events.jsonl", self.event, newer)

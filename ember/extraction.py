@@ -4,6 +4,7 @@ from contextlib import contextmanager
 import json
 from pathlib import Path
 import sqlite3
+import time
 
 from .core_semantic import cosine
 from .event_slices import EventSliceLinks, sync_from_files
@@ -37,7 +38,10 @@ class Extraction:
                 CREATE TABLE IF NOT EXISTS parts(
                 id TEXT PRIMARY KEY,group_id TEXT,ordinal INTEGER,payload TEXT,
                 conclusion TEXT,result_ids TEXT,delivered INTEGER DEFAULT 0);
-                CREATE TABLE IF NOT EXISTS attempts(id TEXT PRIMARY KEY,error TEXT);
+                CREATE TABLE IF NOT EXISTS grouping_retries(
+                instance TEXT,slice_id TEXT,content_hash TEXT,space TEXT,
+                failures INTEGER,error TEXT,retry_at REAL,report_after INTEGER,
+                PRIMARY KEY(instance,slice_id,content_hash,space));
                 CREATE TABLE IF NOT EXISTS source_results(
                 instance TEXT,slice_id TEXT,content_hash TEXT,result_id TEXT,action TEXT,
                 PRIMARY KEY(instance,slice_id,content_hash,result_id));''')
@@ -53,6 +57,8 @@ class Extraction:
         with self.db() as conn:
             conn.executemany('INSERT OR IGNORE INTO source_results VALUES (?,?,?,?,?)',
                 [(self.instance,s['slice_id'],s['content_hash'],result_id,action) for s in sources])
+            conn.executemany('DELETE FROM grouping_retries WHERE instance=? AND slice_id=? AND content_hash=?',
+                [(self.instance,s['slice_id'],s['content_hash']) for s in sources])
             done=self.completed_sources(conn)
             for row in conn.execute('SELECT * FROM groups WHERE instance=?',(self.instance,)).fetchall():
                 refs=json.loads(row['sources'])
@@ -117,11 +123,22 @@ class Extraction:
         rows=self.reconcile(current)
         occupied={s['slice_id'] for row in rows for s in row['remaining_sources']}
         pending=[s for s in candidates if s['slice_id'] not in occupied]
-        if not pending:
+        cfg=lifecycle_config()['extraction']
+        now=time.time()
+        with self.db() as conn:
+            retries={}
+            for row in conn.execute('SELECT * FROM grouping_retries WHERE instance=?',(self.instance,)).fetchall():
+                source=current.get(row['slice_id'])
+                if source is None or source['content_hash']!=row['content_hash'] or row['space']!=config.space:
+                    conn.execute('DELETE FROM grouping_retries WHERE instance=? AND slice_id=? AND content_hash=? AND space=?',
+                                 (self.instance,row['slice_id'],row['content_hash'],row['space']))
+                else:
+                    retries[row['slice_id']]=row['retry_at']
+        ready=[s for s in pending if retries.get(s['slice_id'],0)<=now]
+        if not ready:
             return False
-        cfg=lifecycle_config()['extraction'];seed=pending[0]
-        selected=[seed]+[s for s in pending[1:] if len(s['vector'])==len(seed['vector']) and cosine(s['vector'],seed['vector'])>=cfg['group_threshold']][:cfg['group_size']-1]
-        key=fingerprint([(s['slice_id'],s['content_hash']) for s in selected])
+        seed=ready[0]
+        selected=[seed]+[s for s in ready[1:] if len(s['vector'])==len(seed['vector']) and cosine(s['vector'],seed['vector'])>=cfg['group_threshold']][:cfg['group_size']-1]
         try:
             result=ask('slice_groups','只把没有上级且有信息量的原文按同一件事、规律、习惯、喜恶或主题归组。每个 slice_id 恰好出现一次；只给归组说明，不提炼认知、不写 Event。',
                 {'slices':[{'slice_id':s['slice_id'],'messages':s['messages']} for s in selected]},
@@ -141,11 +158,18 @@ class Extraction:
                     gid='EX-'+fingerprint([self.instance,sorted((s['slice_id'],s['content_hash']) for s in sources)])[:24]
                     conn.execute('INSERT OR IGNORE INTO groups(id,instance,sources,description,created) VALUES (?,?,?,?,?)',
                         (gid,self.instance,encoded(sources),group['description'],min(byid[sid]['saved_at'] for sid in group['slice_ids'])))
-                conn.execute('DELETE FROM attempts WHERE id=?',(key,))
+                conn.executemany('DELETE FROM grouping_retries WHERE instance=? AND slice_id=? AND content_hash=? AND space=?',
+                                 [(self.instance,s['slice_id'],s['content_hash'],config.space) for s in selected])
             return True
         except Exception as exc:
             with self.db() as conn:
-                conn.execute('INSERT OR REPLACE INTO attempts VALUES (?,?)',(key,type(exc).__name__))
+                conn.execute('BEGIN IMMEDIATE')
+                identity=(self.instance,seed['slice_id'],seed['content_hash'],config.space)
+                previous=conn.execute('SELECT failures FROM grouping_retries WHERE instance=? AND slice_id=? AND content_hash=? AND space=?',identity).fetchone()
+                failures=1+(previous[0] if previous else 0)
+                delay=min(cfg['retry_max_seconds'],cfg['retry_initial_seconds']*2**min(failures-1,32))
+                conn.execute('INSERT OR REPLACE INTO grouping_retries VALUES (?,?,?,?,?,?,?,?)',
+                    (*identity,failures,type(exc).__name__,time.time()+delay,cfg['failure_warning_count']))
             raise
 
     def similar(self,sources,config):
@@ -234,7 +258,7 @@ class Extraction:
         remaining=[u for u in units if u['id'] not in chosen_ids]
         with self.db() as conn:
             conn.executemany('UPDATE parts SET delivered=1 WHERE id=?',[(pid,) for pid in chosen_ids])
-            errors=conn.execute('SELECT count(*) FROM attempts').fetchone()[0]
+            errors=conn.execute('SELECT count(*) FROM grouping_retries WHERE instance=?',(self.instance,)).fetchone()[0]
         return {'status':'ok','groups':chosen,'material_chars':len(encoded(chosen)),
                 'remaining_groups':len({u['group_id'] for u in remaining}),
                 'remaining_chars':sum(len(u['payload']) for u in remaining),'grouping_errors':errors,

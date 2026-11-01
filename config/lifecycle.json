@@ -52,7 +52,10 @@
     "group_size": 16,
     "knowledge_threshold": 0.5,
     "similar_limit": 5,
-    "worker_seconds": 30
+    "worker_seconds": 30,
+    "retry_initial_seconds": 60,
+    "retry_max_seconds": 3600,
+    "failure_warning_count": 3
   },
   "recall": {
     "event_limit": 3,

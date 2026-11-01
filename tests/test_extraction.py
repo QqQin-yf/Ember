@@ -104,10 +104,11 @@ class ExtractionTests(unittest.TestCase):
 
     def test_partial_or_duplicate_model_coverage_is_rejected_and_retry_keeps_sources(self):
         source=self.source(1)
-        with patch('ember.extraction.ask',return_value={'groups':[]}):
+        with patch('ember.extraction.time.time',return_value=100),patch('ember.extraction.ask',return_value={'groups':[]}):
             with self.assertRaises(ValueError):self.queue.discover(self.config)
         self.assertEqual(len(self.queue.candidates(self.config)),1)
-        self.discover()
+        with patch('ember.extraction.time.time',return_value=160):
+            self.discover()
         self.assertEqual(self.queue.batch()['grouping_errors'],0)
 
     def test_write_knowledge_automatically_completes_and_keeps_result_and_sources(self):
@@ -290,3 +291,59 @@ class ExtractionTests(unittest.TestCase):
         result=self.queue.finish({'group_id':part['group_id']})
         self.assertEqual(result['state'],'completed')
         self.assertEqual(self.receipts(second)[0]['action'],'skipped')
+
+    def test_failed_seed_is_skipped_as_seed_and_neighbor_until_retry_deadline(self):
+        first=self.source(1);second=self.source(2)
+        self.cfg['extraction'].update(retry_initial_seconds=60,retry_max_seconds=300)
+        with patch('ember.extraction.time.time',return_value=100), \
+                patch('ember.extraction.ask',side_effect=ValueError('invalid group')):
+            with self.assertRaises(ValueError):self.queue.discover(self.config)
+        restarted=Extraction(self.service)
+        def group(purpose,instruction,material,schema):
+            ids=[r['slice_id'] for r in material['slices']]
+            self.assertEqual(ids,[second['slice_id']])
+            return {'groups':[{'description':'later source','slice_ids':ids}]}
+        with patch('ember.extraction.time.time',return_value=130),patch('ember.extraction.ask',side_effect=group):
+            self.assertTrue(restarted.discover(self.config))
+        with patch('ember.extraction.time.time',return_value=159),patch('ember.extraction.ask') as model:
+            self.assertFalse(restarted.discover(self.config))
+            model.assert_not_called()
+        with patch('ember.extraction.time.time',return_value=160),patch('ember.extraction.ask',return_value={
+                'groups':[{'description':'recovered first','slice_ids':[first['slice_id']]}]}):
+            self.assertTrue(restarted.discover(self.config))
+        self.assertEqual(self.queue.batch()['grouping_errors'],0)
+
+    def test_repeated_failure_backoff_grows_and_is_capped(self):
+        self.source(1)
+        self.cfg['extraction'].update(retry_initial_seconds=10,retry_max_seconds=25)
+        now=100
+        for count,delay in enumerate((10,20,25,25),1):
+            with patch('ember.extraction.time.time',return_value=now), \
+                    patch('ember.extraction.ask',side_effect=OSError('PRIVATE failure body')):
+                with self.assertRaises(OSError):self.queue.discover(self.config)
+            with self.queue.db() as conn:
+                row=conn.execute('SELECT * FROM grouping_retries').fetchone()
+            self.assertEqual(row['failures'],count)
+            self.assertEqual(row['retry_at'],now+delay)
+            self.assertEqual(row['error'],'OSError')
+            now+=delay
+
+    def test_new_source_version_does_not_inherit_old_backoff(self):
+        source=self.source(1)
+        with patch('ember.extraction.time.time',return_value=100),patch('ember.extraction.ask',side_effect=ValueError):
+            with self.assertRaises(ValueError):self.queue.discover(self.config)
+        self.source(1,'corrected source')
+        with patch('ember.extraction.time.time',return_value=101):
+            model=self.discover()
+        self.assertEqual(model.call_count,1)
+        self.assertEqual(self.queue.batch()['grouping_errors'],0)
+
+    def test_consumed_failed_seed_clears_outstanding_failure(self):
+        source=self.source(1)
+        with patch('ember.extraction.ask',side_effect=ValueError):
+            with self.assertRaises(ValueError):self.queue.discover(self.config)
+        self.knowledge_write(source)
+        with patch('ember.extraction.ask') as model:
+            self.assertFalse(self.queue.discover(self.config))
+            model.assert_not_called()
+        self.assertEqual(self.queue.batch()['grouping_errors'],0)

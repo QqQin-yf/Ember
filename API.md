@@ -293,3 +293,5 @@ write_event、write_promise、write_memory_knowledge，以及 review_memory_know
 finish_memory_extraction_group(group_id,source_slice_ids?,part_id?) 只表示不写。只传 group_id 跳过整组，source_slice_ids 指定组内几段切片，part_id 跳过已交付的超限分段；后两者不能同时提供。未处理材料继续返回。已撤出或已全部处理的组返回 ok，不存在的组报错。来源版本改变时，旧写入不会结掉新版本切片。
 
 第三方只整理没有上级、有信息量且向量有效的切片，不从每轮召回 trace 建池，不代写正式记忆。后台按 extraction.worker_seconds 扫描，group_size / group_threshold / knowledge_threshold / similar_limit 也在 config/lifecycle.json。模型 purpose 为 slice_groups。提取原文回执易失，持久调用账不复制原文。
+
+归组失败按种子切片版本退避，退避期内不作种子或候选，后续切片继续处理。extraction.retry_initial_seconds 和 retry_max_seconds 控制指数退避的初始时间及上限；failure_warning_count 控制连续失败告警阈值。健康检查返回 extraction_grouping_repeated_failure。成功归组、来源版本变化或切片已处理后清理对应失败记录。

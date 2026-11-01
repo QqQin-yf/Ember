@@ -68,7 +68,7 @@ class _Check:
     def lifecycle(self):
         """Read only private copies, including committed WAL frames."""
         from contextlib import closing
-        for name in ('relationship_timeline.sqlite3','organization.sqlite3','source_sync.sqlite3'):
+        for name in ('relationship_timeline.sqlite3','organization.sqlite3','source_sync.sqlite3','extraction.sqlite3'):
             original=self.root/name
             if not original.exists():
                 continue
@@ -97,6 +97,14 @@ class _Check:
                             self.stats['organization_pending_errors']=count
                             if count:
                                 self.issue('warning','organization_maintenance_pending',name)
+                        elif name=='extraction.sqlite3':
+                            if db.execute("SELECT 1 FROM sqlite_master WHERE name='grouping_retries'").fetchone():
+                                rows=db.execute('SELECT slice_id,failures,report_after FROM grouping_retries').fetchall()
+                                self.stats['extraction_grouping_pending_errors']=len(rows)
+                                repeated=[r for r in rows if r[1]>=r[2]]
+                                self.stats['extraction_grouping_repeated_failures']=len(repeated)
+                                for row in repeated:
+                                    self.issue('warning','extraction_grouping_repeated_failure',name,record_id=row[0])
                         else:
                             count=db.execute('SELECT COUNT(*) FROM sync WHERE error IS NOT NULL').fetchone()[0]
                             if count:

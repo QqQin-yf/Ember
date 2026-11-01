@@ -104,3 +104,5 @@ python -B -X utf8 scripts/check_memory_health.py --data-dir 'D:\your-heart\data\
 第 8–9 步修正 1：按正式产出的 source_slice_ids 自动结账并记录结果 ID，部分使用时保留同组剩余切片；可从持久产出来源恢复队列。finish_memory_extraction_group 收窄为整组/指定切片/超限分段不写，已完成或已撤出组幂等返回 ok。对应《给 Codex 的修正-第 8 到 9 步》第 1 条；本次不处理该文件第 2、3 条。
 
 本条验收：18 项提取专项、517 项全量 unittest、38 项独立 sidecar 验收通过；22 个普通工具的实际 schema / 回执已重新导出。本地隔离测试，未部署。
+
+第 8–9 步修正 2：失败种子按来源版本和向量空间记录退避，退避中的切片不作种子或候选，后续材料继续归组；成功、来源变化或已处理后清理。extraction.retry_initial_seconds / retry_max_seconds / failure_warning_count 配置重试与告警。健康检查在数据库副本读取连续失败状态，输出 extraction_grouping_repeated_failure，不读原文或错误正文。
