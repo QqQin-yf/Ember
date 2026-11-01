@@ -1063,9 +1063,15 @@ class EmberService:
 
     @staticmethod
     def _validate_focus(event, corpus, spans=None):
+        from .turn_span import locate_message
         messages=[m for m in corpus if spans is None or any(lo <= m.get('turn',-1) <= hi for lo,hi in spans)]
-        if not any(str(m.get('_source_message_id',m.get('message_id'))) == event.focus for m in messages):
-            raise ValueError('event.focus must identify a message inside the source spans')
+        message=locate_message(event.focus,messages)
+        if message is None:
+            raise QuoteSourceError('quote_not_found',field='event.focus')
+        seq=message_seq(message.get('_source_message_id',message.get('message_id')))
+        if seq is None:
+            raise QuoteSourceError('source_identity_missing',field='event.focus')
+        event.focus=seq
 
 
     def _ledger_record(self, session: Session, turn: int,
@@ -1607,6 +1613,8 @@ class EmberService:
                 from .knowledge_tools import write_event
                 try:
                     return write_event(self,validated,context)
+                except QuoteSourceError as exc:
+                    return exc.as_result()
                 except (ValueError,KeyError,TypeError) as exc:
                     return {'status':'failed','code':'invalid_memory_material','error':str(exc)}
             if context is not None:

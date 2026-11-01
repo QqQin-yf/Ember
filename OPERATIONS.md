@@ -74,3 +74,5 @@ python -B -X utf8 scripts/check_memory_health.py --data-dir 'D:\your-heart\data\
 6. Pin：对应《Pin》第 1–4 节。实现四类限额与清单、focus 居中原文、完整下钻、约定 Event 的最早主条合并、跨会话原文/log 保留和旧 ID 映射，以及随 hook 提交确认的单次超预算提醒。原知识 token 总预算改为分类条数与单条字数保护。
 
 7. Briefing 重组：对应《Briefing与提取工具》第 1 节及《整体流程》第 3 节。实现五档顺序、剩余预算砍低分近期条目、关系与 pin 去重、去除自动 10 分及最高召回旧条、末尾待处理约定数；精确现场 ID 支持多会话离散来源，GET 读取冻结快照。约定处理材料按曝光 generation 的确切消息拉取，并保持原文响应易失。
+
+修正 1：对应《Event字段调整》1 与《Pin》2。focus 输入改为逐字原话，复用 quote_spans 的匹配规则，在来源区间内解析为内部消息 ID；聊天和切片写入均在落库前校验，失败返回字段与重摘提示。

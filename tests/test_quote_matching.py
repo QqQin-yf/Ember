@@ -11,7 +11,7 @@ from ember.turn_span import _locate_index, spans_from_quotes
 from tests.test_sidecar import write_args as _write_args
 
 def write_args(*args,**kwargs):
-    value=_write_args(*args,**kwargs); value["event"]["focus"]="1"; return value
+    value=_write_args(*args,**kwargs); return value
 
 
 

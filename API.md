@@ -317,7 +317,7 @@ X-Heart-Instance: <Ember 实例名>
 
 本节替代旧的 create_memory_event / write_event_from_slices 字段说明；这两个 MCP 名称已取消。write_event 与 write_promise 并排提供，来源二选一：顶层 quote_spans 或 source_slice_ids，不能同时提供。
 
-两者顶层 event 都要求 summary、core、significance（1–10 整数）、kind、focus（来源消息 ID 字符串）。write_event.kind 为 daily / relationship / project；write_promise.kind 固定为 promise，due 为带时区 ISO 日期时间或 null，初始 status=open、log=[] 由 Ember 生成。focus 在落库前核对来源范围，只存储供原文截断使用，不展示给模型。
+两者顶层 event 都要求 summary、core、significance（1–10 整数）、kind、focus（从来源区间逐字摘录的一句原话）。write_event.kind 为 daily / relationship / project；write_promise.kind 固定为 promise，due 为带时区 ISO 日期时间或 null，初始 status=open、log=[] 由 Ember 生成。focus 与 quote_spans 使用相同匹配方式定位消息，内部只存解析后的消息 ID 供截断使用；读取不展示 focus。找不到或容错匹配歧义返回 event.focus 和重摘提示。
 
 key_quotes、objects、participants、context、state、outcome、affect、details 均已删除；理解、情况、细节和感受写入 core。原文读取失败时 briefing 只保留 core。旧测试数据不迁移。
 

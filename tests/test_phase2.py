@@ -10,7 +10,7 @@ from ember.store import EmberStore
 from tests.test_sidecar import write_args as _write_args
 
 def write_args(*args,**kwargs):
-    value=_write_args(*args,**kwargs); value["event"]["focus"]="1"; return value
+    value=_write_args(*args,**kwargs); return value
 
 
 class HookMemoryLifecycleTests(unittest.TestCase):

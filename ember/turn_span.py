@@ -108,6 +108,13 @@ def locate_turn(quote: str, messages: list[dict]) -> int | None:
     return corpus[idx]["turn"] if idx is not None else None
 
 
+def locate_message(quote: str, messages: list[dict], *, field="event.focus") -> dict | None:
+    """Use the same exact/unique-formatting matcher for chat and slice sources."""
+    corpus=[m for m in messages if m.get('role') in ('user','assistant')]
+    index=_locate_index(quote,corpus,field=field)
+    return corpus[index] if index is not None else None
+
+
 def spans_from_quotes(quote_spans: list[dict],
                       messages: list[dict]) -> list[tuple[int, int]]:
     """一组 (start_quote, end_quote) → 归并后的 turn 区间列表。

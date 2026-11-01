@@ -167,7 +167,7 @@ class PoolKnowledgeTests(unittest.TestCase):
         from tests.test_sidecar import write_args
         args=write_args()
         args.pop('quote_spans')
-        args['event']['focus']=str(self.a['user_message_id'])
+        args['event']['focus']=self.a['messages'][0]['content']
         args['source_slice_ids']=[self.a['slice_id'],self.b['slice_id']]
         context={'kind':'sleep','session':self.service.get_or_create_session('current'),'turn':1}
         result=self.service._dispatch_memory_tool('write_event',args,context)

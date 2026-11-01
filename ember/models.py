@@ -53,7 +53,7 @@ class Event:
     core: str = ""
     significance: int = 5
     kind: str = "daily"
-    focus: str = ""
+    focus: str = ""  # Internal message ID resolved from the author's verbatim quote.
     due: str | None = None
     status: str = "open"
     log: list[dict[str, Any]] = field(default_factory=list)

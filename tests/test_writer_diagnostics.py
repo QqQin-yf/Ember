@@ -16,7 +16,7 @@ from ember.writer import validate_writer_arguments, writer_error_result
 from tests.test_sidecar import write_args as _write_args
 
 def write_args(*args,**kwargs):
-    value=_write_args(*args,**kwargs); value["event"]["focus"]="1"; return value
+    value=_write_args(*args,**kwargs); return value
 
 
 

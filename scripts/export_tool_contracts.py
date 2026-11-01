@@ -103,7 +103,7 @@ def isolated_receipts():
         text='A concrete fixture decision was made.'
         session.messages=[{'turn':1,'role':'user','content':text,'_source_message_id':'1'}]
         service._live_turn={'session':session,'turn':1,'user_text':text}
-        event={'summary':'A fixture decision','core':text,'significance':8,'kind':'project','focus':'1'}
+        event={'summary':'A fixture decision','core':text,'significance':8,'kind':'project','focus':text}
         args={'event':event,'recall_routes':[{'cue_type':'lexical','cue':'fixture'}],
               'quote_spans':[{'start_quote':text,'end_quote':text}]}
         wire={str(m['message_id']):m for s in sources for m in s['messages']}
@@ -160,7 +160,7 @@ def isolated_receipts():
                 {'memory_id':first,'action':'keep','confidence':8},{'memory_id':second,'action':'keep','confidence':8}]})
             results['extract_memory_entity']=call('extract_memory_entity',{'group_id':entity,'name':'Fixture object',
                 'summary':'An isolated object','event_ids':[r['id'] for r in events]})
-            results['write_promise']=service.sidecar_call_tool('write_promise',{'event':dict(event,kind='promise',due=None),'recall_routes':args['recall_routes'],'source_slice_ids':ids})
+            results['write_promise']=service.sidecar_call_tool('write_promise',{'event':dict(event,kind='promise',due=None,focus=sources[0]['messages'][0]['content']),'recall_routes':args['recall_routes'],'source_slice_ids':ids})
             promise_id=results['write_promise']['event_id']
             Promises(service).enter(promise_id,'cue',{'session_id':'fixture-chat','message_ids':['1']})
             results['list_pending_promises']=promise_dispatch(service,'list_pending_promises',{})
@@ -176,7 +176,7 @@ def isolated_receipts():
             results['read_relationship_point']=service.sidecar_call_tool('read_relationship_point',{'point':'PT-fixture'})
             pin_promises=[]
             for index in range(2):
-                written=service.sidecar_call_tool('write_promise',{'event':dict(event,kind='promise',significance=10,due=None),
+                written=service.sidecar_call_tool('write_promise',{'event':dict(event,kind='promise',significance=10,due=None,focus=sources[0]['messages'][0]['content']),
                     'recall_routes':args['recall_routes'],'source_slice_ids':ids})
                 pin_promises.append(written['event_id'])
             results['list_memory_pins']=service.sidecar_call_tool('list_memory_pins',{})

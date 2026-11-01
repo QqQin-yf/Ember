@@ -19,7 +19,7 @@ def build_tools_spec():
             "core":{"type":"string","minLength":1,"description":"第一人称的连贯叙述，写给自己的诚实版本：情况、细节、理解和感受都写在这里。"},
             "significance":{"type":"integer","minimum":1,"maximum":10,"description":"重要度整数 1-10。10=重大项目转折或确定永远要记住；8-9=有实质影响的进展、发现、决定；5-7=有内容的背景；1-4=琐碎。"},
             "kind":{"enum":["daily","relationship","project"],"description":"事件主类：日常、关于两人关系本身的互动、项目。"},
-            "focus":{"type":"string","minLength":1,"description":"来源区间中最重要的一条消息的 message_id；原文过长时以它为截断中心。"}}}
+            "focus":{"type":"string","minLength":1,"description":"从来源区间逐字摘一句最重要的原话，写法同 start_quote；系统定位对应消息供 pin 截断，不要填写消息编号。"}}}
     routes={"type":"array","minItems":1,"items":{"type":"object","additionalProperties":False,
         "required":["cue_type","cue"],"properties":{
             "cue_type":{"enum":["lexical","conceptual","relational","situational"]},

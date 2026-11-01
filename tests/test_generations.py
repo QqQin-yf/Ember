@@ -102,7 +102,7 @@ class GenerationTests(unittest.TestCase):
         self.assertEqual(self.call(args=args)["code"], "id_conflict")
         self.assertEqual(self.call(name="pin_memory", args={"event_id": "A"})["code"], "id_conflict")
         self.start("r-2", "s2", 80)
-        args=write_args();args["event"]["focus"]="80"
+        args=write_args()
         separate = self.call(rid="r-2",args=args)
         self.assertEqual(separate["status"], "created")
         self.assertEqual(self.svc.store.get_event(separate["event_id"]).source_ref, "conversation/session-s2")

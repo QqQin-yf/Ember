@@ -103,6 +103,9 @@ class QuoteSourceError(ValueError):
             result["field"] = self.field
         if self.candidate_count is not None:
             result["candidate_count"] = self.candidate_count
+        if self.field == 'event.focus' and self.code in ('quote_not_found','quote_ambiguous'):
+            result['error']=('focus 未能在来源区间定位。' if self.code=='quote_not_found' else 'focus 的格式容错匹配有歧义。')
+            result['hint']='请从该来源区间逐字重摘一句最重要的原话；可扩长摘录以唯一定位，不要填写消息编号。'
         return result
 
 

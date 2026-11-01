@@ -52,7 +52,7 @@ def write_args(user_quote: str | None = None,
         quotes.append({"speaker": "ai", "text": extra_ai_quote})
     args = {
         "event": {"summary":"决定把传播模型改成 Route Search", "core":"我们把 Ember 的传播模型改成了 Route Search。",
-                  "significance":8, "kind":"project", "focus":"71"},
+                  "significance":8, "kind":"project", "focus":"今天我们决定把"},
         "recall_routes": [{"cue_type": "lexical", "cue": c} for c in cues],
     }
     if quote_spans is _UNSET:
@@ -62,6 +62,8 @@ def write_args(user_quote: str | None = None,
     else:
         # 传 [] 显式模拟「没给」（校验拒绝）
         args["quote_spans"] = quote_spans
+    if args.get("quote_spans"):
+        args["event"]["focus"]=args["quote_spans"][0]["start_quote"]
     return args
 
 
