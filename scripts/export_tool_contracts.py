@@ -101,7 +101,7 @@ def isolated_receipts():
         for source in sources:slices.save_embedding(source,embedding.space,[1.,0.])
         session=service.get_or_create_session('fixture-chat');session.next_turn()
         text='A concrete fixture decision was made.'
-        session.messages=[{'turn':1,'role':'user','content':text,'_source_message_id':'1'}]
+        session.messages=[{'turn':1,'role':'user','content':text,'_source_message_id':'1','_source_session_id':'fixture-chat'}]
         service._live_turn={'session':session,'turn':1,'user_text':text}
         event={'summary':'A fixture decision','core':text,'significance':8,'kind':'project','focus':text}
         args={'event':event,'recall_routes':[{'cue_type':'lexical','cue':'fixture'}],
