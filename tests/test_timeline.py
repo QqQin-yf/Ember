@@ -110,14 +110,49 @@ class TimelineTests(unittest.TestCase):
         self.assertEqual(model.call_count,1)
         self.assertEqual(result['text'],'1'*50)
 
-    def test_pinned_history_returns_to_original_even_after_points(self):
+    def test_pin_after_points_preserves_points_and_adds_original_at_its_position(self):
         self.cfg['timeline'].update(upper_chars=60,lower_chars=40,compressed_upper_chars=15,compressed_lower_chars=12)
         self.event(1);self.event(2)
         with patch('ember.timeline.prose',return_value='compressed'), \
              patch('ember.timeline.ask',return_value={'points':[{'text':'point','event_ids':['1','2']}]}):
             self.timeline.render()
             self.assertEqual(self.modes()['1'],'pointed')
+            with self.timeline.db() as db:
+                original_points=self.timeline.points(db)
             self.service.pin_store.add('1')
-            result=self.timeline.render()
-        self.assertEqual(self.modes()['1'],'original')
+            with patch('ember.timeline.prose',side_effect=AssertionError('must not recompress')), patch('ember.timeline.ask',side_effect=AssertionError('must not rebuild points')):
+                result=self.timeline.render()
+        self.assertEqual(self.modes()['1'],'pointed')
+        with self.timeline.db() as db:
+            self.assertEqual(self.timeline.points(db),original_points)
+        self.assertIn('point',result['text'])
         self.assertIn('1'*50,result['text'])
+
+    def test_cold_revision_recompresses_one_event_without_resetting_other_levels(self):
+        self.cfg['timeline'].update(upper_chars=60,lower_chars=40)
+        self.event(1);self.event(2)
+        with patch('ember.timeline.prose',return_value='compressed'):
+            self.timeline.prepare()
+        self.service.store.get_event('1').core='updated relationship account'
+        with patch('ember.timeline.prose',return_value='updated compression') as model:
+            self.timeline.prepare()
+        self.assertEqual(model.call_count,1)
+        self.assertEqual(model.call_args.args[2]['event_id'],'1')
+        with self.timeline.db() as db:
+            rows={r['event_id']:dict(r) for r in db.execute('SELECT * FROM timeline')}
+        self.assertEqual(rows['2']['compressed'],'compressed')
+        self.assertEqual(rows['1']['mode'],'compressed')
+
+    def test_still_visible_sources_cannot_be_abstracted_into_immutable_points(self):
+        self.cfg['timeline'].update(upper_chars=60,lower_chars=40,compressed_upper_chars=15,compressed_lower_chars=12)
+        self.event(1);self.event(2)
+        with patch('ember.timeline.prose',return_value='compressed'), \
+             patch('ember.event_mutation.visible',return_value=True), patch('ember.timeline.ask') as model:
+            self.timeline.prepare()
+        model.assert_not_called()
+        with self.timeline.db() as db:
+            self.assertEqual(self.timeline.points(db),[])
+        with patch('ember.event_mutation.visible',return_value=False), \
+             patch('ember.timeline.ask',return_value={'points':[{'text':'history','event_ids':['1','2']}]}):
+            self.timeline.prepare()
+        self.assertEqual(self.modes(),{'1':'pointed','2':'pointed'})

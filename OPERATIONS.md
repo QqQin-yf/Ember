@@ -80,3 +80,5 @@ python -B -X utf8 scripts/check_memory_health.py --data-dir 'D:\your-heart\data\
 修正 2：对应《原文切片调整》5.1。删除逐 trace 入队及 GLM 归类的 PoolQueue / PoolMaintenanceWorker 和生命周期残留；知识嵌入 worker 归回 knowledge 模块。保留召回诊断 trace，但不把它作为归组任务，第 8 步仅从无上级、有信息量的切片供料。
 
 修正 3：对应《写入工具与归组范围》1.1。冷静期使用绑定 generation 的上下文与 briefing 截断点，原文被截走后持久锁定，所有 kind 相同；约定状态/log 处理不受修订限制。两个写入入口均支持可选 supersedes，预先校验目标，保留旧内容和被取代标注，关系事件不允许取代。
+
+修正 4：对应《Event分类维护》4 的 pin 与“要点只往后加”。移除要点作废/整批回滚逻辑；pin 已抽点历史仅额外呈现原样，原要点文字、来源与区间不变。抽点排除仍在现场的来源并封存冷静期；非要点订正仅重算单件压缩。

@@ -30,7 +30,7 @@ class Timeline:
             conn.executescript('''CREATE TABLE IF NOT EXISTS timeline (
                 event_id TEXT PRIMARY KEY,hash TEXT,compressed TEXT,mode TEXT DEFAULT 'original',
                 published_mode TEXT,error TEXT,retry_at REAL DEFAULT 0);
-                CREATE TABLE IF NOT EXISTS points(id TEXT PRIMARY KEY,text TEXT,event_ids TEXT,intervals TEXT,invalid INTEGER DEFAULT 0);
+                CREATE TABLE IF NOT EXISTS points(id TEXT PRIMARY KEY,text TEXT,event_ids TEXT,intervals TEXT);
                 CREATE TABLE IF NOT EXISTS link_jobs(event_id TEXT PRIMARY KEY,hash TEXT,error TEXT,retry_at REAL DEFAULT 0);
                 CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY,value TEXT);''')
             with conn:
@@ -58,25 +58,14 @@ class Timeline:
         for event in events.values():
             row=conn.execute('SELECT * FROM timeline WHERE event_id=?',(event.event_id,)).fetchone()
             digest=self.digest(event)
-            if row and (row['hash']!=digest or (row['mode']=='pointed' and self.service.pin_store.is_pinned(event.event_id))):
-                # Invalid derived prose remains resolvable by its old point ID,
-                # but is no longer rendered. Rebuild from corrected originals.
-                for point in conn.execute('SELECT * FROM points WHERE invalid=0').fetchall():
-                    members=json.loads(point['event_ids'])
-                    if event.event_id in members:
-                        conn.execute('UPDATE points SET invalid=1 WHERE id=?',(point['id'],))
-                        conn.executemany("UPDATE timeline SET mode='original',published_mode=NULL WHERE event_id=?",[(i,) for i in members])
-                conn.execute("UPDATE timeline SET hash=?,compressed=?,mode='original',published_mode=NULL,error=NULL,retry_at=0 WHERE event_id=?",(digest,row['compressed'] if row['hash']==digest else None,event.event_id))
-            elif row is None:
+            if row is None:
                 conn.execute('INSERT INTO timeline(event_id,hash) VALUES (?,?)',(event.event_id,digest))
-        # Changing kind removes a derived timeline entry, never the Event.
-        for row in conn.execute('SELECT event_id FROM timeline').fetchall():
-            if row['event_id'] not in events:
-                for point in conn.execute('SELECT * FROM points WHERE invalid=0').fetchall():
-                    members=json.loads(point['event_ids'])
-                    if row['event_id'] in members:
-                        conn.execute('UPDATE points SET invalid=1 WHERE id=?',(point['id'],))
-                        conn.executemany("UPDATE timeline SET mode='original',published_mode=NULL WHERE event_id=?",[(i,) for i in members])
+            elif row['hash']!=digest and row['mode']!='pointed':
+                # Only this not-yet-pointed Event's compression is stale.
+                conn.execute('UPDATE timeline SET hash=?,compressed=NULL,published_mode=NULL,error=NULL,retry_at=0 WHERE event_id=?',
+                             (digest,event.event_id))
+        for row in conn.execute('SELECT event_id,mode FROM timeline').fetchall():
+            if row['event_id'] not in events and row['mode']!='pointed':
                 conn.execute('DELETE FROM timeline WHERE event_id=?',(row['event_id'],))
         return events
 
@@ -92,7 +81,7 @@ class Timeline:
 
     def points(self,conn):
         return [dict(r,event_ids=json.loads(r['event_ids']),intervals=json.loads(r['intervals']))
-                for r in conn.execute('SELECT * FROM points WHERE invalid=0 ORDER BY rowid')]
+                for r in conn.execute('SELECT * FROM points ORDER BY rowid')]
 
     def cost(self,event,row):
         if self.service.pin_store.is_pinned(event.event_id):
@@ -102,7 +91,7 @@ class Timeline:
     def choose(self,conn,events):
         cfg=lifecycle_config()['timeline']
         rows={r['event_id']:dict(r) for r in conn.execute('SELECT * FROM timeline')}
-        total=sum(len(p['text']) for p in self.points(conn))+sum(self.cost(e,rows[e.event_id]) for e in events.values() if rows[e.event_id]['mode']!='pointed')
+        total=sum(len(p['text']) for p in self.points(conn))+sum(self.cost(e,rows[e.event_id]) for e in events.values() if rows[e.event_id]['mode']!='pointed' or self.service.pin_store.is_pinned(e.event_id))
         if total>cfg['upper_chars']:
             for eid,event in events.items():
                 row=rows[eid]
@@ -116,8 +105,9 @@ class Timeline:
 
     def extract(self,conn,events):
         cfg=lifecycle_config()['timeline']
-        pending=[dict(r) for r in conn.execute("SELECT * FROM timeline WHERE mode='compressed'")]
-        ordered=[r for eid in events for r in pending if r['event_id']==eid and not self.service.pin_store.is_pinned(eid)]
+        pending=[dict(r) for r in conn.execute("SELECT * FROM timeline WHERE mode='compressed' AND compressed IS NOT NULL")]
+        from .event_mutation import visible
+        ordered=[r for eid in events for r in pending if r['event_id']==eid and not self.service.pin_store.is_pinned(eid) and not visible(self.service,events[eid])]
         if sum(len(r['compressed']) for r in ordered)<=cfg['compressed_upper_chars']:
             conn.execute("DELETE FROM metadata WHERE key IN ('point_error','point_retry')")
             return
@@ -155,6 +145,8 @@ class Timeline:
                     pid='PT-'+fingerprint([item['text'],sorted(members)])[:16]
                     conn.execute('INSERT OR IGNORE INTO points(id,text,event_ids,intervals) VALUES (?,?,?,?)',
                                  (pid,item['text'],json.dumps(sorted(members)),json.dumps(self.intervals(members))))
+            from .event_mutation import seal
+            seal(self.service,ids)
             conn.executemany("UPDATE timeline SET mode='pointed' WHERE event_id=?",[(eid,) for eid in ids])
             ordered=ordered[len(batch):]
         conn.execute("DELETE FROM metadata WHERE key IN ('point_error','point_retry')")
@@ -164,7 +156,8 @@ class Timeline:
         with self.lock,self.db() as conn:
             conn.execute('BEGIN IMMEDIATE')
             events=self.synchronize(conn)
-            input_hash=fingerprint([[(eid,self.digest(e)) for eid,e in events.items()],self.service.pin_store.all(),cfg])
+            from .event_mutation import visible
+            input_hash=fingerprint([[(eid,self.digest(e),visible(self.service,e)) for eid,e in events.items()],self.service.pin_store.all(),cfg])
             previous=conn.execute("SELECT value FROM metadata WHERE key='input_hash'").fetchone()
             cached=conn.execute("SELECT value FROM metadata WHERE key='health'").fetchone()
             retry=conn.execute('SELECT 1 FROM timeline WHERE compressed IS NULL AND (? OR retry_at<=?) LIMIT 1',(refresh,time.time())).fetchone()
@@ -173,7 +166,7 @@ class Timeline:
             if previous and previous[0]==input_hash and cached and not retry and not retry_point:
                 return json.loads(cached[0])
 
-            for row in conn.execute('SELECT * FROM timeline WHERE compressed IS NULL').fetchall():
+            for row in conn.execute("SELECT * FROM timeline WHERE compressed IS NULL AND mode!='pointed'").fetchall():
                 if not refresh and row['retry_at']>time.time():
                     continue
                 event=events[row['event_id']]
@@ -201,8 +194,8 @@ class Timeline:
 
     def health(self,conn,events):
         rows={r['event_id']:dict(r) for r in conn.execute('SELECT * FROM timeline')}
-        old=sum(len(p['text']) for p in self.points(conn))+sum(len(r['compressed'] or '') for r in rows.values() if r['mode']=='compressed' and not self.service.pin_store.is_pinned(r['event_id']))
-        original=sum(self.cost(e,rows[eid]) for eid,e in events.items() if rows[eid]['mode']=='original' or self.service.pin_store.is_pinned(eid))
+        old=sum(len(p['text']) for p in self.points(conn))+sum(len(r['compressed'] or '') for r in rows.values() if r['mode']=='compressed' and r['compressed'] and not self.service.pin_store.is_pinned(r['event_id']))
+        original=sum(self.cost(e,rows[eid]) for eid,e in events.items() if (rows[eid]['mode']!='pointed' and not rows[eid]['compressed']) or rows[eid]['mode']=='original' or self.service.pin_store.is_pinned(eid))
         codes=[]
         if old and old/(old+original)>=lifecycle_config()['timeline']['health_ratio']:
             codes.append('relationship_timeline_budget_ratio')
@@ -229,9 +222,9 @@ class Timeline:
                     blocks.append((min(order[i] for i in point['event_ids'] if i in order),point['text']))
                     conn.executemany("UPDATE timeline SET published_mode='pointed' WHERE event_id=?",[(i,) for i in point['event_ids']])
                 for eid,event in events.items():
-                    if onstage(event) or rows[eid]['mode']=='pointed':
+                    if onstage(event) or (rows[eid]['mode']=='pointed' and not self.service.pin_store.is_pinned(eid)):
                         continue
-                    mode='original' if self.service.pin_store.is_pinned(eid) else rows[eid]['mode']
+                    mode='original' if self.service.pin_store.is_pinned(eid) or not rows[eid]['compressed'] else rows[eid]['mode']
                     text=(self.service._briefing_source_block(event) if self.service.pin_store.is_pinned(eid) else
                           rows[eid]['compressed'] if mode=='compressed' else event.core)
                     blocks.append((order[eid],text))
@@ -286,7 +279,7 @@ class Timeline:
             row=conn.execute('SELECT * FROM points WHERE id=? OR text=?',(point,point)).fetchone()
         if not row:
             return {'status':'failed','code':'relationship_point_not_found'}
-        return {'status':'ok','point_id':row['id'],'intervals':json.loads(row['intervals']),'invalidated':bool(row['invalid']),
+        return {'status':'ok','point_id':row['id'],'intervals':json.loads(row['intervals']),
                 'events':[{'event_id':eid,'event_time':self.service.store.get_event(eid).event_time,
                            'summary':self.service.store.get_event(eid).summary} for eid in json.loads(row['event_ids'])]}
 
