@@ -190,7 +190,7 @@ HANDLERS={
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--output',type=Path,default=ROOT/'工具规范审阅.md')
+    parser.add_argument('--output',type=Path,default=ROOT/'设计讨论'/'codex回执'/'工具规范审阅.md')
     parser.add_argument('--force',action='store_true',help='Overwrite an existing review file, including manual edits')
     args=parser.parse_args()
     if args.output.exists() and not args.force:parser.error('Review file exists; use --force only if manual edits are saved')
@@ -247,6 +247,7 @@ def main():
         for number,condition,expression in source_returns(filename,function):
             lines+=['路径（第'+str(number)+'行）：`'+condition+'`','','```python',expression,'```','']
     lines+=['## 你的修改记录','','可在这里记工具名、字段路径、拟改描述、类型/约束、成功回执与失败回执。','']
+    args.output.parent.mkdir(parents=True,exist_ok=True)
     args.output.write_text('\n'.join(lines),encoding='utf-8')
     print(json.dumps({'output':str(args.output),'tools':len(specs),'ordinary':len(ordinary),'sleep':len(sleep),
         'lines':len(lines),'receipts':len(receipts)},ensure_ascii=False))

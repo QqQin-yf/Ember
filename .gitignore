@@ -32,5 +32,5 @@ _mount_llm_check.json
 discussions/
 handoffs/
 
-# Editable local tool contract review, never publish.
-/工具规范审阅.md
+# Local delivery records and tool exports.
+/设计讨论/codex回执/

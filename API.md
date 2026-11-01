@@ -17,7 +17,7 @@ Ember 通过 HTTP hooks 和 MCP 提供记忆写入、召回、来源读取、后
 
 ### 2.2 stale 拒收
 
-未绑定 recall_id 时，慢到的旧轮 `turn_end` 会被拒收，返回 `{"ok": false, "reason": "stale turn_end …"}`。带 recall_id 的绑定生成模式允许补记原生成的真实历史终态，但不会恢复旧槽或污染当前语料，见 [生成绑定协议](PROTOCOL_DETAILS.md#recall-snapshots)。turn 计数允许留洞。
+未绑定 recall_id 时，慢到的旧轮 `turn_end` 会被拒收，返回 `{"ok": false, "reason": "stale turn_end …"}`。带 recall_id 的绑定生成模式允许补记原生成的真实历史终态，但不会恢复旧槽或污染当前语料，见 [生成绑定协议](PROTOCOL_DETAILS.md#generation-binding)。turn 计数允许留洞。
 
 ### 2.3 窗口过滤的降级语义
 
@@ -49,6 +49,7 @@ write_event / write_promise 需要绑定进行中的生成。
 | heart_turn_id | string | — | Heart 轮次 ID，格式为 `t-XXXXXX` |
 | user_message_id | int/string | 绑定生成模式必填 | 真实全局消息 seq，不接受消息 UUID |
 | context_start_id | int/string | — | 当前窗口起点 seq：来源全在窗口内的记忆不再召回 |
+| context_message_ids | array[int/string] | — | 当前分支实际保留的精确消息 ID，可表达分离区间 |
 | recall_id | string | — | 稳定普通生成身份；启用时 session_id 也必填，重试原样携带 |
 | occurred_at | string | — | 原始发生时间，需带时区；绑定生成模式固定保存 |
 | activity_revision | int | — | 绑定生成模式生成开始时的活动版本，非负，重试保持原值 |
@@ -71,7 +72,7 @@ write_event / write_promise 需要绑定进行中的生成。
 - `memory`：Event / Entity 命中、来源过滤和语义匹配统计。
 - `system_reminders`：需注入本轮的提醒数组。
 
-`presentations` 记录呈现单位，`recall_refs` 记录触发会话、真实锚点 seq 和呈现事件的出处。只有事件正文/摘录进入 `recall_refs.events`；实体概览不展开隐藏成员。旧事件或缺可靠消息身份保持 unresolved，路径由 app 解析。完整字段及限制见 [召回引用协议](PROTOCOL_DETAILS.md#recall-refs)。
+`presentations` 记录呈现单位，`recall_refs` 记录触发会话、真实锚点 seq 和呈现事件的出处。只有事件正文/摘录进入 `recall_refs.events`；实体概览不展开隐藏成员。缺少可靠消息身份的事件保持 unresolved，路径由 app 解析。完整字段及限制见 [召回引用协议](PROTOCOL_DETAILS.md#recall-refs)。
 
 ### 4.1.1 生成绑定
 
@@ -85,7 +86,7 @@ GET /ember/generations/{recall_id} 查询生成状态；GET /ember/generations/{
 
 `GET /ember/recalls/{recall_id}` 默认只返回冻结的呈现/引用元数据；`?view=response` 另带首次完整开轮响应的 response 字段。沿用 Bearer 和实例路由。具体字段和恢复边界见 [召回快照协议](PROTOCOL_DETAILS.md#recall-snapshots)。
 
-同 recall_id 同业务内容的 start 在 24 小时内重放原响应，不重新选材或记账；异内容 409 id_conflict。计算/记账恢复中返回 202 recall_in_progress / recall_recovery_pending，Retry-After: 2；app 必须检查状态，不能把 202 当成成功空召回。未提交结果的中断返回 409 recall_outcome_unknown；旧版无快照登记返回 409 recall_snapshot_unavailable；未知 ID 返回 404 unknown_recall。
+同 recall_id 同业务内容的 start 在 24 小时内重放原响应，不重新选材或记账；异内容 409 id_conflict。计算/记账恢复中返回 202 recall_in_progress / recall_recovery_pending，Retry-After: 2；app 必须检查状态，不能把 202 当成成功空召回。未提交结果的中断返回 409 recall_outcome_unknown；生成登记缺少快照返回 409 recall_snapshot_unavailable；未知 ID 返回 404 unknown_recall。
 
 正文从首次结果提交开始保留 24 小时，读取不续期；到期重复 start 和 response 查询返回 410 response_expired，默认 refs 仍可读，旧 ID 不可复用。启动/查询和每分钟后台任务清理临时正文；身份、引用、原有记忆及聊天保留。读取不恢复旧工具权限。主动 run 使用专用头，不因绑定失败而回退普通槽。
 
@@ -123,9 +124,81 @@ POST /mcp/ 使用 MCP Streamable HTTP，tools/list 返回 22 个工具。所有�
 
 原文回执不写入持久工具账；进程重启后读取回执可能返回 result_not_retained。
 
+### 5.1 Event 写入
+
+write_event 与 write_promise 并排提供，来源二选一：顶层 quote_spans 或 source_slice_ids，不能同时提供。
+
+两者顶层 event 都要求 summary、core、significance、kind、focus；significance 为 1–10 整数，focus 为来源区间逐字摘录的一句原话。write_event.kind 为 daily / relationship / project；write_promise.kind 固定为 promise，due 为带时区 ISO 日期时间或 null，初始 status=open、log=[] 由 Ember 生成。focus 与 quote_spans 使用相同匹配方式定位消息，内部只存解析后的消息 ID 供截断使用；读取不展示 focus。找不到或容错匹配歧义返回 event.focus 和重摘提示。
+
+情况、理解、细节和感受写入 core。原文读取失败时 briefing 使用 core。
+
+revise_memory_event 仅在原文完整保留于当前上下文、尚未截断的冷静期内可改 summary / core / significance / 非 promise 的 kind 及 recall_cues；一旦截断就锁住，后来再下钻或重新带入不解锁。来源绑定不可修改。约定状态与改期使用 process_promise。
+
+write_event / write_promise 可选 supersedes 指向被取代的旧日常、项目、约定；旧内容保留，以 superseded_by 与取代关系退出自动召回。新旧任一端为 relationship 都拒绝此参数；关系只写新的接续。未知目标在任何写入前拒绝。
+
+### 5.2 约定处理
+
+list_pending_promises 返回真正进过上下文而尚未写 log 的约定及其原文 span、时间、进入路径；process_promise 要求 event_id 和非空 log，可选 status=done/dropped、due=带时区 ISO 日期时间或 null。普通未 pin 的未曝光约定不能通过该工具修改；pinned promise 可主动处理。写 log 后才确认处理完；状态不变也必须写。追加 log 与曝光回执可在重启后核对恢复。
+
+到期仍 open 的约定追加在 briefing 末尾，不受预算裁切；未来到期或无 due 只按线索浮现，10 分无 due 写入时默认 pin。低分约定默认 <=7；完结后 Event 与其独占的切片退出自动召回，主动下钻仍可达。按 config/lifecycle.json 的时区每日零点检查到期满 lapse_days 的 open 约定，写入 lapsed log；启动补算。Windows 需安装 requirements.txt 中的 tzdata。待处理数量只在刷新 briefing 时更新，普通轮次不替换 briefing。
+
+未 pin 且被 briefing 带入的约定会记曝光；list_pending_promises 读取曝光时的确切对话消息，已确认回复按同一 generation 补齐，不用 max-reply 推断。来源不可达会明确标注；这些原文结果只作易失工具响应，不落持久工具回执。
+
+钉住的约定，包括默认钉住的 10 分无 due 约定，从任何入口进入上下文都不记曝光、不计待处理。process_promise 允许主动处理钉住的约定，无需曝光，仍要求非空 log，spans 可为空；普通未 pin 约定仍要求待处理曝光。
+
+### 5.3 认知、规律与提取
+
+普通 MCP 开放 write_memory_knowledge / review_memory_knowledge / set_knowledge_pin / list_memory_knowledge；置信度、切片来源与低置信度证据校验保留。review_memory_knowledge.group_id 使用已交付提取组的 group_id，组内附上的相似知识须逐条维持、改写或合并。
+
+get_memory_extraction_batch() 不调用归组模型，只读取后台排好的最早材料：description、slices、similar_knowledge、group_id、part_id。批次材料数组按 JSON 字符数受 extraction.batch_chars 约束；整组放不下留到下一批，仅单组独自超限才切为 material_fragment，按 offset 连续拼接，total_chars 是完整材料长度。remaining_groups / remaining_chars 表示未包含在本批的剩余组数和字数；grouping_errors 表示归组错误数。
+
+write_event、write_promise、write_memory_knowledge，以及 review_memory_knowledge 的 rewrite / merge 带 source_slice_ids 时，成功写入后自动将这些来源切片记为已处理并记录结果 ID。一组只使用部分切片时，其余切片仍留在原组，下次继续返回；全部处理后组完成。
+
+finish_memory_extraction_group(group_id,source_slice_ids?,part_id?) 只表示不写。只传 group_id 跳过整组，source_slice_ids 指定组内几段切片，part_id 跳过已交付的超限分段；后两者不能同时提供。未处理材料继续返回。已撤出或已全部处理的组返回 ok，不存在的组报错。来源版本改变时，旧写入不会结掉新版本切片。
+
+第三方只整理没有上级、有信息量且向量有效的切片，不从每轮召回 trace 建池，不代写正式记忆。后台按 extraction.worker_seconds 扫描，group_size / group_threshold / knowledge_threshold / similar_limit 也在 config/lifecycle.json。模型 purpose 为 slice_groups。提取原文回执易失，持久调用账不复制原文。
+
+归组失败按种子切片版本退避，退避期内不作种子或候选，后续切片继续处理。extraction.retry_initial_seconds 和 retry_max_seconds 控制指数退避的初始时间及上限；failure_warning_count 控制连续失败告警阈值。健康检查返回 extraction_grouping_repeated_failure。成功归组、来源版本变化或切片已处理后清理对应失败记录。
+
+### 5.4 Entity 与主题概括
+
+Event 后台维护使用 config/models.json 的 memory_group / entity_identity / entity_summary / theme_summary 用途。向量只提供候选，LLM 判断一类事或具体对象。低分日常先复制不可变副本；够数后按全部主题副本重概括，用概括替换自动召回里的零散 Event，原件仍可主动检索。低分完结约定池形成同一层的客观主题概括；这层独立于认知/规律。聚合后的 daily 切片仍比原 Event 的 core，命中带出替代主题。
+
+Entity 名称或别名命中只给 summary；Event 命中附所属 Entity 的 summary，卡片去重且不占 Event 三席。core、cue、切片和主题复用同一 embed 空间及每次输入的同一 query 向量。项目新事实可让旧 Event 退出自动召回，原件和出处不删除。
+
+revise_entity_summary(entity_id,summary) 直接修订卡片并提交变化检查；read_entity_events(entity_id) 下钻具体 Event，再通过原文工具读取原话。Entity 只在新建、别名或 summary 变化时查重；确认同一对象才合并，保留较早卡片、别名、成员及旧 ID 映射。后台失败保留待重试状态，修订期间材料变化则重做，避免覆盖新修改。
+
+### 5.5 Pin
+
+list_memory_pins 按 relationship、ordinary、promise、knowledge 四类列出 pin。promise 类专指 10 分无 due 的约定，不限制条数，按总字数提醒；其余三类限制条数。pin_memory / set_knowledge_pin 满额返回 rejected / pin_class_full、该类清单与先 unpin 的提示。配置见 lifecycle.json 的 pin。
+
+pin 原文先取完整来源，再围绕 focus 消息居中取 event_chars，省略两端分别标前面还有/后面还有。focus 本身不展示。认知/规律有单条字数保护；原件不改。read_memory_source 下钻返回完整原文。
+
+merge_memory_events(event_ids,summary,core) 合并意思相同的 10 分无 due 约定，保留写入最早一条；同秒按库中创建顺序判先后。原文来源可跨会话，保留各自冻结消息身份，不拼成虚假的连续区间；log 只追加合入，原条不删，标 merged_into 并保留旧 ID 到主条映射。旧 ID 读取、pin 和处理约定会到主条。
+
+钉住约定总字数超预算时，下一次 turn_start 响应给 system_reminders 数组；App 按该 hook 输出作为 system reminder 注入，无需另行通知 Ember。每次超额只提醒一次，整理到预算内后重新超出可再提醒。提醒和召回响应一起持久化，快照失败不会误消耗；同 recall_id 重试重放同一响应。提醒不写进持久 briefing。
+
+### 5.6 关系时间线
+
+关系 Event 后台逐件压一份，pin 住的也缓存压缩版；原件不删除。关系只挂 continues / responds_to 边，不相互取代，不提 Entity。拼装时按总量上下限，从早到晚逐件换压缩版；压缩区超限再按批抽点。要点只追加新文字或“后来……”；每条存来源 Event 和可能断开的时间区间。briefing 只放要点文字，read_relationship_point(point) 可按完整要点文字或 point_id 返回来源 Event 和时间，再下钻原话。
+
+关系要点只追加，永不因 pin 作废或重建。已抽点的关系事件再被 pin 时，要点保留，该事件在自己的时间线位置额外给原样及原文；unpin 后只撤掉这份额外原样。抽点只收原文已不在当前窗口的历史事件；抽点后修订持续锁定。尚未抽点的冷静期订正只重压该件。
+
+POST /ember/briefing/refresh 等待时间线上尚未完成的压缩和抽点，真正模型失败并重试仍失败时，未压缩条保留原样、未抽点批保留压缩版；内容保持准确，可能暂时超预算。后台继续重试，普通轮次不替换 briefing。只有当前 briefing 中被压缩/抽点的关系 Event 参与自动召回；原样在场的不重复召回，关系切片不作为入口。
+
+关系预算、压缩区预算、上下限、抽点批大小、失败重试次数和 5:5 比例阈值均在 config/lifecycle.json。check_memory_health.py 通过 SQLite 副本检查时间线比例、压缩/抽点失败和超预算，不调用模型。relationship_timeline_budget_ratio 表示应调高关系时间线预算。
+
+关系时间线后台按持久待办执行：关系事件写入、关系 pin 变化、失败重试到期触发；启动扫描恢复一次，空闲时不全量 synchronize。briefing 显式 refresh 仍等待时间线准备。
+
 ## 6. Sleep 边界
 
-Sleep 仅保留做梦与沉淀。POST /ember/sleep/knowledge/start、/tool、/finish 退役，返回 410 legacy_sleep_step_retired；原有 GET /ember/sleep/link/batches、/progress 以及 POST /ember/sleep/link/submit、/ember/sleep/structure/run 同样 410，无写入副作用。提取、约定处理改用普通 MCP，不需要 sleep_id 或 Sleep 专属上下文。
+Sleep 负责做梦和沉淀。提取与约定处理使用普通 MCP。以下入口返回 HTTP 410、status=retired、code=legacy_sleep_step_retired，不产生写入：
+
+- POST /ember/sleep/knowledge/{operation}
+- GET /ember/sleep/link/batches
+- GET /ember/sleep/link/progress
+- POST /ember/sleep/link/submit
+- POST /ember/sleep/structure/run
 
 ### 6.1 POST /ember/sleep/sediment/evidence
 
@@ -162,9 +235,9 @@ App 保存新版沉淀正文后提交证据；无证据时不调用。
 - `sediment.jsonl` 保存版本与证据关联；除同版本覆盖外只追加，保留旧版本证据。
 - 沉淀正文不经过 ember；换窗/briefing 需要正文时由 app 提供
 
-## 7. ember 作为客户端
+## 7. 原文提供方接口
 
-### 7.1 精确路径原文接口
+### 7.1 精确路径
 
 精确路径客户端按真实消息 ID 核验来源，不使用最大回复号或区间推断。混合分支历史候选最多在 64 次请求预算内分割校验；连接和鉴权错误不分割重试。
 
@@ -184,13 +257,25 @@ X-Heart-Instance: <Ember 实例名>
 
 写记忆的 quote_spans / focus 定位、Event 原文下钻和约定曝光原文均通过精确路径客户端。历史语料取自实例内已持久生成的原始开轮/终态身份，不从旧区间账本推断；切片来源写入则核验 source_slice_ids 对应的来源版本。整份路径身份须由提供方校验；重新生成/编辑后的混合路径或编号归属不明时，历史读取降级。切片增量使用 /api/source/increment。
 
-未配置、超时、401/404/409/其他非 200、响应残缺/错序/角色冲突均视为不可用；不回退 `/api/source`。旧无编号 Event/只有最大回复号的账本不自动升级成可信来源。旧无编号 hook 仍可核对自身易失文本，但这不能成为可解析的历史路径证据。
+未配置、超时、401/404/409/其他非 200、响应残缺/错序/角色冲突均视为不可用；不回退 `/api/source`。缺少消息编号或只有最大回复号的记录不作为可信来源。未携带消息编号的 hook 可核对进程内文本，但写入 focus 仍要求可核验的来源消息 ID。
 
 配置为 EMBER_SOURCE_URL、EMBER_SOURCE_TOKEN、EMBER_SOURCE_TIMEOUT。超时单位为秒，默认 8。原文提供方须校验实例与会话归属。
 
+### 7.2 增量流
+
+Ember 在 Event 落库后后台拉取，以及 POST /ember/briefing/refresh 时同步兜底。turn_end 提交生成完成及来源身份。GET /ember/slices/jobs/{job_id} 查询已登记的切片任务。
+
+原文提供方需要实现 GET /api/source/increment?cursor=<JSON 编码的不透明游标>&limit=<页大小>，鉴权与 X-Heart-Instance 同 /api/source/path。初始 cursor=null；返回 {cursor, has_more:boolean, turns:[{session_id, messages:[{message_id,role,content}], user_is_system?:boolean}]}。只列出已完成且由提供方验证历史分支路径的完整人机消息对，或 assistant 单条；系统用户消息由提供方显式标记。游标属于该实例的增量流，不能用当前叶节点或最大消息 ID 猜测历史分支。has_more=true 时游标必须前进；空页同样返回 cursor 与 has_more。
+
+两个触发点共用一个持久游标和排他执行锁，切片以消息身份去重；绑定、筛选和向量写入成功才推进游标，失败保留游标供重试。briefing 返回 source_sync 状态；来源或模型不可达时保留准确的已有记忆，报告 unavailable。刷新接口现会等待原文拉取与嵌入，应设置适当请求超时。
+
+有上级的切片仅在切片自身与上级 core 分别过门槛后带出符合 kind 规则的上级 Event；不直接呈现原文。无上级且有信息量的切片才直接呈现。阈值、典型废话、页大小等见 config/lifecycle.json，可用 EMBER_LIFECYCLE_CONFIG 指定替代文件；所有嵌入仍由 config/models.json 的 embed 用途和统一网关提供。
+
 ## 8. briefing
 
-POST /ember/briefing/refresh 显式刷新，GET /ember/briefing 只读冻结快照。refresh 会等待原文增量兜底、时间线压缩和抽点，超时需覆盖实际模型重试时长；拼装本身不调 LLM。精确字段与五档规则见下文“五档 briefing 快照”，完整生命周期见 MEMORY_LIFECYCLE_SPEC.md。对话中途不自动替换快照。
+POST /ember/briefing/refresh 收 session_id、keep_from_message_id，可附精确 context_message_ids；新会话、截断和断线重进需要新简报时调用。先兜底同步原文增量、等待关系压缩/抽点，再按顺序保存完整快照：关系时间线；其他 pin 原文；近期非关系、非 promise 的 8–10 分 core / 1–7 分 summary；pin 的认知/规律；到期 open 约定及待处理数量。未 pin 的 10 分也进入 72 小时近期层，超过窗口不永久常驻。promise 的浮现规则优先，不通过近期层提前带入未到期或无 due 约定。
+
+近期层使用 total_chars 扣除不可砍部分后的剩余预算，从最低分、最旧条目开始移除；不会硬截 core。关系、pin、知识及到期约定保持各自既定规则；最后的到期约定和待处理数量不砍。快照带 revision / refreshed_at / 分层统计，完整文本原子保存。GET /ember/briefing 只读该快照，不动态拼接新 pin 的知识；无快照为 empty，损坏为 failed / briefing_snapshot_unreadable。对话中不替换已有 briefing。
 
 ## 9. 消息坐标
 
@@ -208,90 +293,8 @@ POST /ember/briefing/refresh 显式刷新，GET /ember/briefing 只读冻结快�
 | config/models.json 中各 purpose 的 key_env | 模型与端点集中配置，key 只填对应 .env 变量 |
 | EMBER_LIFECYCLE_CONFIG | 非秘密阈值/预算配置文件，缺省 config/lifecycle.json |
 
-## 主动 run
+## 11. 主动 run
 
 协议版本：`ember-runs/1`。
 
 POST /ember/runs/start、POST /ember/runs/finish、GET /ember/runs/{run_id} 提供主动 run 的生命周期接口。当前只开放 read_memory_source，不支持写入或有副作用的 search_memory。字段、幂等、终态、重启和 MCP 绑定见 [主动 run 协议](PROTOCOL_DETAILS.md#runs)。
-
-## Event 写入
-
-write_event 与 write_promise 并排提供，来源二选一：顶层 quote_spans 或 source_slice_ids，不能同时提供。
-
-两者顶层 event 都要求 summary、core、significance、kind、focus；significance 为 1–10 整数，focus 为来源区间逐字摘录的一句原话。write_event.kind 为 daily / relationship / project；write_promise.kind 固定为 promise，due 为带时区 ISO 日期时间或 null，初始 status=open、log=[] 由 Ember 生成。focus 与 quote_spans 使用相同匹配方式定位消息，内部只存解析后的消息 ID 供截断使用；读取不展示 focus。找不到或容错匹配歧义返回 event.focus 和重摘提示。
-
-情况、理解、细节和感受写入 core。原文读取失败时 briefing 使用 core。
-
-revise_memory_event 仅在原文完整保留于当前上下文、尚未截断的冷静期内可改 summary / core / significance / 非 promise 的 kind 及 recall_cues；一旦截断就锁住，后来再下钻或重新带入不解锁。来源绑定不可修改。约定状态与改期使用 process_promise。
-
-write_event / write_promise 可选 supersedes 指向被取代的旧日常、项目、约定；旧内容保留，以 superseded_by 与取代关系退出自动召回。新旧任一端为 relationship 都拒绝此参数；关系只写新的接续。未知目标在任何写入前拒绝。
-
-### 原文增量提供方契约
-
-Ember 在 Event 落库后后台拉取，以及 POST /ember/briefing/refresh 时同步兜底。turn_end 仅提交生成完成及来源身份，不再启动切片任务。旧 /ember/slices/jobs 仅能查询历史任务。
-
-原文提供方需要实现 GET /api/source/increment?cursor=<JSON 编码的不透明游标>&limit=<页大小>，鉴权与 X-Heart-Instance 同 /api/source/path。初始 cursor=null；返回 {cursor, has_more:boolean, turns:[{session_id, messages:[{message_id,role,content}], user_is_system?:boolean}]}。只列出已完成且由提供方验证历史分支路径的完整人机消息对，或 assistant 单条；系统用户消息由提供方显式标记。游标属于该实例的增量流，不能用当前叶节点或最大消息 ID 猜测历史分支。has_more=true 时游标必须前进；空页同样返回 cursor 与 has_more。
-
-两个触发点共用一个持久游标和排他执行锁，切片以消息身份去重；绑定、筛选和向量写入成功才推进游标，失败保留游标供重试。briefing 返回 source_sync 状态；来源或模型不可达时保留准确的已有记忆，报告 unavailable。刷新接口现会等待原文拉取与嵌入，应设置适当请求超时。
-
-有上级的切片仅在切片自身与上级 core 分别过门槛后带出符合 kind 规则的上级 Event；不直接呈现原文。无上级且有信息量的切片才直接呈现。阈值、典型废话、页大小等见 config/lifecycle.json，可用 EMBER_LIFECYCLE_CONFIG 指定替代文件；所有嵌入仍由 config/models.json 的 embed 用途和统一网关提供。
-
-### 约定处理
-
-list_pending_promises 返回真正进过上下文而尚未写 log 的约定及其原文 span、时间、进入路径；process_promise 要求 event_id 和非空 log，可选 status=done/dropped、due=带时区 ISO 日期时间或 null。普通未 pin 的未曝光约定不能通过该工具修改；pinned promise 可主动处理。写 log 后才确认处理完；状态不变也必须写。追加 log 与曝光回执可在重启后核对恢复。
-
-到期仍 open 的约定追加在 briefing 末尾，不受预算裁切；未来到期或无 due 只按线索浮现，10 分无 due 写入时默认 pin。低分约定默认 <=7；完结后 Event 与其独占的切片退出自动召回，主动下钻仍可达。按 config/lifecycle.json 的时区每日零点检查到期满 lapse_days 的 open 约定，写入 lapsed log；启动补算。Windows 需安装 requirements.txt 中的 tzdata。待处理数量只在刷新 briefing 时更新，普通轮次不替换 briefing。
-
-### 共用归组、Entity 与主题概括
-
-Event 后台维护使用 config/models.json 的 memory_group / entity_identity / entity_summary / theme_summary 用途。向量只提供候选，LLM 判断一类事或具体对象。低分日常先复制不可变副本；够数后按全部主题副本重概括，用概括替换自动召回里的零散 Event，原件仍可主动检索。低分完结约定池形成同一层的客观主题概括；这层独立于认知/规律。聚合后的 daily 切片仍比原 Event 的 core，命中带出替代主题。
-
-Entity 名称或别名命中只给 summary；Event 命中附所属 Entity 的 summary，卡片去重且不占 Event 三席。Direction 不再参与自动召回。core、cue、切片和主题复用同一 embed 空间及每次输入的同一 query 向量。项目新事实可让旧 Event 退出自动召回，原件和出处不删除。
-
-revise_entity_summary(entity_id,summary) 直接修订卡片并提交变化检查；read_entity_events(entity_id) 下钻具体 Event，再通过原文工具读取原话。Entity 只在新建、别名或 summary 变化时查重；确认同一对象才合并，保留较早卡片、别名、成员及旧 ID 映射。后台失败保留待重试状态，修订期间材料变化则重做，避免覆盖新修改。
-
-### 关系时间线
-
-关系 Event 后台逐件压一份，pin 住的也缓存压缩版；原件不删除。关系只挂 continues / responds_to 边，不相互取代，不提 Entity。拼装时按总量上下限，从早到晚逐件换压缩版；压缩区超限再按批抽点。要点只追加新文字或“后来……”；每条存来源 Event 和可能断开的时间区间。briefing 只放要点文字，read_relationship_point(point) 可按完整要点文字或 point_id 返回来源 Event 和时间，再下钻原话。
-
-关系要点只追加，永不因 pin 作废或重建。已抽点的关系事件再被 pin 时，要点保留，该事件在自己的时间线位置额外给原样及原文；unpin 后只撤掉这份额外原样。抽点只收原文已不在当前窗口的历史事件；抽点后修订持续锁定。尚未抽点的冷静期订正只重压该件。
-
-POST /ember/briefing/refresh 等待时间线上尚未完成的压缩和抽点，不使用旧完成状态替代。真正模型失败并重试仍失败时，未压缩条保留原样、未抽点批保留压缩版；内容保持准确，可能暂时超预算。后台继续重试，普通轮次不替换 briefing。只有当前 briefing 中被压缩/抽点的关系 Event 参与自动召回；原样在场的不重复召回，关系切片不作为入口。
-
-关系预算、压缩区预算、上下限、抽点批大小、失败重试次数和 5:5 比例阈值均在 config/lifecycle.json。check_memory_health.py 通过 SQLite 副本检查时间线比例、压缩/抽点失败和超预算，不调用模型。relationship_timeline_budget_ratio 表示应调高关系时间线预算。
-
-### Pin 分类、原文与单次提醒
-
-list_memory_pins 按 relationship、ordinary、promise、knowledge 四类列出 pin。promise 类专指 10 分无 due 的约定，不限制条数，按总字数提醒；其余三类限制条数。pin_memory / set_knowledge_pin 满额返回 rejected / pin_class_full、该类清单与先 unpin 的提示。配置见 lifecycle.json 的 pin。
-
-pin 原文先取完整来源，再围绕 focus 消息居中取 event_chars，省略两端分别标前面还有/后面还有。focus 本身不展示。认知/规律有单条字数保护；原件不改。read_memory_source 下钻返回完整原文。
-
-merge_memory_events(event_ids,summary,core) 合并意思相同的 10 分无 due 约定，保留写入最早一条；同秒按库中创建顺序判先后。原文来源可跨会话，保留各自冻结消息身份，不拼成虚假的连续区间；log 只追加合入，原条不删，标 merged_into 并保留旧 ID 到主条映射。旧 ID 读取、pin 和处理约定会到主条。
-
-钉住约定总字数超预算时，下一次 turn_start 响应给 system_reminders 数组；App 按该 hook 输出作为 system reminder 注入，无需另行通知 Ember。每次超额只提醒一次，整理到预算内后重新超出可再提醒。提醒和召回响应一起持久化，快照失败不会误消耗；同 recall_id 重试重放同一响应。提醒不写进持久 briefing。
-
-### 五档 briefing 快照
-
-POST /ember/briefing/refresh 收 session_id、keep_from_message_id，可附精确 context_message_ids；新会话、截断和断线重进需要新简报时调用。先兜底同步原文增量、等待关系压缩/抽点，再按顺序保存完整快照：关系时间线；其他 pin 原文；近期非关系、非 promise 的 8–10 分 core / 1–7 分 summary；pin 的认知/规律；到期 open 约定及待处理数量。未 pin 的 10 分也进入 72 小时近期层，超过窗口不永久常驻。promise 的浮现规则优先，不通过近期层提前带入未到期或无 due 约定。
-
-近期层使用 total_chars 扣除不可砍部分后的剩余预算，从最低分、最旧条目开始移除；不会硬截 core。关系、pin、知识及到期约定保持各自既定规则；最后的到期约定和待处理数量不砍。快照带 revision / refreshed_at / 分层统计，完整文本原子保存。GET /ember/briefing 只读该快照，不动态拼接新 pin 的知识；无快照为 empty，损坏为 failed / briefing_snapshot_unreadable。对话中不替换已有 briefing。
-
-未 pin 且被 briefing 带入的约定会记曝光；list_pending_promises 读取曝光时的确切对话消息，已确认回复按同一 generation 补齐，不用 max-reply 推断。来源不可达会明确标注；这些原文结果只作易失工具响应，不落持久工具回执。
-
-钉住的约定，包括默认钉住的 10 分无 due 约定，从任何入口进入上下文都不记曝光、不计待处理。process_promise 允许主动处理钉住的约定，无需曝光，仍要求非空 log，spans 可为空；普通未 pin 约定仍要求待处理曝光。
-
-关系时间线后台按持久待办执行：关系事件写入、关系 pin 变化、失败重试到期触发；启动扫描恢复一次，空闲时不全量 synchronize。briefing 显式 refresh 仍等待时间线准备。
-
-### 独立提取工具
-
-普通 MCP 开放 write_memory_knowledge / review_memory_knowledge / set_knowledge_pin / list_memory_knowledge；置信度、切片来源与低置信度证据校验保留。review_memory_knowledge.group_id 使用已交付提取组的 group_id，组内附上的相似知识须逐条维持、改写或合并。
-
-get_memory_extraction_batch() 不调用归组模型，只读取后台排好的最早材料：description、slices、similar_knowledge、group_id、part_id。批次材料数组按 JSON 字符数受 extraction.batch_chars 约束；整组放不下留到下一批，仅单组独自超限才切为 material_fragment，按 offset 连续拼接，total_chars 是完整材料长度。remaining_groups / remaining_chars 表示未包含在本批的剩余组数和字数；grouping_errors 表示归组错误数。
-
-write_event、write_promise、write_memory_knowledge，以及 review_memory_knowledge 的 rewrite / merge 带 source_slice_ids 时，成功写入后自动将这些来源切片记为已处理并记录结果 ID。一组只使用部分切片时，其余切片仍留在原组，下次继续返回；全部处理后组完成。
-
-finish_memory_extraction_group(group_id,source_slice_ids?,part_id?) 只表示不写。只传 group_id 跳过整组，source_slice_ids 指定组内几段切片，part_id 跳过已交付的超限分段；后两者不能同时提供。未处理材料继续返回。已撤出或已全部处理的组返回 ok，不存在的组报错。来源版本改变时，旧写入不会结掉新版本切片。
-
-第三方只整理没有上级、有信息量且向量有效的切片，不从每轮召回 trace 建池，不代写正式记忆。后台按 extraction.worker_seconds 扫描，group_size / group_threshold / knowledge_threshold / similar_limit 也在 config/lifecycle.json。模型 purpose 为 slice_groups。提取原文回执易失，持久调用账不复制原文。
-
-归组失败按种子切片版本退避，退避期内不作种子或候选，后续切片继续处理。extraction.retry_initial_seconds 和 retry_max_seconds 控制指数退避的初始时间及上限；failure_warning_count 控制连续失败告警阈值。健康检查返回 extraction_grouping_repeated_failure。成功归组、来源版本变化或切片已处理后清理对应失败记录。

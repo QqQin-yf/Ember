@@ -102,7 +102,7 @@ python -B scripts/check_memory_health.py --data-dir <instance-data-directory>
 python -X utf8 scripts/export_tool_contracts.py
 ```
 
-默认导出到本地 `工具规范审阅.md`，可用 `--output` 指定路径。覆盖已有文件需要 `--force`。
+默认导出到本地 `设计讨论/codex回执/工具规范审阅.md`，可用 `--output` 指定路径。覆盖已有文件需要 `--force`。
 
 ## 文档
 

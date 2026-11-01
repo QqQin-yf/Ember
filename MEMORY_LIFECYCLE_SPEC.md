@@ -1,10 +1,10 @@
 # Ember 记忆生命周期
 
-2026-11-01。本文同步本次九步改造与第 1–7 步修正，替代旧的召回池 GLM 归类、Direction 召回及 Sleep 专属提取流程。本文描述源码行为；运行部署与 App 适配应分别核验。
+Ember 的记忆写入、召回、后台维护、提取和 briefing 流程。
 
 ## 1. 职责与时机
 
-Ember 提供 MCP + hooks，负责记忆、来源、召回及后台维护；App 持有对话循环、实际上下文和截断编排。跨边界的材料交换是 briefing 与 App 原文服务，工具和召回分别经 MCP、hooks 交付。App 的 Sleep 只保留做梦、沉淀，Ember 不编排二者。本次不修改 Deliz，不迁移旧测试记忆。
+Ember 提供 MCP + hooks，负责记忆、来源、召回及后台维护；App 持有对话循环、实际上下文和截断编排。跨边界的材料交换是 briefing 与 App 原文服务，工具和召回分别经 MCP、hooks 交付。App 的 Sleep 只保留做梦、沉淀，Ember 不编排二者。
 
 ```mermaid
 flowchart TD
@@ -29,7 +29,7 @@ flowchart TD
 
 ## 2. Event 写入、冷静期和取代
 
-write_event 与 write_promise 并排提供。event 的内容字段为 summary、core、整数 significance、kind、focus。旧 participants / objects / context / outcome / state / affect / details / key_quotes 删除，需要的情况、理解、细节和感受写进 core。write_event.kind 为 daily / relationship / project；write_promise.kind=promise，另有 due，初始 status=open、log=[] 由系统生成。
+write_event 与 write_promise 并排提供。event 的内容字段为 summary、core、整数 significance、kind、focus。情况、理解、细节和感受写进 core。write_event.kind 为 daily / relationship / project；write_promise.kind=promise，另有 due，初始 status=open、log=[] 由系统生成。
 
 来源二选一：quote_spans（起尾原话，允许多个分离区间）或 source_slice_ids。模型填写的 focus 是来源中的逐字原话，按 quote 相同的匹配方式解析为内部消息 ID，供 pin 居中截断；不向模型展示 ID。找不到或歧义时给 event.focus 字段与重摘提示，不猜来源。
 
@@ -39,7 +39,7 @@ write_event / write_promise 可附 supersedes（旧 Event ID 数组），保留�
 
 ## 3. 切片及自动召回
 
-一批 Event 写入后后台拉增量；briefing refresh 再同步拉一次兜底。二者共用持久游标，排他推进，只在该页切片、筛选、嵌入和绑定成功后确认。失败不前移，内容身份幂等。turn_end 只补来源及生成终态，不再通知切片。App 提供已完成的精确人机对，系统来源用户条显式排除，只留下 assistant 条。
+一批 Event 写入后后台拉增量；briefing refresh 再同步拉一次兜底。二者共用持久游标，排他推进，只在该页切片、筛选、嵌入和绑定成功后确认。失败不前移，内容身份幂等。turn_end 记录来源及生成终态。App 提供已完成的精确人机对，系统来源用户条显式排除，只留下 assistant 条。
 
 | 切片类别 | 处理 |
 |---|---|
@@ -57,9 +57,9 @@ write_event / write_promise 可附 supersedes（旧 Event ID 数组），保留�
 | promise 低分已完结 | 关闭 |
 | project / relationship | 关闭 |
 
-输入只算一次 embed 查询向量，core / cue / 切片 / 主题复用该空间。旧 recall_embed 主动检索索引保持自己的命名空间，不能混比。切片候选仍有独立 rerank。来源完整在实际当前分支的材料不重复自动呈现；未知来源保守保留。Event 主席最多三件，Entity summary 不占席；现行持续在场最多三轮，不召回、取代、现场与 pin 等资格可提前终止。临时注入不写成聊天历史。
+输入只算一次 embed 查询向量，core / cue / 切片 / 主题复用该空间。recall_embed 主动检索索引使用独立命名空间，不能混比。切片候选仍有独立 rerank。来源完整在实际当前分支的材料不重复自动呈现；未知来源保守保留。Event 主席最多三件，Entity summary 不占席；现行持续在场最多三轮，不召回、取代、现场与 pin 等资格可提前终止。临时注入不写成聊天历史。
 
-每轮召回 trace 的 GLM 归类及 PoolMaintenanceWorker 已删除。第三方切片归组只有第 7 节的提取供料路径。
+召回 trace 用于诊断。第三方切片归组仅为提取工具供料。
 
 ## 4. 共用归组、主题和 Entity
 
@@ -69,7 +69,7 @@ Event 后台共用一套“向量候选 + LLM 判断”：一类事进入主题�
 
 Entity summary 标注“根据相关事件客观整理”，由后台写。项目按新事实重写现状，旧状态退出 summary；人、动物、地方只增补。先匹配现有对象，确定同一对象才复用并加别名；拿不准不合并。只对新建、别名或 summary 变化的卡片查重，保留较早主卡片、别名及成员，旧 ID 映射可用。模型可用 revise_entity_summary 直接订正。
 
-输入只命中 Entity 名称/别名时，仅给 summary；命中 Event 时附其全部所属 Entity summary，卡片一次一份，不带整区域 Event。read_entity_events 下钻成员。生产 service、轮前诊断和切片召回不含 Direction 参数、聚焦标签或回退标记。旧渲染器仅在历史测试夹具中；direction.py 保留离线匹配兼容。共享 recall_embed 嵌入和向量帮助函数位于 recall_embedding.py，账户、模型用途和向量空间不变。
+输入只命中 Entity 名称/别名时，仅给 summary；命中 Event 时附其全部所属 Entity summary，卡片一次一份，不带整区域 Event。read_entity_events 下钻成员。共享 recall_embed 嵌入和向量帮助函数位于 recall_embedding.py。
 
 ## 5. 关系时间线与 pin
 
@@ -77,7 +77,7 @@ Entity summary 标注“根据相关事件客观整理”，由后台写。项�
 
 只有原文已不在当前窗口的 Event 能抽点，抽点后持续锁定。订正尚未抽点的 Event 只重压这一件。已抽点后再 pin 时，要点不作废，该 Event 在自己的位置额外出现原样及原文；unpin 撤去额外原样。关系只挂 continues / responds_to，不取代、不提 Entity。
 
-后台用独立持久待办处理关系写入、关系 pin 变化、到点重试；启动只恢复扫描一次，空闲 tick 不全量 synchronize。待办版本防止处理中新增写入丢失。briefing refresh 等待未完成压缩与抽点；模型重试仍失败则保留准确的原样/压缩版并报告健康提示，允许暂时超预算。压缩和要点占比达到配置的健康比例（示例 5:5）提示调高时间线预算。
+后台用独立持久待办处理关系写入、关系 pin 变化、到点重试；启动只恢复扫描一次，空闲 tick 不全量 synchronize。待办版本防止处理中新增写入丢失。briefing refresh 等待未完成压缩与抽点；模型重试仍失败则保留准确的原样/压缩版并报告健康提示，允许暂时超预算。压缩和要点占比达到 timeline.health_ratio 时提示调高时间线预算。
 
 pin 分 relationship、ordinary、knowledge 三个限条数类别，加一个不限条数、按字数提醒的 10 分无 due promise 类别。满额返回类别清单和先 unpin 提示。list_memory_pins 读清单。Event 原文围绕 focus 消息居中取 event_chars，省略两端标“前面还有/后面还有”；下钻返回完整原文。knowledge 有单条长度保护。
 
@@ -101,7 +101,7 @@ briefing refresh 保存完整冻结快照，GET 只读快照，普通轮次不�
 | 4 | pin 的认知/规律 | 正文及单条长度保护 |
 | 5 | 到期 open 约定与待处理条数 | 不砍；0 条不显示提示 |
 
-现场原文完整在上下文的 Event 不进。未 pin 的 10 分不永久常驻；72 小时内仍进近期 core 层。旧“召回最多一条”规则删除。失败、超预算、source_sync 状态如实返回；快照有 revision 和 refreshed_at，损坏不会伪造空成功。
+现场原文完整在上下文的 Event 不进。未 pin 的 10 分不永久常驻；72 小时内仍进近期 core 层。失败、超预算、source_sync 状态如实返回；快照有 revision 和 refreshed_at，损坏不会伪造空成功。
 
 ## 7. 随时调用的提取工具
 
@@ -117,8 +117,8 @@ finish_memory_extraction_group 只用于决定不写的材料：整组、指定 
 
 ## 8. 接口与运行边界
 
-POST /ember/sleep/knowledge/start|tool|finish 及旧 link / structure 入口返回 410 legacy_sleep_step_retired，没有写入副作用。生产 Sleep 专属材料模块和上下文 gate 已移除；历史协议夹具只在 tests 中。沉淀 evidence 接口不变，梦仍由 App 持有。
+POST /ember/sleep/knowledge/start|tool|finish、link 和 structure 入口返回 410 legacy_sleep_step_retired，没有写入副作用。沉淀证据由 sediment/evidence 接口接收，做梦由 App 管理。
 
 HTTP / MCP、原文精确 path 和增量流、调用身份和失败码见 API.md；快照、引用、主动 run 等稳定协议见 PROTOCOL_DETAILS.md。原文/提取/待处理约定等工具正文使用易失回执，持久调用账不复制这些原文。后台缓存和来源副本仍保存在实例目录，是派生材料，不等同于新写聊天历史。
 
-模型 key 仅在 .env，对应 purpose、账号和向量空间独立。不能把提交/推送当成已部署；App 原文增量接口和 hooks 输出消费需由 App 侧另行适配后再上线新链路。
+模型 key 仅在 .env，对应 purpose、账号和向量空间独立。接入方提供原文精确路径和增量接口，消费 hooks 的召回与提醒输出。

@@ -1,112 +1,96 @@
-# 运行与离线检查
+# 运行与检查
 
-启动及本地配置见[README.md](README.md)。下面是无需网络和模型的记忆库检查方法。
+启动方式见 [README.md](README.md)，接口见 [API.md](API.md)。
 
+## 配置
 
-无需 App、Heart、模型或网络。必须显式选择一个实例的实际数据目录；不加载 `.env`，不自动扫描其他实例，不自动修复。
+服务启动时加载项目 `.env`。监听地址、端口、鉴权、数据根目录和实例清单由环境变量配置，修改后重启服务。
 
-```bash
-python -B scripts/check_memory_health.py --data-dir /opt/ember1/data
-python -B scripts/check_memory_health.py --data-dir /opt/ember1/data --format json
+| 配置文件 | 内容 | 替代文件环境变量 |
+|---|---|---|
+| `config/models.json` | 提供方、模型用途、端点、超时、重试、代理和生成参数 | `EMBER_MODELS_CONFIG` |
+| `config/lifecycle.json` | 召回阈值、约定时区、pin 上限、时间线预算、提取批次和归组退避 | `EMBER_LIFECYCLE_CONFIG` |
+
+模型凭据填写到 `.env` 中各提供方 `key_env` 指定的变量，JSON 配置只保存变量名。各模型用途保留自己的提供方、凭据和向量空间。
+
+模型配置检查：
+
+```sh
+python -X utf8 scripts/check_model_config.py
 ```
 
-Windows 使用实际实例目录，例如：
+该命令显示模型用途、凭据变量名及是否配置，不发送模型请求。更换嵌入模型或端点后，须为对应空间重新生成向量。
 
-```powershell
-python -B -X utf8 scripts/check_memory_health.py --data-dir 'D:\your-heart\data\ember' --format json
+## 实例数据目录
+
+`EMBER_DATA_ROOT` 指定根目录；未设置时使用 `EMBER_DATA_DIR`，再回落到项目 `data/`。
+
+- `default`：`<root>/ember`。
+- 其他实例：`<root>/instances/<name>/ember`。
+- 根目录已有 `events.jsonl` 且没有 `ember/` 时，`default` 直接使用根目录。
+
+检查时选择一个实例的实际目录，不使用多实例父目录。
+
+## 只读健康检查
+
+```sh
+python -B scripts/check_memory_health.py --data-dir <instance-data-directory>
+python -B scripts/check_memory_health.py --data-dir <instance-data-directory> --format json
 ```
 
-目录遵循实例实际配置：旧扁平库可以直接是 `data/`，新默认实例可以是 `data/ember/`，其他实例通常是 `data/instances/<name>/ember/`。不要把上例当作本机当前配置，也不要把整个多实例父目录当作一个库。
+该命令不加载 `.env`，不构造服务，不请求模型或原文，不修改数据。SQLite 文件及 WAL 复制到临时目录后读取。
 
-## 检查范围
+### 检查范围
 
-- 当前目录所有 `.jsonl` 的 UTF-8、JSON 对象格式和非有限数值；不输出行正文。
-- Event/RecallRoute 的模型形状、非空 ID、线索状态与类型、空 cue、线索指向不存在的事件。
-- turn_spans/pinned 的事件关联、v1/v2 区间合法性。
-- 第一条冻结出处的冲突、孤立出处、区间、消息编号格式和消息所在轮次。冻结出处先于事件提交，孤立记录仅作警告。
-- 如有 `generations.sqlite3`：在临时 DB/WAL 副本执行 quick_check，核对工具/快照的生成身份关联、回执 JSON、持久 completed 回执缺失和 created 回执指向丢失事件。
+| 数据 | 检查内容 |
+|---|---|
+| JSONL | UTF-8、JSON 对象、非有限数值及未写完的尾行 |
+| Event / RecallRoute | 字段形状、ID、线索类型、空线索和目标关联 |
+| 出处与区间 | 冻结来源冲突、孤立出处、消息编号、轮次和区间格式 |
+| pin | 关联的 Event 是否存在 |
+| generations.sqlite3 | 数据库结构、生成与工具关联、回执和创建结果关联 |
+| relationship_timeline.sqlite3 | 时间线比例、压缩或抽点失败、超预算 |
+| organization.sqlite3 | 尚未完成的维护错误 |
+| source_sync.sqlite3 | 原文增量同步错误 |
+| extraction.sqlite3 | 归组失败数量及达到阈值的连续失败种子 |
 
-同一 Event/Route 多条追加是正常历史，不因重复 ID 报损坏；旧记忆无冻结出处、未知/缺失消息编号、合法 pending、unknown/in_progress 回执、volatile 空结果及 TTL 后空正文单独统计或保留原义，不冒充有效证据。
+同一 Event 或线索的追加记录按其存储语义读取。无冻结出处、缺消息编号、pending / unknown 状态、易失回执空正文及 TTL 后空正文分别统计，不直接判为损坏。
 
-## 输出与退出码
+### 输出
 
-`status=ok` 表示覆盖范围内未发现问题；不是完整业务正确性证明。`issues` 表示存在错误或需要人工复核的警告。`inconclusive` 表示检查期间数据文件发生变化，关联告警可能是写入中的暂态，应在静止副本复查。退出码 0 对应 ok，1 对应 issues/inconclusive；参数错误使用 argparse 的退出码 2。
+| status | 含义 | 退出码 |
+|---|---|---|
+| ok | 检查范围内未发现问题 | 0 |
+| issues | 存在错误或需复核的警告 | 1 |
+| inconclusive | 检查期间文件发生变化，需在静止副本复查 | 1 |
 
-每条 finding 仅含 severity、code、文件名及可选行号/记录 ID；不输出摘要、core、cue、摘录、聊天正文或工具结果正文。`--max-findings` 默认 200，仅限制明细条数，不影响问题计数或 inconclusive 状态。
+参数错误退出码为 2。`--max-findings` 默认 200，只限制明细数量。
 
-常见 code：`invalid_jsonl_record`（非法整行）、`incomplete_jsonl_tail`（可能未写完的末行）、`route_event_missing`（线索断链）、`conflicting_frozen_source`（冻结来源冲突）、`invalid_turn_spans`（非法区间）、`created_receipt_event_missing`（成功回执所指事件缺失）。
+每条 finding 包含 severity、code、file，可附 line 和 record_id；不输出记忆正文、线索、原文或错误响应正文。
 
-## 只读和一致性边界
+| code | 含义 |
+|---|---|
+| invalid_jsonl_record | JSONL 记录不合法 |
+| incomplete_jsonl_tail | 尾行可能尚未写完 |
+| route_event_missing | 线索指向不存在的 Event |
+| conflicting_frozen_source | 冻结出处冲突 |
+| created_receipt_event_missing | 创建回执指向的 Event 不存在 |
+| relationship_timeline_budget_ratio | 压缩与要点占比达到配置阈值，应调整时间线预算 |
+| extraction_grouping_repeated_failure | 种子连续归组失败达到配置阈值 |
 
-不会实例化 Store/Service、恢复生成、清理过期快照、写入记忆或访问外部服务。读取原始 SQLite 仅使用普通文件读取；DB/WAL 复制到系统临时目录后才打开 SQLite，SHM/临时文件只可能在副本目录创建，结束后清理。不会使用忽略 WAL 的 immutable 方式读取实时库。如发现非空 rollback journal，则报告需要复核并跳过数据库检查，不自动恢复，也不把未恢复状态直接判为损坏。
+检查首尾会比较文件名、大小和修改时间。这不是跨 JSONL / SQLite 的事务快照；运行中目录的异常应在一致副本复查。检查不验证 Entity、关系和向量的语义正确性，也不向原文提供方核验权限或父链。
 
-检测首尾的文件名/大小/mtime 变化；这不是跨 JSONL/SQLite 的事务快照，不能保证识别全部并发变化。对正在运行的库，结果只能作为只读诊断；确认异常时应复查一致的离线副本。未检查 Entity/Relation/向量的语义关联或新增主动 runs.sqlite3 的生命周期语义，也未向 App 验证原文与权限；不根据缺来源补造数据。
+## 后台任务检查
 
-2026-10-24 首次只读检查 VPS `/opt/ember1/data`，8 事件、36 线索、4 冻结来源，未发现所覆盖的结构/关联错误。4 条旧事件无冻结来源、1 个来源轮次缺完整编号，保留原状态；无生成 SQLite。该结果是一次快照，不是持续健康保证。
+原文同步状态随 briefing refresh 的 source_sync 返回。关系压缩、抽点及维护异常可用健康检查定位。
 
-## 验收记录
+提取归组失败按种子切片版本和向量空间退避，退避中的切片不作种子或候选。`extraction.retry_initial_seconds`、`retry_max_seconds` 控制重试间隔，`failure_warning_count` 控制连续失败告警阈值。成功、来源变化或材料已处理后清理对应失败记录。
 
-2026-10-24：新增专项 15/15 通过，覆盖合法追加修订、坏 JSON/截断末行、无效来源编号、pending/null、冻结来源冲突、断链、SQLite WAL、未恢复回滚日志、原库字节与 mtime 不变、变化时 inconclusive、明细截断及 CLI。VPS 隔离目录完整 267/267 unittest 与 136 项独立验收通过；最终版本只读复查现有库的结果与首次一致。
+## 测试与工具导出
 
-## 模型配置与密钥
+```sh
+python -W error::ResourceWarning -m unittest discover -s tests
+python -X utf8 scripts/export_tool_contracts.py
+```
 
-- 唯一模型配置：config/models.json。providers集中base_url/key_env；purposes按embed、rerank、maintenance、recall_embed、direction_split、direction_mount、direction_local命名。
-- key只保存在.env；不同既有凭据通过provider继承显式区分，避免覆盖不同账户。
-- 超时、重试、退避、代理、temperature/max_tokens在统一配置设置，入口统一执行。max_tokens未设置时沿用提供方默认；proxy支持environment、direct和env:变量名。
-- 参数改动后重启对应服务；不需要在各调用点修改。EMBER_MODELS_CONFIG可选择另一份完整配置，不能把明文key写入其中。
-- App Sleep的正式产出模型仍由App控制台管理。Ember maintenance仅是后台第三方判断，不替代App模型。
-- 本次将原本地JSON凭据迁入.env。部署时需同步所需环境变量；源码推送不包含凭据，也不启动维护任务。
-- `python -X utf8 scripts/check_model_config.py`用于不联网的配置检查。
-
-
-## 2026-11-01 改造进度
-
-1. Event 字段和写入工具：对应《Event字段调整》第 1–4 节、《写入工具与归组范围》第 1 节。移除旧内容字段，整数 significance，增加 kind / focus 和 promise 基础字段；成对工具共用来源与调用幂等校验，支持区间或离散切片来源；读取与 briefing 以 core 兜底。后续步骤完成前，原有分类维护和 briefing 组装尚未切换。
-
-2. 原文切片：对应《原文切片调整》第 1–7 节、《整体流程》2–3 节及共享游标约定。新增 provider 增量游标与幂等重放、规则/典型废话过滤、区间新旧绑定、按 kind 与上级 core 的独立相似度门槛；有上级只呈现 Event。停用逐轮摄取和逐轮 GLM 池归类。主题概括替换入口将在第 4 步接入，提取归组队列在第 8 步接入。配置均在 config/lifecycle.json；原文接口适配契约见 API.md。
-
-3. promise：对应《Event字段调整》第 3 节、《Briefing与提取工具》第 3 节及《整体流程》本地午夜约定。加入持久曝光账、处理工具与追加 log、改期、到期 briefing、低分完结退出召回、10 分无 due 默认 pin，以及每日午夜/启动补算过时效。低分完结主题概括在第 4 步接入共用归组。
-
-4. 归组与 Entity：对应《Entity》第 1–4 节、《Event分类维护》第 2–3 节、《Event字段调整》第 3 节主题概括。加入共用归组、不可变日常副本及重聚合、完结约定主题层、Entity summary 更新/防重/合并和旧 ID 映射、项目取代；自动召回改为 Event 三席与独立去重卡片，不再走 Direction。关系时间线由第 5 步继续接入。
-
-5. 关系时间线：对应《Event分类维护》第 4 节。实现写入后的独立压缩缓存、总量上下限选择、按批追加要点、event_id 和断开时间区间溯源、要点下钻、pin 历史恢复原样、briefing 等待及模型失败准确降级。健康检查通过副本报告 5:5 比例和失败/超量；关系边仅延续或回应，不取代。
-
-6. Pin：对应《Pin》第 1–4 节。实现四类限额与清单、focus 居中原文、完整下钻、约定 Event 的最早主条合并、跨会话原文/log 保留和旧 ID 映射，以及随 hook 提交确认的单次超预算提醒。原知识 token 总预算改为分类条数与单条字数保护。
-
-7. Briefing 重组：对应《Briefing与提取工具》第 1 节及《整体流程》第 3 节。实现五档顺序、剩余预算砍低分近期条目、关系与 pin 去重、去除自动 10 分及最高召回旧条、末尾待处理约定数；精确现场 ID 支持多会话离散来源，GET 读取冻结快照。约定处理材料按曝光 generation 的确切消息拉取，并保持原文响应易失。
-
-修正 1：对应《Event字段调整》1 与《Pin》2。focus 输入改为逐字原话，复用 quote_spans 的匹配规则，在来源区间内解析为内部消息 ID；聊天和切片写入均在落库前校验，失败返回字段与重摘提示。
-
-修正 2：对应《原文切片调整》5.1。删除逐 trace 入队及 GLM 归类的 PoolQueue / PoolMaintenanceWorker 和生命周期残留；知识嵌入 worker 归回 knowledge 模块。保留召回诊断 trace，但不把它作为归组任务，第 8 步仅从无上级、有信息量的切片供料。
-
-修正 3：对应《写入工具与归组范围》1.1。冷静期使用绑定 generation 的上下文与 briefing 截断点，原文被截走后持久锁定，所有 kind 相同；约定状态/log 处理不受修订限制。两个写入入口均支持可选 supersedes，预先校验目标，保留旧内容和被取代标注，关系事件不允许取代。
-
-修正 4：对应《Event分类维护》4 的 pin 与“要点只往后加”。移除要点作废/整批回滚逻辑；pin 已抽点历史仅额外呈现原样，原要点文字、来源与区间不变。抽点排除仍在现场的来源并封存冷静期；非要点订正仅重算单件压缩。
-
-修正 5：对应《Briefing 与提取工具》第 1 节，72 小时近期层的 core 档补齐 10 分；测试同时覆盖近期 10 分入场与窗口外 10 分退出。
-
-修正 6：对应《Event 字段调整》第 3 节“钉住的约定例外”。所有入口统一跳过 pinned promise 曝光，旧待处理在读账时清理；主动处理允许空 spans，非空 log 及状态/日期校验不变。
-
-修正 7：对应《给 Codex 的修正》第 7 条，移除生产 EmberService 中旧 EntityRecall / DirectionMatcher 实例及调用；历史协议测试将旧路径放入 tests/legacy_event_fixture.py。direction.py 仍由离线脚本、历史测试及 embedding 帮助函数使用，保留；自动召回使用现行 Event/切片分支。
-
-修正 8：对应《给 Codex 的修正》第 8 条。时间线用独立 SQLite 待办记录关系写入、pin 变化、失败重试期限；启动只恢复扫描一次，空闲 tick 不遍历 Event，不 synchronize。待办版本防止模型执行期间的新写入被清掉，独立数据库避免模型长事务阻塞写入通知。
-
-8. 独立提取：对应《Briefing 与提取工具》第 2 节、《原文切片调整》第 5.1 节。新增无上级有信息量切片的向量+LLM 归组、持久批次与结论确认；可停、重取、按字数分批，超限单组无损分段。开放普通 MCP 认知/规律写入和审阅，附相似知识；source_slice_ids 仍走成对 Event 写入工具。
-
-9. Sleep 清理：对应《Briefing 与提取工具》第 4 节及《整体流程》第 5 节。专属 knowledge HTTP 材料接口统一退役 410，移除生产 Sleep 材料模块与上下文 gate；旧协议回归仅保留为 tests 夹具，做梦及 sediment evidence 接口未改。重写 MEMORY_LIFECYCLE_SPEC.md，统一 README / API / briefing 协议和 22 项普通 MCP 实际回执导出。
-
-修正 8 补充：截断 refresh 产生的压缩/抽点失败也登记持久重试期限，避免后台已空闲时遗漏重试；worker 完成时保守保留并发 refresh 刚登记的未来期限。专项覆盖到点唤醒及并发完成不丢期限。
-
-2026-11-01 本分支最终本地隔离验收：507 项 unittest 通过（ResourceWarning 作为错误）；独立 sidecar 38 项通过；工具 schema / 成功回执导出覆盖全部 22 个普通 MCP 工具，Sleep 专属 0 项；模型配置只读检查 status=ok。Direction 真实库离线验收因 data_real 缺失跳过，不记为通过。测试不代表线上模型、App 原文增量适配或生产部署已验证；本次未修改 Deliz/App、未部署或重启服务。
-
-2026-11-01 文档复查：五份发布 Markdown 均已同步；补清 API / PROTOCOL_DETAILS 中遗留的旧观察/Sleep 原文消费者、旧工具名和“原文客户端待迁移”说明，并明确旧验收记录属于历史阶段。此补丁仅改文档。
-
-第 8–9 步修正 1：按正式产出的 source_slice_ids 自动结账并记录结果 ID，部分使用时保留同组剩余切片；可从持久产出来源恢复队列。finish_memory_extraction_group 收窄为整组/指定切片/超限分段不写，已完成或已撤出组幂等返回 ok。对应《给 Codex 的修正-第 8 到 9 步》第 1 条；本次不处理该文件第 2、3 条。
-
-本条验收：18 项提取专项、517 项全量 unittest、38 项独立 sidecar 验收通过；22 个普通工具的实际 schema / 回执已重新导出。本地隔离测试，未部署。
-
-第 8–9 步修正 2：失败种子按来源版本和向量空间记录退避，退避中的切片不作种子或候选，后续材料继续归组；成功、来源变化或已处理后清理。extraction.retry_initial_seconds / retry_max_seconds / failure_warning_count 配置重试与告警。健康检查在数据库副本读取连续失败状态，输出 extraction_grouping_repeated_failure，不读原文或错误正文。
-
-第 8–9 步修正 3：移除生产 service 的旧前缀渲染器及 direction_focused / direction_reason / summary_fallback 参数、标签和诊断字段；历史渲染放入 tests/legacy_event_fixture.py。嵌入函数移至 ember/recall_embedding.py，主动搜索、Cue 和离线索引直接引用该模块，保留原 recall_embed 用途、凭据和验证行为。生产 service 导入不再加载 ember.direction。
-
-第 2、3 条联合验收：524 项全量 unittest 通过，sidecar 38 项与 Cue 14 项独立检查通过；22 个普通 MCP 工具回执导出成功。旧 test_r4_transcript_quotes.py 独立脚本仍依赖已删除的 key_quotes 字段并运行失败，不计入通过数；本次只将其渲染调用转向历史夹具。未部署或重启服务。
+工具导出默认写入 `设计讨论/codex回执/工具规范审阅.md`。`--output` 可指定文件，覆盖已有文件使用 `--force`。
