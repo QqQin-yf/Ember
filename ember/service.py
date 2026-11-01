@@ -33,6 +33,7 @@ from .source_paths import (generation_messages, read_messages, legacy_messages,
 from .pin_store import PinStore
 from .source_refs import EventSourceStore, event_reference, message_seq
 from .generations import GenerationStore, fingerprint, identity
+from .event_mutation import SupersessionError
 from .runs import RunStore, failure as run_failure
 from .source_completion import SourceCompletions
 from .core_semantic import (CoreVectorStore, EntitySummaryVectorStore,
@@ -526,6 +527,8 @@ class EmberService:
         {status, event_id, summary, raw_ref, route_count, recall_cues
          [, dropped_quotes]}。
         """
+        from .event_mutation import replacement_targets, apply_replacement
+        targets=replacement_targets(self,validated)
         event = self._build_event(session, turn, validated["event"])
 
         # 出处句对定位与拒绝判定必须先于落盘：双盲句对（提供了 quote_spans
@@ -581,6 +584,7 @@ class EmberService:
             "route_count": len(routes),
             "recall_cues": [r["cue"] for r in routes],
         }
+        apply_replacement(self,event,targets)
         from .promises import Promises
         Promises(self).written(event)
         from .source_sync import request_sync
@@ -1395,7 +1399,8 @@ class EmberService:
                     self.turn_ledger.user_msg.pop(key, None)
             session.messages.append({"role": "user", "content": message, "turn": turn,
                 "_source_session_id": sid, "_source_message_id": seq})
-            self._generation_contexts[rid] = {"session": session, "turn": turn}
+            self._generation_contexts[rid] = {"session": session, "turn": turn,"request_context":request_context}
+            self._last_context=self._generation_contexts[rid]
             self._live_turn = {"session": session, "turn": turn, "user_text": message, "recall_id": rid}
             return out
 
@@ -1613,6 +1618,8 @@ class EmberService:
                 from .knowledge_tools import write_event
                 try:
                     return write_event(self,validated,context)
+                except SupersessionError as exc:
+                    return exc.as_result()
                 except QuoteSourceError as exc:
                     return exc.as_result()
                 except (ValueError,KeyError,TypeError) as exc:
@@ -1622,7 +1629,7 @@ class EmberService:
                     arguments, recall_id, tool_call_id)
             return self.sidecar_create_memory_event(arguments)
         if name == REVISE_TOOL_NAME:
-            return self.sidecar_revise_memory_event(arguments)
+            return self.sidecar_revise_memory_event(arguments,context)
         if name == READ_SOURCE_TOOL_NAME:
             return self.sidecar_read_memory_source(arguments.get("event_id") or "")
         if name == SEARCH_TOOL_NAME:
@@ -1659,7 +1666,8 @@ class EmberService:
                                  "_source_session_id": session.session_id,
                                  "_source_message_id": message_seq(user_message_id)})
         self._live_turn = {"session": session, "turn": turn,
-                           "user_text": message}
+                           "user_text": message,"request_context":{"context_start_id":context_start_id,"user_message_id":user_message_id}}
+        self._last_context=self._live_turn
         stats = {k: rec[k] for k in (
             "recalled_count", "entity_recalled", "entity_names",
             "filtered_by_sleep", "filtered_by_window", "resolved_brought",
@@ -1759,6 +1767,8 @@ class EmberService:
                 writer_recall_id=recall_id, writer_tool_call_id=tool_call_id)
         except QuoteSourceError as ex:
             return ex.as_result()
+        except SupersessionError as ex:
+            return ex.as_result()
         except (ValueError, KeyError) as ex:
             return {"status": "failed", "error": str(ex)[:300]}
 
@@ -1792,7 +1802,7 @@ class EmberService:
         return [str(value)]
 
     def sidecar_revise_memory_event(
-            self, arguments: dict[str, Any]) -> dict[str, Any]:
+            self, arguments: dict[str, Any], context=None) -> dict[str, Any]:
         """MCP 工具 revise_memory_event 执行体：冷静期内直改本尊。
 
         冷静期 = 该 event 尚未进入过夜间维护（sleep_progress 无记录）——
@@ -1814,6 +1824,10 @@ class EmberService:
         from .memory_lifecycle import Lifecycle
         resolved=Lifecycle(self.store.root).canonical(resolved)
         event = self.store.get_event(resolved)
+
+        from .event_mutation import visible, COOLDOWN_HINT
+        if not visible(self,event,context):
+            return {'status':'rejected','code':'cooldown_expired','event_id':resolved,'reason':COOLDOWN_HINT,'hint':COOLDOWN_HINT}
 
         # 锁死字段显式拒绝（防模型绕过白名单）
         for locked in REVISE_LOCKED_FIELDS:

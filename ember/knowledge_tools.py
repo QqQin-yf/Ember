@@ -92,6 +92,8 @@ def write_event(service, args, context):
     validated,error=validate_writer_arguments(args)
     if error:
         raise ValueError(str(error))
+    from .event_mutation import replacement_targets, apply_replacement
+    targets=replacement_targets(service,validated)
     sources=store.sources(args.get('source_slice_ids'))
     rows=store.read_sources(sources)
     event=service._build_event(context['session'],context['turn'],validated['event'])
@@ -107,6 +109,7 @@ def write_event(service, args, context):
         service.store.write_route(RecallRoute(route_id=f'rt_{event.event_id}_{index:02d}',event_id=event.event_id,
             matcher='lexical',cue_type=route['cue_type'],cue=route['cue'],status='active',
             evidence_refs=['slice:'+s['slice_id'] for s in sources],provenance_refs=['app-slice-writer']))
+    apply_replacement(service,event,targets)
     from .promises import Promises
     Promises(service).written(event)
     from .source_sync import request_sync

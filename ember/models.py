@@ -61,6 +61,7 @@ class Event:
     change: str = ""
     entity_refs: list[str] = field(default_factory=list)
     merged_into: str = ""
+    superseded_by: str = ""
     # provenance
     provenance_refs: list[str] = field(default_factory=list)
     # origin —— 事件出身："" = 实时写入（对话中模型自主触发）；

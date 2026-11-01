@@ -537,6 +537,15 @@ class ReviseMemoryTests(unittest.TestCase):
         self.evt = _make_event(self.svc, "s1", 1)
         self.svc.store.write_event(self.evt)
         self.svc.store.write_route(type(self).route(self.evt))
+        session=self.svc.get_or_create_session('s1')
+        session.turn_counter=2
+        session.messages=[{'role':'user','content':'原文','turn':1,'_source_session_id':'s1','_source_message_id':'1'},
+                          {'role':'assistant','content':'原回复','turn':1,'_source_session_id':'s1','_source_message_id':'2'},
+                          {'role':'user','content':'订正','turn':2,'_source_session_id':'s1','_source_message_id':'3'}]
+        self.svc.turn_spans.fill(self.evt.event_id,[(1,1)],filled_by='test')
+        self.svc.event_sources.capture(self.evt.event_id,self.evt.version_id,'s1',[(1,1)],session.messages[:2])
+        self.svc._live_turn={'session':session,'turn':2,'request_context':{'context_message_ids':[1,2],'user_message_id':3}}
+
 
     @staticmethod
     def route(evt: Event):
@@ -570,7 +579,7 @@ class ReviseMemoryTests(unittest.TestCase):
         })
         self.assertEqual(r["status"], "failed")
 
-    def test_revise_rejected_after_sleep(self) -> None:
+    def test_sleep_progress_does_not_override_source_based_cooldown(self) -> None:
         p = self.tmp / "data" / "sleep_progress.jsonl"
         p.write_text(json.dumps(
             {"event_id": "EVT-001-aaaaaa", "stage": "judged"}),

@@ -71,6 +71,8 @@ def refresh(service,args):
 
 def _refresh(service,args,sid,mid,ids):
     cfg=lifecycle_config()['briefing']
+    from .event_mutation import remember_boundary
+    remember_boundary(service,sid,mid,ids)
     source_sync=sync_increment(service)
     keep_turn=service.turn_ledger.turn_at_or_after(sid,mid) if mid else 0
     pins=Pins(service)

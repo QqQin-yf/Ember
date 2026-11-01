@@ -321,7 +321,7 @@ X-Heart-Instance: <Ember 实例名>
 
 key_quotes、objects、participants、context、state、outcome、affect、details 均已删除；理解、情况、细节和感受写入 core。原文读取失败时 briefing 只保留 core。旧测试数据不迁移。
 
-revise_memory_event 可直接改 summary / core / significance / 非 promise 的 kind 及 recall_cues，不再受旧 Sleep 定稿限制；来源绑定不可修改。约定状态与改期由后续的约定处理工具承担。
+revise_memory_event 仅在原文完整保留于当前上下文、尚未截断的冷静期内可改 summary / core / significance / 非 promise 的 kind 及 recall_cues；一旦截断就锁住，后来再下钻或重新带入不解锁。来源绑定不可修改。约定状态与改期由后续的约定处理工具承担。
 
 
 ### 原文增量提供方契约（2026-11-01）
@@ -378,3 +378,5 @@ POST /ember/briefing/refresh 收 session_id、keep_from_message_id，可附精�
 近期层使用 total_chars 扣除不可砍部分后的剩余预算，从最低分、最旧条目开始移除；不会硬截 core。关系、pin、知识及到期约定保持各自既定规则；最后的到期约定和待处理数量不砍。快照带 revision / refreshed_at / 分层统计，完整文本原子保存。GET /ember/briefing 只读该快照，不动态拼接新 pin 的知识；无快照为 empty，损坏为 failed / briefing_snapshot_unreadable。对话中不替换已有 briefing。
 
 任何被 briefing 带入的约定（包括 pin）都会记曝光；list_pending_promises 读取曝光时的确切对话消息，已确认回复按同一 generation 补齐，不用 max-reply 推断。来源不可达会明确标注；这些原文结果只作易失工具响应，不落持久工具回执。
+
+修正：write_event / write_promise 可选 supersedes 指向被取代的旧日常、项目、约定；旧内容保留，以 superseded_by 与取代关系退出自动召回。新旧任一端为 relationship 都拒绝此参数；关系只写新的接续。未知目标在任何写入前拒绝。

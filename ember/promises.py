@@ -156,7 +156,7 @@ class Promises:
 
     def overdue(self,now=None):
         now=now or datetime.now(timezone.utc)
-        return [e for e in self.service.store.all_events() if e.kind=='promise' and e.status=='open' and e.due and instant(e.due)<=now]
+        return [e for e in self.service.store.all_events() if e.kind=='promise' and e.status=='open' and e.due and instant(e.due)<=now and Lifecycle(self.service.store.root).eligible(e.event_id)]
 
 
 def tool_specs():

@@ -29,8 +29,10 @@ def build_tools_spec():
             "start_quote":{"type":"string","minLength":1},"end_quote":{"type":"string","minLength":1}}},
         "description":"逐字摘录起尾句，保留完整事件区间；只有事件轮换才拆段。"}
     props={"event":event,"recall_routes":routes,"quote_spans":spans,
+        "supersedes":{"type":"array","minItems":1,"uniqueItems":True,"items":{"type":"string","minLength":1},"description":"可选：这条新经历取代的旧 Event ID；旧条退出自动召回但保留可查。关系事件不接受此参数，也不能取代关系事件。"},
         "source_slice_ids":{"type":"array","minItems":1,"uniqueItems":True,"items":{"type":"string","minLength":1},"description":"从提取材料写入时提供切片 ID；与 quote_spans 二选一。"}}
     schema={"type":"object","additionalProperties":False,"required":["event","recall_routes"],"properties":props,
+        "allOf":[{"if":{"properties":{"event":{"properties":{"kind":{"const":"relationship"}}}}},"then":{"not":{"required":["supersedes"]}}}],
         "oneOf":[{"required":["quote_spans"],"not":{"required":["source_slice_ids"]}},
                  {"required":["source_slice_ids"],"not":{"required":["quote_spans"]}}]}
     def spec(name,description,parameters):
@@ -39,8 +41,8 @@ def build_tools_spec():
     pe=promise['properties']['event']; pe['properties']['kind']={"const":"promise"}
     pe['properties']['due']={"type":["string","null"],"description":"具体 ISO 日期时间；无明确时间则 null。"}
     # Status and log are maintained by Ember, never supplied on initial write.
-    return [spec(TOOL_NAME,"答应了、说好了、约好了的事，用 write_promise。记录日常、关系或项目经历；系统生成 ID 和时间。来源二选一，成功后不要重复写。",schema),
-            spec(PROMISE_TOOL_NAME,"日常、关系、项目，用 write_event。记录单方面承诺或双方约定；kind 固定为 promise，状态初始 open，log 由处理工具追加。",promise),
+    return [spec(TOOL_NAME,"答应了、说好了、约好了的事，用 write_promise。记录日常、关系或项目经历；系统生成 ID 和时间。来源二选一。旧条过了冷静期时写新条并用 supersedes 取代；关系只接续不取代。成功后不要重复写。",schema),
+            spec(PROMISE_TOOL_NAME,"日常、关系、项目，用 write_event。记录单方面承诺或双方约定；kind 固定为 promise，状态初始 open，log 由处理工具追加。取代旧记忆可提供 supersedes；旧条保留可查。",promise),
             spec(READ_SOURCE_TOOL_NAME,"读取记忆对应的原文，核对具体说法或细节。",{"type":"object","additionalProperties":False,"required":["event_id"],"properties":{"event_id":{"type":"string"}}})]
 
 
@@ -121,7 +123,7 @@ REVISE_TOOL_NAME = "revise_memory_event"
 # 一动双盲核对就废，出处一动回指就断。
 REVISE_ALLOWED_FIELDS = ("summary", "core", "significance", "kind")
 REVISE_LOCKED_FIELDS = ("focus", "quote_spans", "turn_refs", "raw_ref", "source_ref", "due", "status", "log")
-REVISE_TOOL_DESCRIPTION = "直接修订记忆的叙述或召回线索；约定状态和改期用约定处理工具。原文和系统绑定不可修改。"
+REVISE_TOOL_DESCRIPTION = "只在这件 Event 的原文仍完整在当前上下文中、尚未截断时订正叙述或触点。过了冷静期不能修改，改写一条新 Event 并用 supersedes 取代旧条；关系事件不取代，写一件新的接在后面。约定状态/改期用处理工具，不受此修订限制。"
 
 
 def build_revise_tool_spec() -> list[dict[str, Any]]:
