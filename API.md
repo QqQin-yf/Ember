@@ -116,7 +116,7 @@ POST /mcp/ 使用 MCP Streamable HTTP，tools/list 返回 22 个工具。所有�
 | read_memory_slices / search_memory_slices | 原文切片下钻及检索 |
 | write_memory_knowledge / review_memory_knowledge | 正式提炼认知/规律、审阅相似知识 |
 | set_knowledge_pin / list_memory_knowledge | 知识 pin 与清单 |
-| get_memory_extraction_batch / finish_memory_extraction_group | 可继续或停止的提取材料批次及结论 |
+| get_memory_extraction_batch / finish_memory_extraction_group | 提取材料批次及不写确认 |
 | list_pending_promises / process_promise | 曝光约定处理及 pinned promise 主动 log |
 | revise_entity_summary / read_entity_events | Entity 摘要订正及成员下钻 |
 | read_relationship_point | 查询要点来源 Event 和时间 |
@@ -288,6 +288,8 @@ POST /ember/briefing/refresh 收 session_id、keep_from_message_id，可附精�
 
 get_memory_extraction_batch() 不调用归组模型，只读取后台排好的最早材料：description、slices、similar_knowledge、group_id、part_id。批次材料数组按 JSON 字符数受 extraction.batch_chars 约束；整组放不下留到下一批，仅单组独自超限才切为 material_fragment，按 offset 连续拼接，total_chars 是完整材料长度。remaining_groups / remaining_chars 表示未包含在本批的剩余组数和字数；grouping_errors 表示归组错误数。
 
-finish_memory_extraction_group(group_id,part_id,conclusion,result_ids?) 接受 written / merged / skipped。写了或并进旧的须给已存在的 Event/knowledge ID；不写可省 result_ids。全部分段给结论才完成组。未确认分段下次重现，重复相同结论幂等，冲突结论拒绝。原文版本改变会拒绝旧材料；切片后来被 Event 覆盖则退出提取候选。
+write_event、write_promise、write_memory_knowledge，以及 review_memory_knowledge 的 rewrite / merge 带 source_slice_ids 时，成功写入后自动将这些来源切片记为已处理并记录结果 ID。一组只使用部分切片时，其余切片仍留在原组，下次继续返回；全部处理后组完成。
+
+finish_memory_extraction_group(group_id,source_slice_ids?,part_id?) 只表示不写。只传 group_id 跳过整组，source_slice_ids 指定组内几段切片，part_id 跳过已交付的超限分段；后两者不能同时提供。未处理材料继续返回。已撤出或已全部处理的组返回 ok，不存在的组报错。来源版本改变时，旧写入不会结掉新版本切片。
 
 第三方只整理没有上级、有信息量且向量有效的切片，不从每轮召回 trace 建池，不代写正式记忆。后台按 extraction.worker_seconds 扫描，group_size / group_threshold / knowledge_threshold / similar_limit 也在 config/lifecycle.json。模型 purpose 为 slice_groups。提取原文回执易失，持久调用账不复制原文。

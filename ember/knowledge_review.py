@@ -111,6 +111,13 @@ def review_knowledge(service,args,context):
                 db.execute('INSERT OR REPLACE INTO aliases VALUES (?,?)',(old,mid))
             life.mark(old,'superseded','app_knowledge_merge',[mid])
             store.pin(old,False)
+    from .extraction import Extraction
+    extraction=Extraction(service)
+    for update in updates:
+        if update['action'] in ('rewrite','merge') and update.get('source_slice_ids'):
+            selected=set(update['source_slice_ids'])
+            extraction.record_sources([s for s in item['sources'] if s['slice_id'] in selected],
+                                      update['memory_id'],update['action'])
     return {'status':'ok','items':results,'embedding_status':'pending'}
 
 

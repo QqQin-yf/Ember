@@ -100,3 +100,7 @@ python -B -X utf8 scripts/check_memory_health.py --data-dir 'D:\your-heart\data\
 2026-11-01 本分支最终本地隔离验收：507 项 unittest 通过（ResourceWarning 作为错误）；独立 sidecar 38 项通过；工具 schema / 成功回执导出覆盖全部 22 个普通 MCP 工具，Sleep 专属 0 项；模型配置只读检查 status=ok。Direction 真实库离线验收因 data_real 缺失跳过，不记为通过。测试不代表线上模型、App 原文增量适配或生产部署已验证；本次未修改 Deliz/App、未部署或重启服务。
 
 2026-11-01 文档复查：五份发布 Markdown 均已同步；补清 API / PROTOCOL_DETAILS 中遗留的旧观察/Sleep 原文消费者、旧工具名和“原文客户端待迁移”说明，并明确旧验收记录属于历史阶段。此补丁仅改文档。
+
+第 8–9 步修正 1：按正式产出的 source_slice_ids 自动结账并记录结果 ID，部分使用时保留同组剩余切片；可从持久产出来源恢复队列。finish_memory_extraction_group 收窄为整组/指定切片/超限分段不写，已完成或已撤出组幂等返回 ok。对应《给 Codex 的修正-第 8 到 9 步》第 1 条；本次不处理该文件第 2、3 条。
+
+本条验收：18 项提取专项、517 项全量 unittest、38 项独立 sidecar 验收通过；22 个普通工具的实际 schema / 回执已重新导出。本地隔离测试，未部署。

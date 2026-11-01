@@ -30,7 +30,7 @@ def build_tools_spec():
         "description":"逐字摘录起尾句，保留完整事件区间；只有事件轮换才拆段。"}
     props={"event":event,"recall_routes":routes,"quote_spans":spans,
         "supersedes":{"type":"array","minItems":1,"uniqueItems":True,"items":{"type":"string","minLength":1},"description":"可选：这条新经历取代的旧 Event ID；旧条退出自动召回但保留可查。关系事件不接受此参数，也不能取代关系事件。"},
-        "source_slice_ids":{"type":"array","minItems":1,"uniqueItems":True,"items":{"type":"string","minLength":1},"description":"从提取材料写入时提供切片 ID；与 quote_spans 二选一。"}}
+        "source_slice_ids":{"type":"array","minItems":1,"uniqueItems":True,"items":{"type":"string","minLength":1},"description":"从提取材料写入时提供切片 ID；与 quote_spans 二选一。写入成功后这些来源切片在提取队列里自动结掉，无需再报 written。"}}
     schema={"type":"object","additionalProperties":False,"required":["event","recall_routes"],"properties":props,
         "allOf":[{"if":{"properties":{"event":{"properties":{"kind":{"const":"relationship"}}}}},"then":{"not":{"required":["supersedes"]}}}],
         "oneOf":[{"required":["quote_spans"],"not":{"required":["source_slice_ids"]}},

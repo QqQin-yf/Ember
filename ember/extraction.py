@@ -33,15 +33,62 @@ class Extraction:
         try:
             conn.executescript('''CREATE TABLE IF NOT EXISTS groups(
                 id TEXT PRIMARY KEY,instance TEXT,sources TEXT,description TEXT,created TEXT,
-                state TEXT DEFAULT 'pending',payload TEXT);
+                state TEXT DEFAULT 'pending',payload TEXT,material_hash TEXT);
                 CREATE TABLE IF NOT EXISTS parts(
                 id TEXT PRIMARY KEY,group_id TEXT,ordinal INTEGER,payload TEXT,
                 conclusion TEXT,result_ids TEXT,delivered INTEGER DEFAULT 0);
-                CREATE TABLE IF NOT EXISTS attempts(id TEXT PRIMARY KEY,error TEXT);''')
+                CREATE TABLE IF NOT EXISTS attempts(id TEXT PRIMARY KEY,error TEXT);
+                CREATE TABLE IF NOT EXISTS source_results(
+                instance TEXT,slice_id TEXT,content_hash TEXT,result_id TEXT,action TEXT,
+                PRIMARY KEY(instance,slice_id,content_hash,result_id));''')
+            if 'material_hash' not in {r[1] for r in conn.execute('PRAGMA table_info(groups)')}:
+                conn.execute('ALTER TABLE groups ADD COLUMN material_hash TEXT')
             with conn:
                 yield conn
         finally:
             conn.close()
+
+    def record_sources(self,sources,result_id='',action='skipped'):
+        """A source version is consumed by its durable authoring result, not an ack."""
+        with self.db() as conn:
+            conn.executemany('INSERT OR IGNORE INTO source_results VALUES (?,?,?,?,?)',
+                [(self.instance,s['slice_id'],s['content_hash'],result_id,action) for s in sources])
+            done=self.completed_sources(conn)
+            for row in conn.execute('SELECT * FROM groups WHERE instance=?',(self.instance,)).fetchall():
+                refs=json.loads(row['sources'])
+                if all((s['slice_id'],s['content_hash']) in done for s in refs):
+                    conn.execute("UPDATE groups SET state='completed' WHERE id=?",(row['id'],))
+
+    def completed_sources(self,conn):
+        return {(r[0],r[1]) for r in conn.execute(
+            'SELECT slice_id,content_hash FROM source_results WHERE instance=?',(self.instance,))}
+
+    def recover_outputs(self):
+        # Recover a crash or discover() racing between the durable write and queue update.
+        for row in self.knowledge.all():
+            self.record_sources(row['sources'],row['memory_id'],'written')
+        if self.knowledge.path.exists():
+            with self.knowledge.db() as conn:
+                rows=conn.execute('SELECT memory_id,sources_json FROM slice_memory_sources WHERE instance=?',
+                                  (self.instance,)).fetchall()
+            for row in rows:
+                if row['memory_id'] in self.service.store._events:
+                    self.record_sources(json.loads(row['sources_json']),row['memory_id'],'written')
+
+    def reconcile(self,current):
+        """Remove only consumed/unavailable slices, retaining the rest in their group."""
+        result=[]
+        with self.db() as conn:
+            done=self.completed_sources(conn)
+            rows=conn.execute('SELECT * FROM groups WHERE instance=? ORDER BY created,rowid',(self.instance,)).fetchall()
+            for row in rows:
+                unprocessed=[s for s in json.loads(row['sources']) if (s['slice_id'],s['content_hash']) not in done]
+                remaining=[s for s in unprocessed if s['slice_id'] in current and current[s['slice_id']]['content_hash']==s['content_hash']]
+                state='completed' if not unprocessed else 'pending' if remaining else 'withdrawn'
+                conn.execute('UPDATE groups SET state=? WHERE id=?',(state,row['id']))
+                if remaining:
+                    result.append(dict(row,state=state,remaining_sources=remaining))
+        return result
 
     def candidates(self,config):
         sync_from_files(self.root,self.instance)
@@ -52,28 +99,23 @@ class Extraction:
         with slices._db() as conn:
             ids=[r[0] for r in conn.execute('SELECT slice_id FROM turn_slices WHERE instance=? ORDER BY saved_at,slice_id',(self.instance,))]
         eligible=Lifecycle(self.root,self.instance).eligibility_checker()
+        with self.db() as conn:
+            done=self.completed_sources(conn)
         result=[]
         for sid in ids:
             source=slices.get(sid)
             vector=slices.embedding(sid,config.space)
-            if sid not in owners and informative(source) and eligible(sid) and vector:
+            if sid not in owners and (sid,source['content_hash']) not in done and informative(source) and eligible(sid) and vector:
                 result.append(dict(source,vector=vector['vector']))
         return result
 
     def discover(self,config=None):
         """Vector-near candidates go to a grouping model, never a recall trace."""
         config=config or SliceEmbeddingConfig.load()
+        self.recover_outputs()
         candidates=self.candidates(config);current={s['slice_id']:s for s in candidates}
-        with self.db() as conn:
-            rows=conn.execute('SELECT * FROM groups WHERE instance=?',(self.instance,)).fetchall()
-            occupied=set()
-            for row in rows:
-                sources=json.loads(row['sources'])
-                valid=all(s['slice_id'] in current and current[s['slice_id']]['content_hash']==s['content_hash'] for s in sources)
-                if not valid and row['state']=='pending':
-                    conn.execute("UPDATE groups SET state='withdrawn' WHERE id=?",(row['id'],))
-                elif valid and row['state']!='withdrawn':
-                    occupied.update(s['slice_id'] for s in sources)
+        rows=self.reconcile(current)
+        occupied={s['slice_id'] for row in rows for s in row['remaining_sources']}
         pending=[s for s in candidates if s['slice_id'] not in occupied]
         if not pending:
             return False
@@ -127,27 +169,33 @@ class Extraction:
             row=conn.execute('SELECT * FROM groups WHERE id=? AND instance=?',(gid,self.instance)).fetchone()
         if row is None or row['state']=='withdrawn':
             raise ValueError('extraction_group_missing_or_withdrawn')
-        sources=json.loads(row['sources']);self.knowledge.read_sources(sources)
+        sources=json.loads(row['sources'])
+        if row['payload']:
+            ids={s['slice_id'] for s in json.loads(row['payload'])['slices']}
+            sources=[s for s in sources if s['slice_id'] in ids]
+        self.knowledge.read_sources(sources)
         return dict(row,sources=sources)
 
     def materialize(self,row,config,limit):
-        gid=row['id']
+        gid=row['id'];sources=row['remaining_sources'];digest=fingerprint(sources)
         with self.db() as conn:
+            saved=conn.execute('SELECT material_hash FROM groups WHERE id=?',(gid,)).fetchone()
             exists=conn.execute('SELECT 1 FROM parts WHERE group_id=?',(gid,)).fetchone()
-        if exists:
+        if exists and saved['material_hash']==digest:
             return
-        sources=json.loads(row['sources']);originals=self.knowledge.read_sources(sources)
+        originals=self.knowledge.read_sources(sources)
         payload={'group_id':gid,'description':row['description'],
                  'slices':[{'slice_id':s['slice_id'],'messages':s['messages']} for s in originals],
                  'similar_knowledge':self.similar(sources,config)}
-        pid=gid+'-1';whole=dict(payload,part_id=pid)
+        prefix=gid+'-'+digest[:8]
+        pid=prefix+'-1';whole=dict(payload,part_id=pid)
         parts=[]
         if len(encoded(whole))<=limit:
             parts=[whole]
         else:
             text=encoded(payload);offset=0
             while offset<len(text):
-                part={'group_id':gid,'part_id':gid+'-'+str(len(parts)+1),'offset':offset,'total_chars':len(text),'material_fragment':''}
+                part={'group_id':gid,'part_id':prefix+'-'+str(len(parts)+1),'offset':offset,'total_chars':len(text),'material_fragment':''}
                 # Binary search counts JSON escaping and metadata against the budget.
                 lo,hi=0,len(text)-offset
                 while lo<hi:
@@ -158,24 +206,19 @@ class Extraction:
                     raise ValueError('extraction_batch_chars_too_small')
                 part['material_fragment']=text[offset:offset+lo];parts.append(part);offset+=lo
         with self.db() as conn:
+            conn.execute('DELETE FROM parts WHERE group_id=?',(gid,))
             for i,part in enumerate(parts):
                 conn.execute('INSERT OR IGNORE INTO parts(id,group_id,ordinal,payload) VALUES (?,?,?,?)',
                              (part['part_id'],gid,i,encoded(part)))
-            conn.execute('UPDATE groups SET payload=? WHERE id=?',(encoded(payload),gid))
+            conn.execute('UPDATE groups SET payload=?,material_hash=? WHERE id=?',(encoded(payload),digest,gid))
 
     def batch(self):
         config=SliceEmbeddingConfig.load();limit=lifecycle_config()['extraction']['batch_chars']
-        # Revalidate ownership without asking the grouping model during a tool call.
+        self.recover_outputs()
         current={s['slice_id']:s for s in self.candidates(config)}
-        with self.db() as conn:
-            rows=conn.execute("SELECT * FROM groups WHERE instance=? AND state='pending' ORDER BY created,rowid",(self.instance,)).fetchall()
-        valid=[]
-        for row in rows:
-            sources=json.loads(row['sources'])
-            if not all(s['slice_id'] in current and current[s['slice_id']]['content_hash']==s['content_hash'] for s in sources):
-                with self.db() as conn:conn.execute("UPDATE groups SET state='withdrawn' WHERE id=?",(row['id'],))
-                continue
-            self.materialize(row,config,limit-2);valid.append(row)
+        valid=self.reconcile(current)
+        for row in valid:
+            self.materialize(row,config,limit-2)
         units=[]
         with self.db() as conn:
             for row in valid:
@@ -195,38 +238,61 @@ class Extraction:
         return {'status':'ok','groups':chosen,'material_chars':len(encoded(chosen)),
                 'remaining_groups':len({u['group_id'] for u in remaining}),
                 'remaining_chars':sum(len(u['payload']) for u in remaining),'grouping_errors':errors,
-                'instruction':'每组或超限分段处理后调用 finish_memory_extraction_group 给出 written / merged / skipped；未确认的下次仍返回。'}
+                'instruction':'写进 Event、约定、认知/规律或改写/合并知识时，来源切片会自动结掉；只有决定不写时调用 finish_memory_extraction_group，可指定 source_slice_ids 或超限 part_id。剩余切片下次继续返回。'}
 
     def finish(self,args):
-        if args.get('conclusion') not in ('written','merged','skipped'):
-            raise ValueError('extraction_conclusion_required')
-        row=self.live_group(args['group_id'])
-        ids=args.get('result_ids',[])
-        if args['conclusion']!='skipped' and not ids:
-            raise ValueError('extraction_result_ids_required')
-        known={r['memory_id'] for r in self.knowledge.all()}|set(self.service.store._events)
-        if not isinstance(ids,list) or any(mid not in known for mid in ids):
-            raise ValueError('extraction_result_missing')
+        if set(args)-{'group_id','source_slice_ids','part_id'}:
+            raise ValueError('finish_only_skips_sources')
+        if args.get('source_slice_ids') is not None and args.get('part_id') is not None:
+            raise ValueError('choose_source_slice_ids_or_part_id')
+        gid=args['group_id']
         with self.db() as conn:
-            part=conn.execute('SELECT * FROM parts WHERE id=? AND group_id=?',(args['part_id'],row['id'])).fetchone()
-            if part is None or not part['delivered']:
-                raise ValueError('extraction_part_not_delivered')
-            if part['conclusion'] and (part['conclusion']!=args['conclusion'] or json.loads(part['result_ids'])!=ids):
-                raise ValueError('extraction_conclusion_conflict')
-            conn.execute('UPDATE parts SET conclusion=?,result_ids=? WHERE id=?',(args['conclusion'],encoded(ids),part['id']))
-            pending=conn.execute('SELECT 1 FROM parts WHERE group_id=? AND conclusion IS NULL',(row['id'],)).fetchone()
-            if not pending:conn.execute("UPDATE groups SET state='completed' WHERE id=?",(row['id'],))
-        return {'status':'ok','group_id':row['id'],'part_id':part['id'],'state':'pending' if pending else 'completed','conclusion':args['conclusion']}
+            row=conn.execute('SELECT * FROM groups WHERE id=? AND instance=?',(gid,self.instance)).fetchone()
+        if row is None:
+            raise ValueError('extraction_group_missing')
+        if row['state']!='pending':
+            return {'status':'ok','group_id':gid,'state':row['state']}
+        sources=json.loads(row['sources'])
+        ids=args.get('source_slice_ids')
+        if ids is not None:
+            if (not isinstance(ids,list) or not ids or len(ids)!=len(set(ids)) or
+                    not set(ids)<={s['slice_id'] for s in sources}):
+                raise ValueError('extraction_sources_outside_group')
+            sources=[s for s in sources if s['slice_id'] in ids]
+        elif row['payload']:
+            material_ids={s['slice_id'] for s in json.loads(row['payload'])['slices']}
+            sources=[s for s in sources if s['slice_id'] in material_ids]
+        with self.db() as conn:
+            done=self.completed_sources(conn)
+        sources=[s for s in sources if (s['slice_id'],s['content_hash']) not in done]
+        if args.get('part_id'):
+            with self.db() as conn:
+                part=conn.execute('SELECT * FROM parts WHERE id=? AND group_id=?',(args['part_id'],gid)).fetchone()
+                if part is None or not part['delivered']:
+                    raise ValueError('extraction_part_not_delivered')
+                conn.execute("UPDATE parts SET conclusion='skipped' WHERE id=?",(part['id'],))
+                pending=conn.execute('SELECT 1 FROM parts WHERE group_id=? AND conclusion IS NULL',(gid,)).fetchone()
+            if pending:
+                return {'status':'ok','group_id':gid,'part_id':part['id'],'state':'pending'}
+            material=json.loads(row['payload'])
+            used={s['slice_id'] for s in material['slices']}
+            sources=[s for s in sources if s['slice_id'] in used]
+        self.knowledge.read_sources(sources)
+        self.record_sources(sources)
+        with self.db() as conn:
+            state=conn.execute('SELECT state FROM groups WHERE id=?',(gid,)).fetchone()[0]
+        return {'status':'ok','group_id':gid,'state':state}
 
 
 def tool_specs():
     return [{'type':'function','function':{'name':'get_memory_extraction_batch',
-        'description':'分批读取最早的提取材料：归组说明、原文切片、相似认知/规律。自行决定新写、改写、合并或不写，可随时停；未给结论下次仍会出现。超限单组分段，material_fragment 按 offset 拼接；完整来源可按切片下钻。',
+        'description':'分批读取最早的提取材料：归组说明、原文切片、相似认知/规律。写进记忆的来源切片自动结掉，只有决定不写才调用 finish_memory_extraction_group；剩余切片会继续返回，可随时停。超限单组分段，material_fragment 按 offset 拼接；完整来源可按切片下钻。',
         'parameters':{'type':'object','properties':{},'additionalProperties':False}}},
-        {'type':'function','function':{'name':'finish_memory_extraction_group','description':'为已交付的组/分段记录写了、并进旧的或不写的结论；written/merged 须附已存在的结果 ID。全部分段确认才完成一组。',
-        'parameters':{'type':'object','additionalProperties':False,'required':['group_id','part_id','conclusion'],
-            'properties':{'group_id':{'type':'string'},'part_id':{'type':'string'},'conclusion':{'enum':['written','merged','skipped']},
-                          'result_ids':{'type':'array','uniqueItems':True,'items':{'type':'string'}}}}}}]
+        {'type':'function','function':{'name':'finish_memory_extraction_group','description':'只用于决定不写的提取材料。group_id 单独使用表示整组不写；可用 source_slice_ids 指定几段切片，或 part_id 跳过已交付的超限分段。写入、改写或合并记忆会自动结账，无需再调用。已完成或已撤出的组返回 ok。',
+        'parameters':{'type':'object','additionalProperties':False,'required':['group_id'],
+            'properties':{'group_id':{'type':'string'},'part_id':{'type':'string'},
+                          'source_slice_ids':{'type':'array','minItems':1,'maxItems':100,'uniqueItems':True,'items':{'type':'string'}}},
+            'not':{'required':['part_id','source_slice_ids']}}}}]
 
 
 TOOL_NAMES={'get_memory_extraction_batch','finish_memory_extraction_group'}

@@ -14,7 +14,7 @@ def tool_specs():
              {'slice_ids':strings,'group_id':{'type':'string'},'memory_id':{'type':'string'}}),
         spec('search_memory_slices','主动用自然语言检索原文切片，返回 ID、匹配分数及原文，供进一步下钻。',
              {'query':{'type':'string','minLength':1},'k':{'type':'integer','minimum':1,'maximum':20}},['query']),
-        spec('write_memory_knowledge','由你从原文提炼认知或规律。必须提供来源切片和触点。默认尝试 pin 至 briefing；该类条数满时先 unpin，再 pin；后台不替你提炼。',
+        spec('write_memory_knowledge','由你从原文提炼认知或规律。必须提供来源切片和触点。默认尝试 pin 至 briefing；该类条数满时先 unpin，再 pin；后台不替你提炼。写入成功后来源切片自动在提取队列结掉，无需再报 written。',
              {'kind':{'enum':['cognition','pattern']},'content':{'type':'string','minLength':1},
               'recall_cues':strings,'source_slice_ids':strings,
               'confidence':{'type':'integer','minimum':0,'maximum':10},
@@ -23,12 +23,12 @@ def tool_specs():
              {'memory_id':{'type':'string'},'pinned':{'type':'boolean'}},['memory_id','pinned']),
         spec('list_memory_knowledge','读取现有认知/规律与 pin 预算，供平时自主取舍。',{})]
     specs += [
-        spec('review_memory_knowledge','审阅相似认知/规律：维持、改写补写或合并。每条必须列为keep/rewrite/merge目标或merge_ids成员，不能遗漏；每条最终保留项必须评分。只有近期经历明确打破或过时才能<=5，须提供逐字来源证据。',
+        spec('review_memory_knowledge','审阅相似认知/规律：维持、改写补写或合并。每条必须列为keep/rewrite/merge目标或merge_ids成员，不能遗漏；每条最终保留项必须评分。只有近期经历明确打破或过时才能<=5，须提供逐字来源证据。改写/合并带 source_slice_ids 时，这些切片自动结掉；keep 不结新材料。',
             {'group_id':{'type':'string'},'items':{'type':'array','minItems':1,'items':{'type':'object',
               'additionalProperties':False,'required':['memory_id','action','confidence'],'properties':{
                 'memory_id':{'type':'string'},'action':{'enum':['keep','rewrite','merge']},
                 'content':{'type':'string'},'recall_cues':strings,'merge_ids':strings,
-                'source_slice_ids':strings,
+                'source_slice_ids':dict(strings,description='本次改写或合并实际使用的提取切片；成功后按这些 ID 自动结账，其余切片保留。'),
                 'confidence':{'type':'integer','minimum':0,'maximum':10},
                 'confidence_basis':{'enum':['recently_disproved','outdated']},'confidence_evidence':{'type':'string'}}}}},['group_id','items'])]
     return specs
@@ -98,6 +98,8 @@ def write_event(service, args, context):
     Promises(service).written(event)
     from .source_sync import request_sync
     request_sync(service)
+    from .extraction import Extraction
+    Extraction(service).record_sources(sources,event.event_id,'written')
     return {'status':'created','event_id':event.event_id,'summary':event.summary,
             'source_slice_ids':args['source_slice_ids']}
 
@@ -118,6 +120,9 @@ def dispatch(service,name,args,context=None):
             result['confidence']=set_confidence(store,result['memory_id'],args)
             if result['confidence']<=5:
                 result['pin']={'status':'ok','pinned':False,'reason':'low_confidence_no_recall'}
+            from .extraction import Extraction
+            sources=next(r['sources'] for r in store.all() if r['memory_id']==result['memory_id'])
+            Extraction(service).record_sources(sources,result['memory_id'],'written')
             return result
         if name=='review_memory_knowledge':
             from .knowledge_review import review_knowledge

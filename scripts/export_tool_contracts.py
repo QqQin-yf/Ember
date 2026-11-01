@@ -142,7 +142,7 @@ def isolated_receipts():
             results['review_memory_knowledge']=dispatch(service,'review_memory_knowledge',{'group_id':part['group_id'],
                 'items':[{'memory_id':memory,'action':'keep','confidence':8}]})
             results['finish_memory_extraction_group']=extraction.finish({'group_id':part['group_id'],
-                'part_id':part['part_id'],'conclusion':'merged','result_ids':[memory]})
+                'source_slice_ids':[orphan['slice_id']]})
             results['write_promise']=service.sidecar_call_tool('write_promise',{'event':dict(event,kind='promise',due=None,focus=sources[0]['messages'][0]['content']),
                 'recall_routes':args['recall_routes'],'source_slice_ids':ids})
             promise_id=results['write_promise']['event_id']

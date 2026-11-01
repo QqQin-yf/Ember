@@ -105,11 +105,13 @@ briefing refresh 保存完整冻结快照，GET 只读快照，普通轮次不�
 
 ## 7. 随时调用的提取工具
 
-后台只对无上级、有信息量且 ready 同空间向量的切片，按向量候选交 slice_groups 模型归组；模型只给说明，不正式提炼认知/Event。失败保留源候选重试。切片新被覆盖或版本改变，旧提取材料撤回。
+后台只对无上级、有信息量且 ready 同空间向量的切片，按向量候选交 slice_groups 模型归组；模型只给说明，不正式提炼认知/Event。失败保留源候选重试。来源版本改变时撤回旧提取材料；切片被正式写入使用后自动结账，其他新增上级覆盖的切片退出候选。
 
 get_memory_extraction_batch 返回最早的组、组内原文、相似已有认知/规律。整组能独自放下时不拆；本批放不下留下一批。只有单组独自超限才按 material_fragment 分段，offset 连续，拼接后是完整 JSON 材料，无文字损失。批次材料数组按 JSON 字符数受 batch_chars 限制，返回未交付的 remaining_groups / remaining_chars；模型自主决定继续或停。
 
-finish_memory_extraction_group 逐组/分段给 written / merged / skipped 结论，前两种附真实结果 ID，全部分段确认才完成组。没确认的下次还会出现，重启不丢；相同确认可重放，冲突确认拒绝。write_memory_knowledge / review_memory_knowledge / set_knowledge_pin / list_memory_knowledge 都是普通 MCP 工具；Event 从切片写入仍走 write_event / write_promise。
+write_event / write_promise / write_memory_knowledge，以及认知/规律 rewrite / merge 带来源切片 ID 时，成功后系统自动按切片版本结账，记录结果 ID。只用一组中的部分切片时，其余切片保留在原组并继续供料；全部结掉后完成组。正式产出先落库而队列更新中断时，可从持久来源关联恢复结账。
+
+finish_memory_extraction_group 只用于决定不写的材料：整组、指定 source_slice_ids，或已交付的超限 part_id。已完成或已撤出的组返回 ok，不存在的组报错。未写入且未跳过的材料重启后仍在。普通 MCP 工具不需要再报 written / merged。
 
 审阅使用已交付提取组的相似知识清单，维持、改写、合并须覆盖全部清单。最终保留项均评分，低置信度只能凭近期打破或过时的逐字来源证据；来源版本及身份校验保留，低置信度退出自动召回和 pin。正式认知/规律由当前模型写，第三方归组与客观 Entity/主题摘要不替代正式作者。
 
