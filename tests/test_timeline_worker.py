@@ -76,3 +76,24 @@ class TimelineWorkerTests(unittest.TestCase):
         with patch('ember.timeline.prose',return_value='recovered') as model:
             self.assertTrue(self.worker.process_one('one'))
         self.assertEqual(model.call_count,1)
+
+    def test_refresh_failure_schedules_background_retry_after_worker_is_idle(self):
+        self.event()
+        with patch('ember.timeline.prose',return_value='short'):
+            self.worker.process_one('one')
+        from ember.timeline_work import ready
+        self.assertIsNone(ready(self.tmp.name,now=1000))
+        # A later cut can make an old compressed batch eligible for points.
+        with patch.object(Timeline,'next_retry',return_value=2000):
+            Timeline(self.service).render()
+        self.assertIsNone(ready(self.tmp.name,now=1999))
+        self.assertIsNotNone(ready(self.tmp.name,now=2000))
+
+    def test_worker_completion_preserves_a_retry_scheduled_by_concurrent_refresh(self):
+        from ember.timeline_work import defer, finish
+        request(self.tmp.name)
+        revision=ready(self.tmp.name)
+        defer(self.tmp.name,2000)
+        finish(self.tmp.name,revision,started_at=1000)
+        self.assertIsNone(ready(self.tmp.name,now=1999))
+        self.assertIsNotNone(ready(self.tmp.name,now=2000))

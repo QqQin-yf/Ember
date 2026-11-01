@@ -28,7 +28,20 @@ def ready(root,now=None):
     return revision if revision>done or (retry is not None and retry<=(time.time() if now is None else now)) else None
 
 
-def finish(root,revision,retry_at=None):
+def defer(root,retry_at):
+    if retry_at is None:
+        return
     with db(root) as conn:
+        conn.execute('UPDATE work SET retry_at=CASE WHEN retry_at IS NULL THEN ? ELSE min(retry_at,?) END WHERE id=1',
+                     (retry_at,retry_at))
+
+
+def finish(root,revision,retry_at=None,started_at=None):
+    with db(root) as conn:
+        existing=conn.execute('SELECT retry_at FROM work WHERE id=1').fetchone()[0]
+        # A refresh may have scheduled a retry while this worker was running.
+        # Keep future wakeups conservatively; an obsolete one costs one idle pass.
+        if existing is not None and existing>(time.time() if started_at is None else started_at):
+            retry_at=existing if retry_at is None else min(existing,retry_at)
         # A write arriving during model work remains dirty.
         conn.execute('UPDATE work SET done=max(done,?),retry_at=? WHERE id=1',(revision,retry_at))

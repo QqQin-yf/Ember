@@ -210,6 +210,8 @@ class Timeline:
     def render(self,onstage=lambda event:False):
         with self.lock:
             self.prepare(refresh=True)
+            from .timeline_work import defer
+            defer(self.service.store.root,self.next_retry())
             with self.db() as conn:
                 events={e.event_id:e for e in self.events()}
                 rows={r['event_id']:dict(r) for r in conn.execute('SELECT * FROM timeline')}
@@ -315,6 +317,7 @@ class TimelineWorker:
         if revision is None:
             return False
         timeline=Timeline(service)
+        started_at=time.time()
         try:
             timeline.prepare()
             while timeline.link():
@@ -322,7 +325,7 @@ class TimelineWorker:
             retry=timeline.next_retry()
         except Exception:
             retry=time.time()+lifecycle_config()['slice']['retry_seconds']
-        finish(root,revision,retry)
+        finish(root,revision,retry,started_at=started_at)
         return True
 
     async def run(self):

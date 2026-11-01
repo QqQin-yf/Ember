@@ -94,3 +94,5 @@ python -B -X utf8 scripts/check_memory_health.py --data-dir 'D:\your-heart\data\
 8. 独立提取：对应《Briefing 与提取工具》第 2 节、《原文切片调整》第 5.1 节。新增无上级有信息量切片的向量+LLM 归组、持久批次与结论确认；可停、重取、按字数分批，超限单组无损分段。开放普通 MCP 认知/规律写入和审阅，附相似知识；source_slice_ids 仍走成对 Event 写入工具。
 
 9. Sleep 清理：对应《Briefing 与提取工具》第 4 节及《整体流程》第 5 节。专属 knowledge HTTP 材料接口统一退役 410，移除生产 Sleep 材料模块与上下文 gate；旧协议回归仅保留为 tests 夹具，做梦及 sediment evidence 接口未改。重写 MEMORY_LIFECYCLE_SPEC.md，统一 README / API / briefing 协议和 22 项普通 MCP 实际回执导出。
+
+修正 8 补充：截断 refresh 产生的压缩/抽点失败也登记持久重试期限，避免后台已空闲时遗漏重试；worker 完成时保守保留并发 refresh 刚登记的未来期限。专项覆盖到点唤醒及并发完成不丢期限。
