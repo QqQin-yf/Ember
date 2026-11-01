@@ -55,7 +55,7 @@ class Promises:
     def enter(self,event_id,route,span,at=None):
         event_id=Lifecycle(self.service.store.root).canonical(event_id)
         event=self.service.store.get_event(event_id)
-        if event.kind!='promise':
+        if event.kind!='promise' or self.service.pin_store.is_pinned(event_id):
             return
         at=at or datetime.now(timezone.utc).isoformat()
         key=fingerprint([event_id,route,span])
@@ -69,6 +69,11 @@ class Promises:
         result={}
         for row in rows:
             event=self.service.store.get_event(Lifecycle(self.service.store.root).canonical(row['event_id']))
+            # Pinned promises carry no pending work, including older exposures.
+            if self.service.pin_store.is_pinned(event.event_id):
+                with self.db() as conn:
+                    conn.execute('UPDATE exposures SET processed=1 WHERE id=?',(row['id'],))
+                continue
             # Recover a crash between durable Event log and exposure receipt.
             if any(row['id'] in entry.get('exposure_ids',[]) for entry in event.log):
                 with self.db() as conn:
@@ -84,7 +89,8 @@ class Promises:
             event=self.service.store.get_event(Lifecycle(self.service.store.root).canonical(args['event_id']))
             pending=next((r for r in self.pending() if r['event']['event_id']==event.event_id),None)
             text=args.get('log')
-            if not pending or not isinstance(text,str) or not text.strip():
+            if (event.kind!='promise' or (not pending and not self.service.pin_store.is_pinned(event.event_id))
+                    or not isinstance(text,str) or not text.strip()):
                 raise ValueError('exposed_promise_and_nonempty_log_required')
             status=args.get('status',event.status)
             if 'status' in args and status not in ('done','dropped'):
@@ -92,9 +98,10 @@ class Promises:
             due=args.get('due',event.due)
             if due is not None:
                 instant(due)
+            contexts=pending['contexts'] if pending else []
             entry={'at':datetime.now(timezone.utc).isoformat(),'text':text.strip(),
-                   'spans':[r['span'] for r in pending['contexts']],
-                   'exposure_ids':[r['id'] for r in pending['contexts']]}
+                   'spans':[r['span'] for r in contexts],
+                   'exposure_ids':[r['id'] for r in contexts]}
             event.log=event.log+[entry]
             event.status=status;event.due=due
             self.service.store.write_event(event)
@@ -163,8 +170,8 @@ def tool_specs():
     def spec(name,description,props,required):
         return {'type':'function','function':{'name':name,'description':description,'parameters':{
             'type':'object','additionalProperties':False,'properties':props,'required':required}}}
-    return [spec('list_pending_promises','读取所有进过上下文但尚未处理的约定及进入时的原文区间；未曝光的约定不出现。',{},[]),
-            spec('process_promise','处理一条已进过上下文的约定，必须追加 log；即使状态没变也写明现状。完结可标 done 或 dropped，改期可更新 due。',
+    return [spec('list_pending_promises','读取所有进过上下文但尚未处理的约定及进入时的原文区间；未曝光及钉住的约定不出现。',{},[]),
+            spec('process_promise','处理一条已曝光或钉住的约定，必须追加 log；钉住时可主动处理，无需待处理曝光，log 的 spans 可为空。即使状态没变也写明现状。完结可标 done 或 dropped，改期可更新 due。',
                  {'event_id':{'type':'string'},'log':{'type':'string','minLength':1},
                   'status':{'enum':['done','dropped']},'due':{'type':['string','null']}},['event_id','log'])]
 

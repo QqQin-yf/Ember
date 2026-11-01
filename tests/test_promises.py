@@ -44,6 +44,30 @@ class PromiseTests(unittest.TestCase):
         self.assertEqual(len(ev.log),2)
         self.assertFalse(Lifecycle(self.tmp.name).eligible('p'))
 
+    def test_pinned_routes_create_no_exposure_and_allow_active_updates(self):
+        ev=self.event()
+        self.service.pin_store.add('p')
+        for route in ('briefing','cue','recall'):
+            self.promises.enter('p',route,self.span)
+        with self.promises.db() as conn:
+            self.assertEqual(conn.execute('SELECT count(*) FROM exposures').fetchone()[0],0)
+        self.assertEqual(self.promises.pending(),[])
+        with self.assertRaises(ValueError):
+            self.promises.process({'event_id':'p','log':' '})
+        result=self.promises.process({'event_id':'p','log':'主动改期','due':'2027-01-01T00:00:00+08:00'})
+        self.assertEqual(result['log']['spans'],[])
+        self.assertEqual(result['log']['exposure_ids'],[])
+        self.promises.process({'event_id':'p','log':'已经做完','status':'done'})
+        self.assertEqual(ev.status,'done')
+
+    def test_pin_clears_previous_pending_without_resurrecting_on_unpin(self):
+        self.event()
+        self.promises.enter('p','cue',self.span)
+        self.service.pin_store.add('p')
+        self.assertEqual(self.promises.pending(),[])
+        self.service.pin_store.remove('p')
+        self.assertEqual(self.promises.pending(),[])
+
     def test_reschedule_removes_overdue_and_high_score_done_stays_recallable(self):
         ev=self.event(score=8,due='2026-01-01T09:00:00+08:00')
         self.assertEqual(self.promises.overdue()[0].event_id,'p')

@@ -91,7 +91,7 @@ class PinPolicyTests(unittest.TestCase):
         result=self.service.hook_turn_start('s','hello',user_message_id=73,recall_id='good')
         self.assertEqual(len(result['system_reminders']),1)
 
-    def test_merge_keeps_oldest_logs_cross_session_originals_and_pending_exposures(self):
+    def test_merge_keeps_oldest_logs_cross_session_originals_without_pinned_exposures(self):
         store=KnowledgeStore(self.tmp.name)
         for eid,sid,seq in [('a','first',1),('b','second',3)]:
             event=self.event(eid,'promise',10)
@@ -111,7 +111,7 @@ class PinPolicyTests(unittest.TestCase):
         read=self.service.sidecar_read_memory_source('b')
         self.assertIn('original a',read['transcript']);self.assertIn('original b',read['transcript'])
         self.assertEqual(len(self.pins.events()),1)
-        self.assertEqual(Promises(self.service).pending()[0]['event']['event_id'],'a')
+        self.assertEqual(Promises(self.service).pending(),[])
 
     def test_knowledge_count_and_per_item_guard_replace_total_token_limit(self):
         source=TurnSliceStore(self.tmp.name).save('s',[{'message_id':1,'role':'user','content':'source'},

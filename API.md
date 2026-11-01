@@ -382,3 +382,5 @@ POST /ember/briefing/refresh 收 session_id、keep_from_message_id，可附精�
 修正：write_event / write_promise 可选 supersedes 指向被取代的旧日常、项目、约定；旧内容保留，以 superseded_by 与取代关系退出自动召回。新旧任一端为 relationship 都拒绝此参数；关系只写新的接续。未知目标在任何写入前拒绝。
 
 修正：关系要点只追加，永不因 pin 作废或重建。已抽点的关系事件再被 pin 时，要点保留，该事件在自己的时间线位置额外给原样及原文；unpin 后只撤掉这份额外原样。抽点只收原文已不在当前窗口的历史事件；抽点后修订持续锁定。尚未抽点的冷静期订正只重压该件。
+
+钉住的约定（包括默认钉住的 10 分无 due）从任何入口进入上下文都不记曝光、不计待处理。process_promise 允许主动处理钉住的约定，无需曝光，仍要求非空 log，spans 可为空；普通未 pin 约定仍要求待处理曝光。

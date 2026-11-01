@@ -71,7 +71,7 @@ class FiveLayerBriefingTests(unittest.TestCase):
         self.assertNotIn('SUMMARY-ten',text)
         for excluded in ('CORE-old-ten','CORE-future','CORE-no-due'):
             self.assertNotIn(excluded,text)
-        self.assertTrue(text.endswith('还有 2 条进过上下文的约定没处理'))
+        self.assertTrue(text.endswith('还有 1 条进过上下文的约定没处理'))
         self.assertNotIn('sig10',report['stats']);self.assertNotIn('recalled_top',report['stats'])
 
     def test_get_is_frozen_until_next_explicit_refresh(self):
