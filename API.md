@@ -1,6 +1,6 @@
 # Ember 接口文档
 
-Ember 通过 HTTP hooks 和 MCP 提供记忆写入、召回、来源读取、后台维护和提取。App 持有对话循环。
+Ember 通过 HTTP hooks 和 MCP 提供记忆写入、召回、来源读取、后台维护和提取。CC 和 App 使用同一套接口，由调用方持有对话循环；接口不按调用方区分。
 
 ## 1. 基础信息
 
@@ -21,7 +21,7 @@ Ember 通过 HTTP hooks 和 MCP 提供记忆写入、召回、来源读取、后
 
 ### 2.3 窗口过滤的降级语义
 
-召回起点过滤依赖 app 传入的 `context_start_id`：缺省或无法换算时不过滤。事件的出处区间未回填时保留。
+召回窗口过滤使用调用方可选传入的 `context_start_id` 或精确 `context_message_ids`，不要求 Deliz 的消息树或窗口管理流程。未提供窗口身份时不按窗口排除；事件的出处区间未回填时保留。消息编号须对应已配置原文来源的真实编号，不能用 CC 消息 UUID 或临时编造的编号替代。
 
 ## 3. 调用顺序
 
@@ -44,7 +44,7 @@ write_event / write_promise 需要绑定进行中的生成。
 
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
-| session_id | string | — | 会话标识，缺省使用默认会话 |
+| session_id | string | — | 调用方提供的会话标识，允许 `cc-` 前缀（如 `cc-<原会话ID>`），原样保留；缺省使用默认会话 |
 | message | string | ✓ | 本轮用户消息 |
 | heart_turn_id | string | — | Heart 轮次 ID，格式为 `t-XXXXXX` |
 | user_message_id | int/string | 绑定生成模式必填 | 真实全局消息 seq，不接受消息 UUID |
@@ -71,6 +71,8 @@ write_event / write_promise 需要绑定进行中的生成。
 - `injected_text`：注入本轮 system 的召回文本。
 - `memory`：Event / Entity 命中、来源过滤和语义匹配统计。
 - `system_reminders`：需注入本轮的提醒数组。
+
+仅做轮前召回可只传 `session_id` 和 `message`，不要求 `heart_turn_id`、消息 seq、版本号或先调用 Deliz。未传 `recall_id` 时不启用生成绑定及冻结响应重放；可选窗口过滤仍生效。若传 `recall_id`，仍须提供真实 `user_message_id`，遵守下面的生成绑定协议，不会因调用方是 CC 放宽来源校验。原文来源的配置与读取是 Ember 内部职责，不要求 HTTP 调用方承担原文同步。
 
 `presentations` 记录呈现单位，`recall_refs` 记录触发会话、真实锚点 seq 和呈现事件的出处。只有事件正文/摘录进入 `recall_refs.events`；实体概览不展开隐藏成员。缺少可靠消息身份的事件保持 unresolved，路径由 app 解析。完整字段及限制见 [召回引用协议](PROTOCOL_DETAILS.md#recall-refs)。
 
@@ -274,6 +276,12 @@ Ember 在 Event 落库后后台拉取，以及 POST /ember/briefing/refresh 时�
 ## 8. briefing
 
 POST /ember/briefing/refresh 收 session_id、keep_from_message_id，可附精确 context_message_ids；新会话、截断和断线重进需要新简报时调用。先兜底同步原文增量、等待关系压缩/抽点，再按顺序保存完整快照：关系时间线；其他 pin 原文；近期非关系、非 promise 的 8–10 分 core / 1–7 分 summary；pin 的认知/规律；到期 open 约定及待处理数量。未 pin 的 10 分也进入 72 小时近期层，超过窗口不永久常驻。promise 的浮现规则优先，不通过近期层提前带入未到期或无 due 约定。
+
+`session_id` 为必填非空字符串，允许 `cc-` 前缀；`keep_from_message_id` 和 `context_message_ids` 都可省略，只传 `{"session_id":"cc-example"}` 即可刷新。窗口参数使用已配置来源的消息编号，不依赖 Deliz 特有的 leaf、活动版本或截断回调。未提供窗口参数时不排除当前窗口来源。原文增量仍由 Ember 从配置的来源拉取；来源未配置或不可达时，`source_sync` 报告 `unavailable`，继续使用已有准确记忆拼装。
+
+**当前耗时**：refresh 是同步完成后返回，可能超过 60 秒。它会等待同实例的刷新锁、原文同步锁和时间线后台工作；同步拉取原文的所有增量页并完成筛选、嵌入，再逐件压缩未完成的关系 Event，必要时分批抽点，最后读取 pin 原文并保存快照。耗时随积压页数、事件数、模型请求及锁等待增加，接口没有整个刷新请求的统一截止时间，也没有固定完成时长保证。
+
+仓库当前默认配置中，原文单次请求超时为 8 秒（`EMBER_SOURCE_TIMEOUT` 可覆盖），嵌入单次为 30 秒；关系压缩、抽点单次模型请求为 90 秒，关系压缩每件最多尝试 3 次（`timeline.retries=2`）。这些是单次请求/处理的配置，不是整个 refresh 的耗时上限；实际值以运行配置为准。模型失败后的准确内容降级见 §5.6，`source_sync` 状态见 §7。`GET /ember/briefing` 只读取已有快照，不执行上述刷新工作。
 
 近期层使用 total_chars 扣除不可砍部分后的剩余预算，从最低分、最旧条目开始移除；不会硬截 core。关系、pin、知识及到期约定保持各自既定规则；最后的到期约定和待处理数量不砍。快照带 revision / refreshed_at / 分层统计，完整文本原子保存。GET /ember/briefing 只读该快照，不动态拼接新 pin 的知识；无快照为 empty，损坏为 failed / briefing_snapshot_unreadable。对话中不替换已有 briefing。
 

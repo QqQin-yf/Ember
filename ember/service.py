@@ -635,6 +635,8 @@ class EmberService:
                         window_revision: int | None = None,
                         context_message_ids: list[int] | None = None) -> dict[str, Any]:
         """Persist the identity before work; commit response and effects together."""
+        if context_message_ids is not None and (not isinstance(context_message_ids,list) or len(context_message_ids)>50000 or any(type(i) is not int or i<1 for i in context_message_ids)):
+            return self._generation_error("invalid_arguments", "Invalid context message IDs")
         if recall_id is None:
             with self._generation_lock:
                 try:
@@ -644,7 +646,8 @@ class EmberService:
                 self.generations.supersede()
                 self._generation_contexts.clear()
                 result=self._hook_turn_start_legacy(
-                    session_id, message, heart_turn_id, user_message_id, context_start_id)
+                    session_id, message, heart_turn_id, user_message_id, context_start_id,
+                    context_message_ids)
                 from .promises import Promises
                 for item in result.get('presentations',[]):
                     if item.get('event_id'):
@@ -669,8 +672,6 @@ class EmberService:
                     raise ValueError("Timezone required")
             except (AttributeError, TypeError, ValueError):
                 return self._generation_error("invalid_arguments", "occurred_at must be an RFC3339 timestamp with timezone")
-        if context_message_ids is not None and (not isinstance(context_message_ids,list) or len(context_message_ids)>50000 or any(type(i) is not int or i<1 for i in context_message_ids)):
-            return self._generation_error("invalid_arguments", "Invalid context message IDs")
         request_context = {"session_id": sid, "heart_turn_id": heart_turn_id,
             "user_message_id": seq, "context_start_id": context_start_id,
             "occurred_at": occurred_at, "activity_revision": activity_revision,
@@ -997,7 +998,8 @@ class EmberService:
     def _hook_turn_start_legacy(self, session_id: str | None, message: str,
                         heart_turn_id: str | None = None,
                         user_message_id: int | None = None,
-                        context_start_id: int | None = None) -> dict[str, Any]:
+                        context_start_id: int | None = None,
+                        context_message_ids: list[int] | None = None) -> dict[str, Any]:
         """轮前钩子：开新一轮 + 本地召回，返回注入文本。
 
         返回 {injected, injected_text, session_id, turn, memory}。
@@ -1015,12 +1017,15 @@ class EmberService:
         self.turn_ledger.record(session.session_id, turn, heart_turn_id,
                                 user_message_id=user_message_id)
         rec = self.run_recall_pipeline(session, turn, message,
-                                       context_start_id=context_start_id)
+                                       context_start_id=context_start_id,
+                                       context_message_ids=context_message_ids)
         session.messages.append({"role": "user", "content": message, "turn": turn,
                                  "_source_session_id": session.session_id,
                                  "_source_message_id": message_seq(user_message_id)})
         self._live_turn = {"session": session, "turn": turn,
                            "user_text": message,"request_context":{"context_start_id":context_start_id,"user_message_id":user_message_id}}
+        if context_message_ids is not None:
+            self._live_turn["request_context"]["context_message_ids"] = sorted(set(context_message_ids))
         self._last_context=self._live_turn
         stats = {k: rec[k] for k in (
             "recalled_count", "entity_recalled", "entity_names",

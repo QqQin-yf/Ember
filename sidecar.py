@@ -458,7 +458,7 @@ async def _sleep_sediment_evidence(request: Request) -> JSONResponse:
 # ---------- 简报与钉住（2026-10-17 设计夜；HTTP 接线随本次补齐） ----------
 
 async def _briefing_refresh(request: Request) -> JSONResponse:
-    """截断时刷新简报（app 编排：丢头留尾截断的同步动作）。"""
+    """调用方在新会话、恢复或上下文边界同步刷新简报。"""
     svc = _service_or_404(request)
     if isinstance(svc, JSONResponse):
         return svc
