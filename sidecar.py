@@ -477,6 +477,18 @@ async def _briefing_get(request: Request) -> JSONResponse:
     return JSONResponse(svc.sidecar_briefing_get())
 
 
+async def _briefing_fallback(request: Request) -> JSONResponse:
+    """只读快照与新增记忆，不等待 refresh。"""
+    svc = _service_or_404(request)
+    if isinstance(svc, JSONResponse):
+        return svc
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    return JSONResponse(await asyncio.to_thread(svc.sidecar_briefing_fallback, body))
+
+
 async def _pin_memory(request: Request) -> JSONResponse:
     """钉住（幂等；与 pin_memory 工具共用同一执行体）。"""
     svc = _service_or_404(request)
@@ -546,6 +558,7 @@ app = BearerAuthMiddleware(Starlette(
         Route("/ember/briefing/refresh", _briefing_refresh,
               methods=["POST"]),
         Route("/ember/briefing", _briefing_get, methods=["GET"]),
+        Route("/ember/briefing/fallback", _briefing_fallback, methods=["POST"]),
         Route("/ember/memory/pin", _pin_memory, methods=["POST"]),
         Route("/ember/memory/unpin", _unpin_memory, methods=["POST"]),
         Mount("/mcp", app=_handle_mcp),

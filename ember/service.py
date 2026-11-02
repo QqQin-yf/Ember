@@ -1693,6 +1693,10 @@ class EmberService:
         from .briefing import get
         return get(self)
 
+    def sidecar_briefing_fallback(self, args: dict[str, Any]) -> dict[str, Any]:
+        from .briefing_fallback import fallback
+        return fallback(self, args)
+
     def sidecar_pin_memory(self, args: dict[str, Any]) -> dict[str, Any]:
         from .pin_policy import Pins
         try:

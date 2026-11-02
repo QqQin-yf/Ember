@@ -1,6 +1,8 @@
 """Shared HTTP contracts for callers without Deliz's generation/window flow."""
 from datetime import datetime, timezone
+import asyncio
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -71,6 +73,71 @@ class CallerNeutralHTTPTests(unittest.TestCase):
         self.assertEqual(report['status'], 'ok')
         self.assertEqual(report['source_sync']['code'], 'source_unreachable')
         self.assertIn('remember the beacon', report['text'])
+
+    def test_briefing_fallback_http_is_read_only_and_instance_scoped(self):
+        snapshot = self.client.post('/ember/briefing/refresh', json={'session_id': 'cc-example'}).json()
+        now = datetime.now(timezone.utc).isoformat()
+        self.service.store.write_event(Event('new', 'v1', 'source', 'source', now, now,
+            summary='new summary', core='new fallback memory', significance=10))
+        response = self.client.post('/ember/briefing/fallback', json={'session_id': 'cc-example'})
+        self.assertEqual(response.status_code, 200, response.text)
+        report = response.json()
+        self.assertTrue(report['degraded'])
+        self.assertEqual(report['snapshot_revision'], snapshot['revision'])
+        self.assertEqual(report['expanded_count'], 1)
+        self.assertIn('new fallback memory', report['text'])
+        self.assertEqual(self.client.get('/ember/briefing').json(), snapshot)
+        self.assertEqual(self.client.post('/ember/briefing/fallback', json={'session_id': 'cc-example'},
+            headers={'X-Heart-Instance': 'default'}).json()['status'], 'empty')
+        for body in ([], {'session_id': 's', 'context_message_ids': [False]}, {}):
+            self.assertEqual(self.client.post('/ember/briefing/fallback', json=body).json()['code'],
+                             'invalid_briefing_context')
+
+    def test_fallback_returns_while_refresh_waits_and_refresh_still_saves(self):
+        import httpx
+        import sidecar
+        snapshot = self.client.post('/ember/briefing/refresh', json={'session_id': 'cc-example'}).json()
+        now = datetime.now(timezone.utc).isoformat()
+        self.service.store.write_event(Event('concurrent', 'v1', 'source', 'source', now, now,
+            summary='summary', core='concurrent new memory', significance=8))
+        started, release = threading.Event(), threading.Event()
+        def sync(service):
+            started.set()
+            if not release.wait(5):
+                raise AssertionError('test did not release refresh')
+            return {'status': 'ok'}
+        async def requests():
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=sidecar.app),
+                    base_url='http://test', headers={'X-Heart-Instance': 'shared'}) as client:
+                task = asyncio.create_task(client.post('/ember/briefing/refresh', json={'session_id': 'cc-example'}))
+                try:
+                    self.assertTrue(await asyncio.to_thread(started.wait, 2))
+                    response = await asyncio.wait_for(client.post('/ember/briefing/fallback',
+                        json={'session_id': 'cc-example'}), timeout=2)
+                    self.assertFalse(task.done())
+                    self.assertEqual(response.json()['snapshot_revision'], snapshot['revision'])
+                    self.assertIn('concurrent new memory', response.json()['text'])
+                    self.assertEqual(self.service.sidecar_briefing_get(), snapshot)
+                finally:
+                    release.set()
+                    result = await asyncio.wait_for(task, timeout=3)
+                self.assertEqual(result.json()['revision'], snapshot['revision']+1)
+                self.assertEqual(self.service.sidecar_briefing_get(), result.json())
+        with patch('ember.briefing.sync_increment', side_effect=sync):
+            asyncio.run(requests())
+
+    def test_fallback_obeys_shared_http_auth_and_instance_validation(self):
+        import sidecar
+        with patch.object(sidecar, 'TOKEN', 'fallback-test-token'):
+            client = TestClient(sidecar.BearerAuthMiddleware(sidecar.app.app))
+            try:
+                self.assertEqual(client.post('/ember/briefing/fallback',
+                    json={'session_id': 's'}).status_code, 401)
+                self.assertEqual(client.post('/ember/briefing/fallback',
+                    json={'session_id': 's'}, headers={'Authorization': 'Bearer fallback-test-token',
+                    'X-Heart-Instance': 'unknown'}).status_code, 404)
+            finally:
+                client.close()
 
     def test_exact_window_filter_also_applies_without_recall_id(self):
         source = TurnSliceStore(self.service.store.root).save('cc-example', [

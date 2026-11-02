@@ -285,6 +285,30 @@ POST /ember/briefing/refresh 收 session_id、keep_from_message_id，可附精�
 
 近期层使用 total_chars 扣除不可砍部分后的剩余预算，从最低分、最旧条目开始移除；不会硬截 core。关系、pin、知识及到期约定保持各自既定规则；最后的到期约定和待处理数量不砍。快照带 revision / refreshed_at / 分层统计，完整文本原子保存。GET /ember/briefing 只读该快照，不动态拼接新 pin 的知识；无快照为 empty，损坏为 failed / briefing_snapshot_unreadable。对话中不替换已有 briefing。
 
+### 8.1 降级简报
+
+`POST /ember/briefing/fallback` 用于 refresh 超时或失败时取用已有记忆。请求与 refresh 相同：必填非空 `session_id`，可选 `keep_from_message_id`、`context_message_ids`；支持相同的实例路由和鉴权。最小请求为 `{"session_id":"cc-example"}`。参数非法返回 `status=failed`、`code=invalid_briefing_context`。
+
+接口保留最近保存的快照原文，追加刷新时间之后写入且仍在 72 小时近期层内的非关系、非 promise、未 pin Event：8–10 分用 core，1–7 分用 summary，沿用近期层排序、日期和资格筛选。随后追加快照之后新到期的 open 约定，以及快照之后新写入但已经到期的 open 约定。已在快照时到期的旧约定不重复追加。新增部分开头为「以下为上次简报之后的新记忆，简报尚未完成刷新」。关系时间线、pin 原文、认知/规律及待处理数量沿用快照，不重新拼装。
+
+窗口参数仅过滤新增部分；来源全部在当前窗口的新 Event 不重复放入，跨会话或只在窗口内保留部分来源的 Event 保留。未传窗口参数不按窗口排除。来源不完整或切片版本已变化时，保守保留，不据此认定原文已在窗口中。
+
+完整快照、标记和全部新增正文合计不超过 `briefing.total_chars` 时全部展开。放不下时整批不展开，改为数量、全部 Event ID 和 `search_memory` / `read_memory_source` 查阅提示，不硬截 core。快照原文与未展开提示均保留；当这两部分自身超过预算时，返回文本可以超预算。
+
+| 响应字段 | 含义 |
+|---|---|
+| status | `ok`；无快照为 `empty`；快照损坏为 `failed` / `briefing_snapshot_unreadable` |
+| text / chars | 快照加新增正文或未展开提示；`chars` 为完整返回文本字符数 |
+| degraded | `true`，标识此次使用降级接口，不表示 refresh 的运行状态 |
+| snapshot_revision / revision | 基于的已保存快照 revision；无快照时 `snapshot_revision=null` |
+| refreshed_at | 已保存快照的刷新时间，不是降级请求时间 |
+| expanded_count / unexpanded_count | 此次新增记忆的展开数、未展开数，不计快照原文 |
+| unexpanded | `[{"event_id":"…","reason":"total_chars_exceeded"}]`；全部展开时为 `[]` |
+
+接口不调模型、不拉原文、不等待刷新锁、原文同步锁或时间线工作，不保存快照、不登记曝光或修改窗口。只读本地状态遇到数据库忙或不可读时立即沿用快照，新增候选不展开，`reason=local_state_unavailable`；这些候选尚未完成资格及窗口核验。没有快照时 `text=""`，展开数和未展开数均为 0。
+
+`GET /ember/briefing` 只取快照；`POST /ember/briefing/fallback` 取快照并补充新增记忆；`POST /ember/briefing/refresh` 同步完成刷新并保存新快照。fallback 不启动、取消或替代 refresh；调用方管理 refresh 的等待与后台继续执行。
+
 ## 9. 消息坐标
 
 外部消息坐标为 message_id，使用原文服务的全局 seq。内部 turn-N、Heart t-XXXXXX 通过 turn_ledger.jsonl 映射到 message_id；Event 本体不保存映射。
