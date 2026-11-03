@@ -21,7 +21,6 @@ from .relation import RelationStore
 from .sleep_state import SleepStateStore
 from .store import EmberStore, EVENTS_FILE
 from .entity import EntityStore
-from .sediment import SedimentStore
 from .recall_embedding import embed_text
 from .turn_ledger import TurnLedger
 from .recall_ledger import RecallLedger
@@ -122,9 +121,6 @@ class EmberService:
         # Relation 层 v1：resolves 边（被修正者 → 修正者），
         # 被过滤事件的修正者顶上（"旧观点被什么取代了"的入口）
         self.relation_store = RelationStore(getattr(store, "root", ""))
-        # 沉淀证据账本（10-14 设计稿第 4 步）：正文与版本号归 app，
-        # ember 只收"某版 + 净新增证据 id"追加（app 存新版才调）
-        self.sediment_store = SedimentStore(getattr(store, "root", ""))
         # 内容语义向量（2026-10-15 设计夜）：core 全事件 + 实体 summary——
         # search 捞出与实体卡的匹配地基；离线重建+夜批增量
         self.core_vectors = CoreVectorStore(getattr(store, "root", ""))
@@ -1289,57 +1285,6 @@ class EmberService:
             if "entity_refs" in up:
                 _EVENT_ENTITY_REFS[eid] = list(up["entity_refs"])
 
-
-    def sidecar_sediment_evidence(self, body: dict[str, Any]) -> dict[str, Any]:
-        """沉淀证据接收（10-14 设计稿第 4 步，10.15 分工对齐版）。
-
-        app 真的存下一版新沉淀时才调——正文与版本号归 app，ember 只
-        把净新增证据 id 挂到该版名下：id 必须真实存在（防幻觉）→
-        去重（本版内 + 剔其他版本已有）→ 落账。同版本重交覆盖为
-        最新列表。证据为空 app 根本不该调（空集=调用方违约，拒收）。
-        """
-        body = body or {}
-        errors: list[str] = []
-        version = body.get("version")
-        if not isinstance(version, int) or version < 1:
-            errors.append(f"version 非法: {version!r}（应为 ≥1 的整数）")
-        ids = body.get("evidence_event_ids")
-        if not isinstance(ids, list) or not ids:
-            errors.append("evidence_event_ids 缺失或为空"
-                          "（证据为空时 app 不应调本接口）")
-        if errors:
-            return {"status": "rejected", "errors": errors}
-        unknown = [e for e in ids
-                   if not isinstance(e, str) or not e.strip()]
-        hallucinated: list[str] = []
-        for e in ids:
-            if isinstance(e, str) and e.strip() and \
-                    not self._sediment_event_exists(e.strip()):
-                hallucinated.append(e)
-        if unknown or hallucinated:
-            return {"status": "rejected",
-                    "errors": (["非法 event id: " + ", ".join(unknown)]
-                               if unknown else [])
-                    + (["不存在的事件 id（幻觉）: "
-                        + ", ".join(hallucinated)] if hallucinated else [])}
-        res = self.sediment_store.append(version,
-                                         [e.strip() for e in ids])
-        if not res["kept"]:
-            return {"status": "no_new_evidence",
-                    "version": version,
-                    "duplicates_dropped": res["duplicates"],
-                    "note": "全部 id 均为历史版本已有证据，本版不落账"}
-        return {"status": "appended", "version": version,
-                "evidence_kept": res["kept"],
-                "duplicates_dropped": res["duplicates"],
-                "latest_version": self.sediment_store.latest_version()}
-
-    def _sediment_event_exists(self, eid: str) -> bool:
-        try:
-            self.store.get_event(eid)
-            return True
-        except KeyError:
-            return False
 
     # ---------- search_memory（2026-10-15 设计夜：主动检索=捞取） ----------
     #

@@ -56,6 +56,8 @@ class _Check:
     def inventory(self):
         result = {}
         for path in self.root.iterdir():
+            if path.name == "sediment.jsonl":
+                continue
             if path.suffix in (".jsonl", ".sqlite3") or path.name.endswith(("-wal", "-shm", "-journal")) or path.name in (
                     "generations.sqlite3", "generations.sqlite3-wal", "generations.sqlite3-shm", "generations.sqlite3-journal"):
                 if path.is_symlink():

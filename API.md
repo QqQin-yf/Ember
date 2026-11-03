@@ -194,48 +194,20 @@ POST /ember/briefing/refresh 等待时间线上尚未完成的压缩和抽点，
 
 ## 6. Sleep 边界
 
-Sleep 负责做梦和沉淀。提取与约定处理使用普通 MCP。以下入口返回 HTTP 410、status=retired、code=legacy_sleep_step_retired，不产生写入：
+Sleep 只做梦和写信，由 App 管理。信的正文和版本都归 App，Ember 不参与，也不关联 Event 或维护证据账本。提取与约定处理使用普通 MCP。
 
-- POST /ember/sleep/knowledge/{operation}
-- GET /ember/sleep/link/batches
-- GET /ember/sleep/link/progress
-- POST /ember/sleep/link/submit
-- POST /ember/sleep/structure/run
+以下入口返回 HTTP 410、`status=retired`，不产生写入：
 
-### 6.1 POST /ember/sleep/sediment/evidence
+| 入口 | code |
+| --- | --- |
+| POST /ember/sleep/knowledge/{operation} | legacy_sleep_step_retired |
+| GET /ember/sleep/link/batches | legacy_sleep_step_retired |
+| GET /ember/sleep/link/progress | legacy_sleep_step_retired |
+| POST /ember/sleep/link/submit | legacy_sleep_step_retired |
+| POST /ember/sleep/structure/run | legacy_sleep_step_retired |
+| POST /ember/sleep/sediment/evidence | legacy_sediment_evidence_retired |
 
-App 保存新版沉淀正文后提交证据；无证据时不调用。
-
-请求体：
-
-```json
-{"version": 3, "evidence_event_ids": ["EVT-…", "EVT-…"]}
-```
-
-- `version`：App 沉淀版本号，不校验连续性；同版本重交覆盖为最新列表。
-- `evidence_event_ids`：本版证据 Event ID；剔除本版重复和历史已使用的 ID，只记录净新增证据。
-
-响应 200：
-
-```json
-{"status": "appended", "version": 3,
- "evidence_kept": ["EVT-…"], "duplicates_dropped": ["EVT-…"],
- "latest_version": 3}
-```
-
-```json
-{"status": "no_new_evidence", "version": 3,
- "duplicates_dropped": ["EVT-…"],
- "note": "全部 id 均为历史版本已有证据，本版不落账"}
-```
-
-```json
-{"status": "rejected", "errors": ["不存在的事件 id（幻觉）: EVT-…"]}
-```
-
-- 所有 Event ID 必须存在，否则整条拒绝。
-- `sediment.jsonl` 保存版本与证据关联；除同版本覆盖外只追加，保留旧版本证据。
-- 沉淀正文不经过 ember；换窗/briefing 需要正文时由 app 提供
+沉淀证据入口的 hint 为 `Sediment is now an App-only letter with no evidence ledger.`。实例目录中的 `sediment.jsonl` 不读、不写、不删除。
 
 ## 7. 原文提供方接口
 

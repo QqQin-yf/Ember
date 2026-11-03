@@ -437,22 +437,17 @@ async def _retired_sleep_step(request: Request) -> JSONResponse:
     if isinstance(svc, JSONResponse):
         return svc
     return JSONResponse({'status':'retired','code':'legacy_sleep_step_retired',
-                         'hint':'Use ordinary MCP extraction and promise tools; Sleep keeps dream and sediment only.'}, status_code=410)
+                         'hint':'Use ordinary MCP extraction and promise tools; Sleep keeps dreaming and letter writing in App only.'}, status_code=410)
 
 
 async def _sleep_sediment_evidence(request: Request) -> JSONResponse:
-    """沉淀证据接收：app 存下一版新沉淀后，交版本号 + 证据 id 挂账。
-
-    只做追加——证据为空 app 不调本接口（契约见 API.md §6）。
-    """
-    svc = _service_or_404(request)
-    if isinstance(svc, JSONResponse):
-        return svc
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    return JSONResponse(svc.sidecar_sediment_evidence(body))
+    if not REGISTRY.has(_instance_name(request)):
+        return JSONResponse({"error": "unknown instance"}, status_code=404)
+    return JSONResponse({
+        "status": "retired",
+        "code": "legacy_sediment_evidence_retired",
+        "hint": "Sediment is now an App-only letter with no evidence ledger.",
+    }, status_code=410)
 
 
 # ---------- 简报与钉住（2026-10-17 设计夜；HTTP 接线随本次补齐） ----------

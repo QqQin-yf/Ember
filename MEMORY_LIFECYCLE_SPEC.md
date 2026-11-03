@@ -4,7 +4,7 @@ Ember 的记忆写入、召回、后台维护、提取和 briefing 流程。
 
 ## 1. 职责与时机
 
-Ember 提供 MCP + hooks，负责记忆、来源、召回及后台维护；App 持有对话循环、实际上下文和截断编排。跨边界的材料交换是 briefing 与 App 原文服务，工具和召回分别经 MCP、hooks 交付。App 的 Sleep 只保留做梦、沉淀，Ember 不编排二者。
+Ember 提供 MCP + hooks，负责记忆、来源、召回及后台维护；App 持有对话循环、实际上下文和截断编排。跨边界的材料交换是 briefing 与 App 原文服务，工具和召回分别经 MCP、hooks 交付。App 的 Sleep 只做梦和写信；信的正文和版本都归 App，Ember 不参与。
 
 ```mermaid
 flowchart TD
@@ -117,7 +117,7 @@ finish_memory_extraction_group 只用于决定不写的材料：整组、指定 
 
 ## 8. 接口与运行边界
 
-POST /ember/sleep/knowledge/start|tool|finish、link 和 structure 入口返回 410 legacy_sleep_step_retired，没有写入副作用。沉淀证据由 sediment/evidence 接口接收，做梦由 App 管理。
+POST /ember/sleep/knowledge/start|tool|finish、link 和 structure 入口返回 410 legacy_sleep_step_retired，没有写入副作用。POST /ember/sleep/sediment/evidence 返回 410 legacy_sediment_evidence_retired，没有写入副作用。做梦和写信由 App 管理，Ember 不关联信与 Event，也不维护证据账本。
 
 HTTP / MCP、原文精确 path 和增量流、调用身份和失败码见 API.md；快照、引用、主动 run 等稳定协议见 PROTOCOL_DETAILS.md。原文/提取/待处理约定等工具正文使用易失回执，持久调用账不复制这些原文。后台缓存和来源副本仍保存在实例目录，是派生材料，不等同于新写聊天历史。
 
