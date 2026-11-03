@@ -525,8 +525,13 @@ class BearerAuthMiddleware:
         await self.app(scope, receive, send)
 
 
+async def _health(request: Request) -> JSONResponse:
+    return JSONResponse({"ok": True, "service": "ember"})
+
+
 app = BearerAuthMiddleware(Starlette(
     routes=[
+        Route("/health", _health, methods=["GET"]),
         Route("/ember/runs/start", _run_lifecycle, methods=["POST"]),
         Route("/ember/runs/finish", _run_lifecycle, methods=["POST"]),
         Route("/ember/runs/{run_id}", _run_lifecycle, methods=["GET"]),
@@ -565,7 +570,7 @@ app = BearerAuthMiddleware(Starlette(
 def main() -> None:
     # token 兜底（Claude 2026-10-16）：监听非回环地址又没有 token = 敞门，
     # 宁可拒绝启动也不悄悄裸奔——变量名拼错会当场炸出来
-    if HOST not in ("127.0.0.1", "localhost", "::1") and not TOKEN:
+    if (os.environ.get("EMBER_REQUIRE_TOKEN") == "1" or HOST not in ("127.0.0.1", "localhost", "::1")) and not TOKEN:
         raise SystemExit(
             "[ember-sidecar] 拒绝启动：EMBER_HOST 监听的是非回环地址"
             f"（{HOST}）但 EMBER_TOKEN 为空——跨机部署必须设 token，"

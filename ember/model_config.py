@@ -74,7 +74,10 @@ def settings(purpose, *, require_key=True, path=None):
         model=use['model'];transport=p.get('transport','http')
         if not isinstance(model,str) or not model.strip() or transport not in ('http','docker'):
             raise ValueError
-        base=p.get('base_url','').rstrip('/')
+        base_env=p.get('base_url_env','')
+        if base_env and (not isinstance(base_env,str) or not re.fullmatch('[A-Z][A-Z0-9_]*',base_env)):
+            raise ValueError
+        base=(os.environ.get(base_env) or p.get('base_url','')).rstrip('/')
         key_env=p.get('key_env','')
         if transport=='http':
             u=urlsplit(base)

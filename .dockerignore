@@ -1,0 +1,8 @@
+*
+!requirements.txt
+!ember/
+!ember/**
+!config/
+!config/**
+!sidecar.py
+!Dockerfile

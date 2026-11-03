@@ -110,3 +110,13 @@ python -X utf8 scripts/export_tool_contracts.py
 - [MEMORY_LIFECYCLE_SPEC.md](MEMORY_LIFECYCLE_SPEC.md)：记忆写入、召回、后台维护与提取流程。
 - [PROTOCOL_DETAILS.md](PROTOCOL_DETAILS.md)：生成绑定、召回快照、来源引用和主动 run 协议。
 - [OPERATIONS.md](OPERATIONS.md)：运行维护与离线检查。
+
+## 容器部署
+
+`docker build -t home-ember .` 构建 sidecar 镜像，默认以 UID 1000 监听 0.0.0.0:8767。必须设置 EMBER_TOKEN；挂载空的 `/srv/home/ember` 至 `/app/data`，目录所有者 UID/GID 1000。仅在 deploy_default 网络内暴露端口；公网通过现有 Cloudflare 隧道访问 ember:8767，所有入口含 GET /health 均要求 Bearer。健康响应为 `{ "ok": true, "service": "ember" }`。
+
+环境：EMBER_DATA_ROOT=/app/data、EMBER_SOURCE_URL=http://deliz:8790、EMBER_SOURCE_TOKEN（独立原文令牌）、EMBER_INSTANCES=default；模型密钥分别为 SILICONFLOW_API_KEY、EMBER_EMBED_API_KEY、ZHIPU_MAINTENANCE_API_KEY、ZHIPU_API_KEY，召回嵌入地址可通过 EMBER_EMBED_BASE_URL 设置。密钥通过宿主机只读 env 文件传入，模板由私有 home-deploy 管理。
+
+`direction_local` 保留原 Ollama/docker 配置，仅被离线 Direction split/mount 工具显式选择 qwen3 时调用。在线 sidecar 不调用该 purpose；容器不安装 Docker CLI、不挂 Docker socket、不提供 Ollama。离线选择 qwen3 时将失败，不会切换其他模型。在线的 direction_split/mount 配置仍使用原 zhipu_offline。
+
+MCP 地址为 https://ember.<域名>/mcp/；hooks 为 /ember/hooks/turn_start 与 /ember/hooks/turn_end；客户端发送 Authorization: Bearer <EMBER_TOKEN> 和 X-Heart-Instance: default。完整编排、秘密模板和备份在私有 home-deploy 仓库维护。

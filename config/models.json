@@ -12,7 +12,8 @@
     },
     "siliconflow_recall": {
       "inherits": "siliconflow",
-      "key_env": "EMBER_EMBED_API_KEY"
+      "key_env": "EMBER_EMBED_API_KEY",
+      "base_url_env": "EMBER_EMBED_BASE_URL"
     },
     "zhipu": {
       "base_url": "https://open.bigmodel.cn/api/paas/v4",
