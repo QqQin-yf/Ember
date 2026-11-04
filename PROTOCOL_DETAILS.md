@@ -48,6 +48,10 @@ GET /ember/generations/{recall_id} 查询生成状态。GET /ember/generations/{
 
 turn_start 的 presentations 按实际呈现顺序记录内容；recall_refs 保存触发会话、用户锚点和实际输出的 Event 出处。
 
+`event_text` 和 `entity_overview` 呈现项带 `text`，分别与 `event_id`（及 `version_id`）或 `entity_id` 绑定。`text` 是本次 `injected_text` 中该项的完整展示文本块（含该项标题和提示），不含全局前缀、附加原文切片或其他呈现项；片段命中后展示的 Event 也遵循此约定。原有 `injected_text`、引用、顺序和调用参数保持兼容。
+
+传入 `recall_id` 时，`text` 随首次完整响应一起冻结；同 ID 重试和 `?view=response` 返回冻结文本，不读取最新 Event／Entity 重建。正文沿用完整响应的 24 小时有效期；默认 refs 视图的 `snapshot.presentations` 不含 `text`，长期保留的引用元数据和切片诊断也不复制该正文。已冻结的旧响应保持原样，不补填新增字段。
+
 | presentation | 内容 | Event 引用资格 |
 |---|---|---|
 | event_text | Event 正文 | 有 |

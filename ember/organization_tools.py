@@ -48,8 +48,9 @@ def append_entity_cards(service,result):
             card=service.entity_store.get(eid)
         except KeyError:
             continue
-        result['prefix']+='\n'+f'关于〈{card.name}〉 [{eid}]：{card.summary}'
-        result['presentations'].append({'presentation':'entity_overview','entity_id':eid})
+        block=f'关于〈{card.name}〉 [{eid}]：{card.summary}'
+        result['prefix']+='\n'+block
+        result['presentations'].append({'presentation':'entity_overview','entity_id':eid,'text':block})
         result['entity_names'].append(card.name)
     result['entity_recalled']=len({p['entity_id'] for p in result.get('presentations',[]) if p.get('entity_id')})
     result['recalled_count']=len({p['event_id'] for p in result.get('presentations',[]) if p.get('event_id')})

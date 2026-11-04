@@ -57,7 +57,7 @@ def append_events(service,result,session,turn,text,start=None,entries=None,conte
     for event,cues,score in selected[:cfg['event_limit']]:
         blocks.append(f'[{event.event_id} {event.kind} {event.significance}/10] {event.core or event.summary}\n触点：'+('、'.join(cues) if cues else 'core 向量')+f'；原文可用 read_memory_source("{event.event_id}") 下钻。')
         presentations.append({'presentation':'event_text','event_id':event.event_id,'version_id':event.version_id,
-                              'route':'cue' if cues else 'recall'})
+                              'route':'cue' if cues else 'recall','text':blocks[-1]})
         if event.kind!='relationship':
             for eid in event.entity_refs:
                 entities[life.canonical(eid)]=True
@@ -79,7 +79,7 @@ def append_events(service,result,session,turn,text,start=None,entries=None,conte
             continue
         blocks.append(f'关于〈{card.name}〉 [{eid}]：{card.summary}')
         names.append(card.name)
-        presentations.append({'presentation':'entity_overview','entity_id':eid})
+        presentations.append({'presentation':'entity_overview','entity_id':eid,'text':blocks[-1]})
     for theme in Organization(service).themes():
         hit=theme['name'].casefold() in text.casefold()
         if query and theme['space']==space and len(theme['vector'])==len(query):

@@ -74,9 +74,10 @@ def append_slice_presentations(service,result,query):
                             continue
                         blocks.append(block);used+=len(block)+2;presented.add(eid)
                         item={'presentation':'event_text','event_id':eid,'version_id':event.version_id,
-                              'via_slice_id':source['slice_id'],'rerank_score':rank['relevance_score']}
+                              'via_slice_id':source['slice_id'],'rerank_score':rank['relevance_score'],'text':block}
                         result.setdefault('presentations',[]).append(item)
-                        selection['selected'].append(item)
+                        # Diagnostics survive response expiry and carry no body.
+                        selection['selected'].append({k:v for k,v in item.items() if k!='text'})
                         refs=service._presented_event_refs([item])
                         result.setdefault('recall_refs',{}).setdefault('events',[]).extend(refs)
                     continue

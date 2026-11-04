@@ -97,6 +97,35 @@ class SliceRerankerTests(unittest.TestCase):
         self.assertEqual([p['event_id'] for p in result['presentations'] if p['presentation']=='event_text'],['A','B'])
         self.assertEqual(len(result['recall_refs']['events']),2)
 
+    def test_slice_events_and_attached_entity_text_exclude_raw_slices_and_diagnostics(self):
+        from ember.entity import Entity
+        from ember.organization_tools import append_entity_cards
+        self.svc.entity_store.upsert(Entity('cat', 'Miso', summary='entity summary canary'))
+        self.svc.entity_store.save()
+        event = self.svc.store.get_event('A')
+        event.entity_refs = ['cat']
+        self.svc.store.write_event(event)
+        result, _ = self.present([])
+        result['entity_names'] = []
+        result = append_entity_cards(self.svc, result)
+        items = result['presentations']
+        events = [p for p in items if p['presentation'] == 'event_text']
+        self.assertEqual([p['text'] for p in events],
+                         ['[A daily] A complete event', '[B daily] B complete event'])
+        entity = next(p for p in items if p['presentation'] == 'entity_overview')
+        self.assertEqual(entity['entity_id'], 'cat')
+        self.assertIn('entity summary canary', entity['text'])
+        for item in events + [entity]:
+            self.assertIn(item['text'], result['prefix'])
+            self.assertNotIn('old text', item['text'])
+            self.assertNotIn('reply', item['text'])
+        for item in items:
+            if item['presentation'] == 'source_slice':
+                self.assertNotIn('text', item)
+        trace = self.recall.trace(self.metadata['trace_id'])
+        for diagnostics in (result['slice_recall'], trace):
+            self.assertTrue(all('text' not in p for p in diagnostics['rerank']['selected']))
+
     def test_reranker_failure_keeps_legacy_prefix_and_candidates(self):
         original={'prefix':'legacy prefix','presentations':[],'recall_refs':{'events':[]},'slice_recall':self.metadata}
         with patch('ember.slice_presentation.RerankerConfig.load',return_value=self.rerank), \
