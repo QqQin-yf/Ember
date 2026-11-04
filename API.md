@@ -74,7 +74,7 @@ write_event / write_promise 需要绑定进行中的生成。
 
 仅做轮前召回可只传 `session_id` 和 `message`，不要求 `heart_turn_id`、消息 seq、版本号或先调用 Deliz。未传 `recall_id` 时不启用生成绑定及冻结响应重放；可选窗口过滤仍生效。若传 `recall_id`，仍须提供真实 `user_message_id`，遵守下面的生成绑定协议，不会因调用方是 CC 放宽来源校验。原文来源的配置与读取是 Ember 内部职责，不要求 HTTP 调用方承担原文同步。
 
-`presentations` 记录呈现单位，`recall_refs` 记录触发会话、真实锚点 seq 和呈现事件的出处。只有事件正文/摘录进入 `recall_refs.events`；实体概览不展开隐藏成员。缺少可靠消息身份的事件保持 unresolved，路径由 app 解析。完整字段及限制见 [召回引用协议](PROTOCOL_DETAILS.md#recall-refs)。
+`presentations` 记录呈现单位；`event_text` 和 `entity_overview` 的 `text` 为本次实际展示的对应文本块，不含附加原文切片。传入 `recall_id` 时随完整响应冻结、重放（默认 refs 查询不返回正文）。`recall_refs` 记录触发会话、真实锚点 seq 和呈现事件的出处。只有事件正文/摘录进入 `recall_refs.events`；实体概览不展开隐藏成员。缺少可靠消息身份的事件保持 unresolved，路径由 app 解析。完整字段及限制见 [召回引用协议](PROTOCOL_DETAILS.md#recall-refs)。
 
 ### 4.1.1 生成绑定
 

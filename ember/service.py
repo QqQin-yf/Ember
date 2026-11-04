@@ -716,7 +716,8 @@ class EmberService:
                        "presentations": rec["presentations"], "recall_refs": refs,
                        "slice_recall": rec.get("slice_recall")}
                 metadata = {"session_id": sid, "turn": turn, "request_context": request_context,
-                            "presentations": rec["presentations"], "recall_refs": refs,
+                            "presentations": [{k: v for k, v in item.items() if k != "text"}
+                                              for item in rec["presentations"]], "recall_refs": refs,
                             "slice_recall": rec.get("slice_recall")}
                 start_entry = {"ember_session": sid, "ember_turn": turn,
                                "user_message_id": int(seq), "recorded_at": _now_iso()}
