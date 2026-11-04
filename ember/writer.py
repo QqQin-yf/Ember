@@ -10,7 +10,9 @@ PROMISE_TOOL_NAME = "write_promise"
 READ_SOURCE_TOOL_NAME = "read_memory_source"
 
 
-def build_tools_spec():
+def build_tools_spec(strict=False):
+    # Anthropic 拒收顶层 oneOf/allOf/anyOf，对外发布的清单去掉这两条组合约束；
+    # 二选一和关系不可取代仍由 validate_writer_arguments 用 strict 版本校验。
     from copy import deepcopy
     event = {"type":"object", "additionalProperties":False,
         "required":["summary","core","significance","kind","focus"],
@@ -35,6 +37,8 @@ def build_tools_spec():
         "allOf":[{"if":{"properties":{"event":{"properties":{"kind":{"const":"relationship"}}}}},"then":{"not":{"required":["supersedes"]}}}],
         "oneOf":[{"required":["quote_spans"],"not":{"required":["source_slice_ids"]}},
                  {"required":["source_slice_ids"],"not":{"required":["quote_spans"]}}]}
+    if not strict:
+        del schema["allOf"], schema["oneOf"]
     def spec(name,description,parameters):
         return {"type":"function","function":{"name":name,"description":description,"parameters":parameters}}
     promise=deepcopy(schema)
@@ -84,7 +88,7 @@ def validate_writer_arguments(args, *, promise=None):
         return _invalid_writer('$', 'arguments 不是对象')
     if promise is None:
         promise = (args.get('event') or {}).get('kind') == 'promise'
-    spec=build_tools_spec()[1 if promise else 0]['function']['parameters']
+    spec=build_tools_spec(strict=True)[1 if promise else 0]['function']['parameters']
     error=validate_tool_input(args,spec)
     if error:
         return _invalid_writer(error['field'],error['error'],error['hint'])
