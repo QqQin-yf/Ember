@@ -236,11 +236,17 @@ class Extraction:
                              (part['part_id'],gid,i,encoded(part)))
             conn.execute('UPDATE groups SET payload=?,material_hash=? WHERE id=?',(encoded(payload),digest,gid))
 
-    def batch(self):
+    def batch(self,scope=None):
         config=SliceEmbeddingConfig.load();limit=lifecycle_config()['extraction']['batch_chars']
         self.recover_outputs()
         current={s['slice_id']:s for s in self.candidates(config)}
         valid=self.reconcile(current)
+        if scope:
+            from .extraction_pages import sources
+            allowed={row['slice_id'] for row in sources(self.service,scope['source_session_id'],
+                {str(value) for value in scope['assistant_message_ids']})}
+            valid=[dict(row,remaining_sources=[s for s in row['remaining_sources'] if s['slice_id'] in allowed]) for row in valid]
+            valid=[row for row in valid if row['remaining_sources']]
         for row in valid:
             self.materialize(row,config,limit-2)
         units=[]
@@ -311,7 +317,11 @@ class Extraction:
 def tool_specs():
     return [{'type':'function','function':{'name':'get_memory_extraction_batch',
         'description':'分批读取最早的提取材料：归组说明、原文切片、相似认知/规律。写进记忆的来源切片自动结掉，只有决定不写才调用 finish_memory_extraction_group；剩余切片会继续返回，可随时停。超限单组分段，material_fragment 按 offset 拼接；完整来源可按切片下钻。',
-        'parameters':{'type':'object','properties':{},'additionalProperties':False}}},
+        'parameters':{'type':'object','properties':{
+            'source_session_id':{'type':'string'},
+            'assistant_message_ids':{'type':'array','maxItems':10000,'uniqueItems':True,'items':{'type':'integer','minimum':1}}},
+            'dependentRequired':{'source_session_id':['assistant_message_ids'],'assistant_message_ids':['source_session_id']},
+            'additionalProperties':False}}},
         {'type':'function','function':{'name':'finish_memory_extraction_group','description':'只用于决定不写的提取材料。group_id 单独使用表示整组不写；可用 source_slice_ids 指定几段切片，或 part_id 跳过已交付的超限分段。写入、改写或合并记忆会自动结账，无需再调用。已完成或已撤出的组返回 ok。',
         'parameters':{'type':'object','additionalProperties':False,'required':['group_id'],
             'properties':{'group_id':{'type':'string'},'part_id':{'type':'string'},
@@ -325,7 +335,7 @@ TOOL_NAMES={'get_memory_extraction_batch','finish_memory_extraction_group'}
 def dispatch(service,name,args):
     try:
         extraction=Extraction(service)
-        return extraction.batch() if name=='get_memory_extraction_batch' else extraction.finish(args)
+        return extraction.batch(args or None) if name=='get_memory_extraction_batch' else extraction.finish(args)
     except (ValueError,KeyError,TypeError,SliceEmbeddingError) as exc:
         return {'status':'failed','code':'invalid_extraction_material','error':str(exc)}
 

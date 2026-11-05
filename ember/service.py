@@ -918,6 +918,14 @@ class EmberService:
                 return self._generation_error("stale_generation", "Generation ended, was superseded or lost its live context")
             self.generations.begin_call(rid, cid, request_hash, name)
             try:
+                if 'extraction_scope' in ctx:
+                    from .extraction_pages import scoped_arguments
+                    try:
+                        arguments = scoped_arguments(self, ctx, name, arguments)
+                    except (ValueError, KeyError, TypeError) as exc:
+                        result = {'status':'failed','code':'extraction_scope_violation','error':str(exc)}
+                        self.generations.complete_call(rid, cid, result)
+                        return result
                 result = self._dispatch_memory_tool(name, arguments,
                     context=ctx, recall_id=rid, tool_call_id=cid)
                 # A read transcript stays volatile, never in the durable receipt.
