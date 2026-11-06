@@ -194,7 +194,7 @@ POST /ember/briefing/refresh 等待时间线上尚未完成的压缩和抽点，
 
 ## 6. Sleep 边界
 
-Sleep 只做梦和写信，由 App 管理。信的正文和版本都归 App，Ember 不参与，也不关联 Event 或维护证据账本。提取与约定处理使用普通 MCP。
+Sleep 的模型循环由 App 管理，包括原文提取队列整理、写信和梦。信的正文和版本都归 App，Ember 不参与，也不关联 Event 或维护证据账本。提取与约定处理使用普通 MCP。
 
 以下入口返回 HTTP 410、`status=retired`，不产生写入：
 
@@ -302,3 +302,16 @@ POST /ember/briefing/refresh 收 session_id、keep_from_message_id，可附精�
 协议版本：`ember-runs/1`。
 
 POST /ember/runs/start、POST /ember/runs/finish、GET /ember/runs/{run_id} 提供主动 run 的生命周期接口。当前只开放 read_memory_source，不支持写入或有副作用的 search_memory。字段、幂等、终态、重启和 MCP 绑定见 [主动 run 协议](PROTOCOL_DETAILS.md#runs)。
+
+
+## 翻页原文状态与整理会话
+
+以下接口沿用实例头与 Bearer 鉴权，来源会话使用原文提供方的 session_id。
+
+`POST /ember/extraction/status` 接收 `session_id`，可提供 `message_ids` 或 `assistant_message_ids`，两者互斥。身份数组最多 10000 项。message_ids 可以包含翻页边界前的 user，其对应回复在边界之后时仍匹配同一原文切片。响应包含 items（slice_id、assistant_message_id、state）、pending_count、unknown_message_ids 和 complete。state 为 pending 或 settled。已被 Event 覆盖、已写入或明确跳过的当前来源版本，以及按既有信息量规则排除的来源，视为 settled。未知身份不会计为已处理。该接口持久请求 source sync，不调用分组或写记忆模型。
+
+`POST /ember/extraction/start` 接收以 extraction- 开头的 maintenance_id、session_id，以及可选 assistant_message_ids。省略身份数组时选取该来源会话当前同步到的原文。先补拉并整理来源，再建立有来源范围的维护 generation。响应包含 complete、pending_count 和 allowed_tools。不会登记真人输入、召回暴露或可见回复。普通 generation 正在进行时返回 generation_busy。重复身份可以重放，内容冲突返回 id_conflict。新尝试仅可替代没有不确定工具调用的旧提取尝试。
+
+维护模型调用普通 `/mcp/`，用维护身份作为 X-Ember-Recall-Id，并提供独立 X-Ember-Tool-Call-Id。只开放原文批次、Event／约定／知识写入及必要读取工具。写入必须携带范围内的 source_slice_ids，整组跳过会限制在当前范围，范围之外的材料保留。get_memory_extraction_batch 可选 source_session_id 与 assistant_message_ids，维护会话会自动施加自身范围。
+
+`POST /ember/extraction/finish` 接收 maintenance_id，关闭该次整理并返回其快照范围的实际状态。complete=false 表示仍有未处理来源，可以新建尝试继续。工具结果未知时保留不确定状态并返回 tool_outcome_unknown，不能盲目重发写入。已完成的 finish 可重放。

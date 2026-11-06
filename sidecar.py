@@ -472,6 +472,27 @@ async def _briefing_get(request: Request) -> JSONResponse:
     return JSONResponse(svc.sidecar_briefing_get())
 
 
+async def _extraction_page(request: Request) -> JSONResponse:
+    svc = _service_or_404(request)
+    if isinstance(svc, JSONResponse):
+        return svc
+    from ember import extraction_pages
+    operation = request.path_params['operation']
+    if operation not in ('status', 'start', 'finish'):
+        return JSONResponse({'code':'unknown_extraction_operation'}, status_code=404)
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise ValueError('Expected JSON object')
+        if operation == 'status':
+            from ember.source_sync import request_sync
+            await asyncio.to_thread(request_sync, svc)
+        result = await asyncio.to_thread(getattr(extraction_pages, operation), svc, body)
+        return JSONResponse(result)
+    except (ValueError, KeyError, TypeError) as exc:
+        return JSONResponse({'status':'failed','code':'invalid_arguments','error':str(exc)}, status_code=400)
+
+
 async def _briefing_fallback(request: Request) -> JSONResponse:
     """只读快照与新增记忆，不等待 refresh。"""
     svc = _service_or_404(request)
@@ -559,6 +580,7 @@ app = BearerAuthMiddleware(Starlette(
               methods=["POST"]),
         Route("/ember/briefing", _briefing_get, methods=["GET"]),
         Route("/ember/briefing/fallback", _briefing_fallback, methods=["POST"]),
+        Route("/ember/extraction/{operation}", _extraction_page, methods=["POST"]),
         Route("/ember/memory/pin", _pin_memory, methods=["POST"]),
         Route("/ember/memory/unpin", _unpin_memory, methods=["POST"]),
         Mount("/mcp", app=_handle_mcp),
