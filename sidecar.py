@@ -365,7 +365,8 @@ async def _hook_turn_start(request: Request) -> JSONResponse:
         recall_id=body.get("recall_id"), occurred_at=body.get("occurred_at"),
         activity_revision=body.get("activity_revision"), window_revision=body.get("window_revision"),
         context_message_ids=body.get("context_message_ids"),
-        revoked_message_ids=body.get("revoked_message_ids")))
+        revoked_message_ids=body.get("revoked_message_ids"),
+        visible_event_ids=body.get("visible_event_ids")))
 
 
 async def _hook_turn_end(request: Request) -> JSONResponse:

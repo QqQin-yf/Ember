@@ -50,6 +50,7 @@ write_event / write_promise 需要绑定进行中的生成。
 | user_message_id | int/string | 绑定生成模式必填 | 真实全局消息 seq，不接受消息 UUID |
 | context_start_id | int/string | — | 当前窗口起点 seq：来源全在窗口内的记忆不再召回 |
 | context_message_ids | array[int/string] | — | 当前分支实际保留的精确消息 ID，可表达分离区间 |
+| visible_event_ids | array[string] | — | 本轮实际带入的 briefing 返回的同名字段。已呈现的 Event 跳过每轮召回，空数组表示已知没有此类 Event，省略则兼容旧调用方。重试原样携带。 |
 | recall_id | string | — | 稳定普通生成身份；启用时 session_id 也必填，重试原样携带 |
 | occurred_at | string | — | 原始发生时间，需带时区；绑定生成模式固定保存 |
 | activity_revision | int | — | 绑定生成模式生成开始时的活动版本，非负，重试保持原值 |

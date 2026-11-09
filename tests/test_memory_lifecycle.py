@@ -65,6 +65,23 @@ class MemoryLifecycleTests(unittest.TestCase):
         self.store.save_event_sources(eid,self.sources)
         return event
 
+    def test_recall_hold_preserves_current_slice_trace_and_drops_visible_event(self):
+        from ember.models import RecallRoute
+        self.event('A','2026-01-01T00:00:00Z','A memorable thing')
+        self.service.store.write_route(RecallRoute('route-A','A','lexical','lexical','canary'))
+        session = SimpleNamespace(session_id='chat')
+        with patch('ember.hybrid_recall.automatic_slice_recall', side_effect=[
+                {'slice_recall': {'trace_id': f'trace-{i}'}} for i in (1, 2, 3)]), \
+             patch('ember.slice_presentation.append_slice_presentations', side_effect=lambda s,r,q,**kw:r):
+            first = self.service.run_recall_pipeline(session, 1, 'canary')
+            held = self.service.run_recall_pipeline(session, 2, 'unrelated')
+            blocked = self.service.run_recall_pipeline(session, 3, 'canary', visible_event_ids=['A'])
+        self.assertEqual(first['presentations'][0]['event_id'], 'A')
+        self.assertEqual(held['presentations'][0]['event_id'], 'A')
+        self.assertEqual(held['slice_recall']['trace_id'], 'trace-2')
+        self.assertEqual(blocked['presentations'], [])
+        self.assertEqual(blocked['slice_recall']['trace_id'], 'trace-3')
+
     def test_temporal_resolution_rejects_reversed_order_and_preserves_original(self):
         self.event('A','2026-01-01T00:00:00Z','Liked coffee')
         self.event('B','2026-02-01T00:00:00Z','No longer likes coffee')

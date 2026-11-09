@@ -110,7 +110,7 @@ def sources_in_context(sources, session, start, message_ids=None):
         min(int(s.get('user_message_id') or s['assistant_message_id']),int(s['assistant_message_id']))>=start for s in sources))
 
 
-def filter_recall(service, result, session, start, message_ids=None):
+def filter_recall(service, result, session, start, message_ids=None, *, include_ineligible=True):
     """Filter before rendering, including disjoint-source Events and Entity units."""
     from .knowledge import KnowledgeStore
     life=Lifecycle(service.store.root,service.source_instance)
@@ -132,7 +132,7 @@ def filter_recall(service, result, session, start, message_ids=None):
             if refs:
                 ref=refs[0]
                 sources=[dict(s,session_id=ref.get('source_session_id')) for s in ref.get('turn_messages',[])]
-        if not eligible(ev.event_id) or sources_in_context(sources,session.session_id,start,message_ids):
+        if (include_ineligible and not eligible(ev.event_id)) or sources_in_context(sources,session.session_id,start,message_ids):
             events.append(ev.event_id)
     # Legacy route accepts a state lookup; callers install a scoped overlay.
     return set(events)

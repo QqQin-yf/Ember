@@ -8,7 +8,7 @@ from .slice_recall import SliceRecall
 from .slice_reranker import RerankerConfig, SliceReranker, RerankerError
 
 
-def append_slice_presentations(service,result,query):
+def append_slice_presentations(service,result,query,*,blocked_events=()):
     recall=SliceRecall(service.store.root,service.source_instance)
     metadata=dict(result['slice_recall'])
     trace=recall.trace(metadata.get('trace_id')) if metadata.get('trace_id') else None
@@ -37,13 +37,14 @@ def append_slice_presentations(service,result,query):
                 source_budget_chars=config.source_budget_chars,stale_sources=stale,
                 rankings=[{'slice_id':candidates[r['index']]['slice_id'],'score':r['relevance_score']} for r in ranks])
             presented={r['event_id'] for r in result.get('recall_refs',{}).get('events',[])}
+            from .memory_lifecycle import Lifecycle
+            eligible = Lifecycle(service.store.root,service.source_instance).eligibility_checker()
             blocks=[];used=0
             for rank in ranks:
                 if rank['relevance_score']<config.score_floor('text'):
                     continue
                 source=sources[rank['index']];candidate=candidates[rank['index']]
-                from .memory_lifecycle import Lifecycle
-                if not Lifecycle(service.store.root,service.source_instance).eligible(source['slice_id']):
+                if not eligible(source['slice_id']):
                     continue
                 try:
                     knowledge.read_sources([candidate])
@@ -54,7 +55,8 @@ def append_slice_presentations(service,result,query):
                 parents=candidate.get('parent_event_ids')
                 if parents is not None:
                     for eid in parents:
-                        if eid in presented:
+                        if (eid in presented or eid in blocked_events or service.pin_store.is_pinned(eid)
+                                or not service.sleep_state.recall_allowed(eid)):
                             continue
                         from .organization import Organization
                         replacement=Organization(service).replacement(eid)
@@ -64,6 +66,8 @@ def append_slice_presentations(service,result,query):
                             blocks.append(f"[{replacement['id']}] {replacement['text']}")
                             item={'presentation':'theme','memory_id':replacement['id'],'via_slice_id':source['slice_id']}
                             result.setdefault('presentations',[]).append(item);selection['selected'].append(item)
+                            continue
+                        if not eligible(eid):
                             continue
                         from .lifecycle_config import lifecycle_config
                         if len(presented)>=lifecycle_config()['recall']['event_limit']:
