@@ -108,6 +108,36 @@ class OrganizationTests(unittest.TestCase):
             self.assertFalse(self.org.process_one())
         model.assert_not_called()
 
+    def test_linked_backfill_uses_entity_history_without_identity_matching(self):
+        self.service.entity_store.upsert(Entity('project', 'Deliz', entity_type='project'))
+        later = self.event('later', kind='project')
+        later.event_time = '2026-02-01T00:00:00Z'
+        later.entity_refs = ['project']
+        self.service.store.write_event(later)
+        earlier = self.event('earlier', kind='project')
+        earlier.entity_refs = ['project']
+        earlier.entity_decision = {'state': 'linked', 'ids': ['project']}
+        self.service.store.write_event(earlier)
+        unrelated = self.event('unrelated', kind='project')
+        unrelated.entity_decision = {'state': 'none'}
+        self.service.store.write_event(unrelated)
+
+        def ask(purpose, instruction, material, schema):
+            if purpose == 'relationship_links':
+                self.assertEqual([row['event_id'] for row in material['events']], ['earlier', 'later'])
+                return {'relations': [{'source': 'earlier', 'target': 'later', 'type': 'continues'}]}
+            self.assertIn('superseded', schema['properties'])
+            return {'superseded': []}
+
+        with patch('ember.organization.ask', side_effect=ask), \
+             patch('ember.organization.prose', return_value='Deliz current state') as summary:
+            self.org.process_one()
+            self.org.process_one()
+        self.assertEqual(summary.call_count, 1)
+        self.assertEqual([(r.src_event, r.dst_event, r.type) for r in self.service.relation_store.all()],
+                         [('earlier', 'later', 'continues')])
+        self.assertEqual(unrelated.entity_refs, [])
+
     def test_closed_low_promises_get_separate_objective_theme(self):
         for eid in ('a','b'):
             event=self.event(eid,kind='promise');event.status='done'

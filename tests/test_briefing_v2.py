@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from ember.knowledge import KnowledgeStore
+from ember.entity import Entity
 from ember.lifecycle_config import lifecycle_config
 from ember.llm import MockLLMClient
 from ember.memory_lifecycle import Lifecycle
@@ -43,6 +44,17 @@ class FiveLayerBriefingTests(unittest.TestCase):
 
     def refresh(self,**kwargs):
         return self.service.sidecar_briefing_refresh(dict(session_id='current',**kwargs))
+
+    def test_entity_directory_is_a_separate_footer(self):
+        self.service.entity_store.upsert(Entity('project', 'Deliz', summary='聊天前端。详细历史。'))
+        event = self.event('current')
+        event.entity_refs = ['project']
+        self.service.store.write_event(event)
+        report = self.refresh()
+        self.assertIn('CORE-current', report['text'])
+        self.assertTrue(report['text'].endswith(report['entity_directory']))
+        self.assertIn('Deliz · 聊天前端 · project', report['entity_directory'])
+        self.assertNotIn('详细历史', report['entity_directory'])
 
     def test_five_layers_and_score_promise_exclusions(self):
         self.event('relationship','relationship')

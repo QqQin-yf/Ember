@@ -3,6 +3,9 @@ from unittest.mock import patch
 from tests import test_extraction as fixtures
 from ember import extraction_pages as pages
 from ember.extraction import Extraction
+from ember.entity import Entity
+from ember.memory_lifecycle import Lifecycle
+from ember.source_events import events_for_sources
 
 
 class ExtractionPageTests(unittest.TestCase):
@@ -64,10 +67,21 @@ class ExtractionPageTests(unittest.TestCase):
                 'kind': 'daily', 'significance': 8, 'focus': first['messages'][0]['content']},
                 'source_slice_ids': [first['slice_id']],
                 'recall_routes': [{'cue_type': 'lexical', 'cue': 'decision'}]}
+        self.service.entity_store.upsert(Entity('project', 'Deliz'))
+        with Lifecycle(self.service.store.root).db() as conn:
+            conn.execute("INSERT INTO aliases VALUES ('old-project','project')")
+        args['entity'] = {'state': 'linked', 'ids': ['missing']}
+        self.assertEqual(self.call(body, 'write_event', args, 'invalid')['status'], 'failed')
+        self.assertEqual(self.service.store.all_events(), [])
+        args['entity']['ids'] = ['old-project']
         result = self.call(body, 'write_event', args, 'write')
         self.assertEqual(result['status'], 'created', result)
         self.assertEqual(self.call(body, 'write_event', args, 'write'), result)
         self.assertEqual(len(self.service.store.all_events()), 1)
+        self.assertEqual(self.service.store.get_event(result['event_id']).entity_refs, ['project'])
+        ids = [int(first[key]) for key in ('user_message_id', 'assistant_message_id')]
+        self.assertEqual(events_for_sources(self.service, {'session_id': 'old', 'message_ids': ids})['events'],
+                         [{'event_id': result['event_id'], 'title': 'page decision'}])
         self.assertEqual(session.messages, before)
         self.assertTrue(pages.finish(self.service, body)['complete'])
         self.assertTrue(pages.finish(self.service, body)['complete'])

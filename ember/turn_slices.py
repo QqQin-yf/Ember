@@ -45,6 +45,10 @@ class TurnSliceStore:
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY (slice_id, space)
             )""")
+            db.execute("""CREATE TABLE IF NOT EXISTS revoked_source_messages (
+                instance TEXT NOT NULL, session_id TEXT NOT NULL, message_id TEXT NOT NULL,
+                PRIMARY KEY(instance,session_id,message_id)
+            )""")
             with db:
                 yield db
         finally:
@@ -92,6 +96,11 @@ class TurnSliceStore:
         content_hash = hashlib.sha256(body.encode()).hexdigest()
         now = datetime.now(timezone.utc).isoformat()
         with self._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if db.execute("""SELECT 1 FROM revoked_source_messages
+                    WHERE instance=? AND session_id=? AND message_id IN (?,?)""",
+                    (instance, session_id, key[2], key[3])).fetchone():
+                raise source_client.SourceUnavailable('Source turn was revoked', 'source_revoked')
             db.execute("""INSERT INTO turn_slices VALUES (?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(slice_id) DO UPDATE SET
                     user_is_system=excluded.user_is_system,
@@ -103,6 +112,8 @@ class TurnSliceStore:
                 (slice_id, instance, session_id, key[2], key[3], int(omitted),
                  body, content_hash, now))
         saved = self.get(slice_id)
+        if saved is None:
+            raise source_client.SourceUnavailable('Source turn was revoked', 'source_revoked')
         try:
             from .event_slices import EventSliceLinks, sync_from_files
             sync_from_files(self.path.parent, instance)
@@ -110,6 +121,23 @@ class TurnSliceStore:
         except (OSError, sqlite3.Error, ValueError):
             pass  # Derived memberships can be rebuilt; keep the durable original.
         return saved
+
+    def revoke(self, instance: str, session_id: str, message_ids) -> None:
+        """Keep source identities as tombstones so replay cannot restore an old slice."""
+        rows = [(instance, session_id, str(message_id)) for message_id in set(message_ids)]
+        if not rows:
+            return
+        with self._db() as db:
+            changes = db.total_changes
+            db.executemany('INSERT OR IGNORE INTO revoked_source_messages VALUES (?,?,?)', rows)
+            if db.total_changes == changes:
+                return
+            matching = """SELECT s.slice_id FROM turn_slices s WHERE s.instance=? AND s.session_id=?
+                AND EXISTS (SELECT 1 FROM revoked_source_messages r
+                    WHERE r.instance=s.instance AND r.session_id=s.session_id
+                    AND r.message_id IN (s.user_message_id,s.assistant_message_id))"""
+            db.execute(f'DELETE FROM slice_embeddings WHERE slice_id IN ({matching})', (instance, session_id))
+            db.execute(f'DELETE FROM turn_slices WHERE slice_id IN ({matching})', (instance, session_id))
 
     def get(self, slice_id: str) -> dict | None:
         if not self.path.exists():
@@ -141,6 +169,7 @@ class TurnSliceStore:
                        error_code: str | None = None) -> bool:
         """Commit only if the original slice has not changed during the request."""
         with self._db() as db:
+            db.execute('BEGIN IMMEDIATE')
             current = db.execute("SELECT content_hash FROM turn_slices WHERE slice_id=?",
                                  (source["slice_id"],)).fetchone()
             if current is None or current[0] != source["content_hash"]:

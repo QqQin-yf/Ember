@@ -94,6 +94,8 @@ def prepare_slices(service,config):
         ids=[r[0] for r in db.execute('SELECT slice_id FROM turn_slices WHERE instance=?',(service.source_instance,))]
     for sid in ids:
         source=store.get(sid)
+        if source is None:
+            continue
         keep=sid in owned or informative(source)
         if keep:
             ready=store.embedding(sid,config.space)

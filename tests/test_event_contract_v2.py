@@ -7,6 +7,7 @@ from unittest.mock import patch
 from ember.llm import MockLLMClient
 from ember.service import EmberService
 from ember.store import EmberStore
+from ember.source_events import events_for_sources
 from ember.writer import build_tools_spec, validate_writer_arguments
 from tests.test_sidecar import write_args
 
@@ -44,6 +45,14 @@ class EventContractTests(unittest.TestCase):
         args=write_args();args['event']['kind']='promise'
         self.assertEqual(self.call('write_event',args)['status'],'failed')
         self.assertFalse(self.service.store.all_events())
+
+    def test_source_lookup_finds_quote_written_event_by_session_and_message(self):
+        result = self.call('write_event', write_args())
+        self.assertEqual(result['status'], 'created', result)
+        expected = {'event_id': result['event_id'], 'title': result['summary']}
+        self.assertEqual(events_for_sources(self.service, {'session_id': 'chat', 'message_ids': [71, '71']}),
+                         {'status': 'ok', 'events': [expected]})
+        self.assertEqual(events_for_sources(self.service, {'session_id': 'other', 'message_ids': [71]})['events'], [])
 
     def test_focus_outside_evidence_rejected_before_capture(self):
         args=write_args();args['event']['focus']='999'

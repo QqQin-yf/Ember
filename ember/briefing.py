@@ -48,6 +48,40 @@ def get(service):
         return {'status':'failed','code':'briefing_snapshot_unreadable'}
 
 
+def entity_directory(service, cfg):
+    from .promises import instant
+    life = Lifecycle(service.store.root)
+    eligible = life.eligibility_checker()
+    activity = {}
+    for event in service.store.all_events():
+        try:
+            timestamp = instant(event.ingest_time)
+        except (TypeError, ValueError, AttributeError):
+            continue
+        for entity_id in event.entity_refs:
+            canonical = life.canonical(entity_id)
+            if canonical not in activity or timestamp > activity[canonical]:
+                activity[canonical] = timestamp
+    cards = [card for card in service.entity_store.all()
+             if card.status == 'open' and eligible(card.entity_id)]
+    cards.sort(key=lambda card: (
+        -activity[card.entity_id].timestamp() if card.entity_id in activity else float('inf'),
+        card.entity_id,
+    ))
+    lines = ['【Entity 目录】写 Event 时可引用已有 ID；需要细节可查 read_entity_events。']
+    used = len(lines[0])
+    for card in cards:
+        summary = ' '.join(card.summary.removeprefix('根据相关事件客观整理：').split())
+        first = summary.partition('。')[0]
+        limit = cfg.get('entity_directory_line_chars', 100)
+        description = first if len(first) <= limit else first[:limit - 1] + '…'
+        line = f'• {" ".join(card.name.split())} · {description or "暂无概述"} · {card.entity_id}'
+        if used + len(line) + 1 <= cfg.get('entity_directory_chars', 1000):
+            lines.append(line)
+            used += len(line) + 1
+    return '\n'.join(lines) if len(lines) > 1 else ''
+
+
 def refresh(service,args):
     args=args or {}
     sid=args.get('session_id')
@@ -139,6 +173,8 @@ def _refresh(service,args,sid,mid,ids):
         dropped['core' if row['core'] else 'summary']+=1
     text='\n'.join(part for part in [timeline['text'],*pin_blocks,
                      '\n'.join(row['line'] for row in chosen),knowledge['text'],*due_blocks,pending_line] if part)
+    directory = entity_directory(service, cfg)
+    text = '\n'.join(part for part in (text, directory) if part)
     with Timeline(service).db() as conn:
         relationship_ids=[r[0] for r in conn.execute('SELECT event_id FROM timeline WHERE published_mode IS NOT NULL')]
     included=list(dict.fromkeys(relationship_ids+[e.event_id for e in pinned]+[row['event'].event_id for row in chosen]+[e.event_id for e in due]))
@@ -146,6 +182,7 @@ def _refresh(service,args,sid,mid,ids):
         service.recall_ledger.record(sid,0,'briefing',included)
     report={'status':'ok','text':text,'chars':len(text),'session_id':sid,'revision':revision,
             'refreshed_at':now.isoformat(),'source_sync':source_sync,'timeline':timeline['health'],'knowledge':knowledge,
+            'entity_directory':directory,
             'stats':{'relationship':len(relationship_ids),'pinned':len(pinned),'new72':len(recent),'kept_recent':len(chosen),
                      'due_promises':len(due),'pending_promises':pending,'dropped':dropped}}
     path=service._briefing_path()

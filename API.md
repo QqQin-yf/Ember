@@ -132,6 +132,8 @@ write_event 与 write_promise 并排提供，来源二选一：顶层 quote_span
 
 两者顶层 event 都要求 summary、core、significance、kind、focus；significance 为 1–10 整数，focus 为来源区间逐字摘录的一句原话。write_event.kind 为 daily / relationship / project；write_promise.kind 固定为 promise，due 为带时区 ISO 日期时间或 null，初始 status=open、log=[] 由 Ember 生成。focus 与 quote_spans 使用相同匹配方式定位消息，内部只存解析后的消息 ID 供截断使用；读取不展示 focus。找不到或容错匹配歧义返回 event.focus 和重摘提示。
 
+日常、项目和约定可以附顶层 `entity` 判断。用 `state=linked` 和 `ids` 关联已有卡，或用 `state=proposed` 和 `name` 提议新对象（可选 `type`）。有对象但身份待核对时用 `state=unresolved`，可附 `name`。明确无需归属时用 `state=none`。省略时沿用后台自动判断。已有 ID 会在写入前校验并解析到合并后的卡。后台按事件发生时间在同一 Entity 内判断延续或回应。
+
 情况、理解、细节和感受写入 core。原文读取失败时 briefing 使用 core。
 
 revise_memory_event 仅在原文完整保留于当前上下文、尚未截断的冷静期内可改 summary / core / significance / 非 promise 的 kind 及 recall_cues；一旦截断就锁住，后来再下钻或重新带入不解锁。来源绑定不可修改。约定状态与改期使用 process_promise。

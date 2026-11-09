@@ -19,7 +19,7 @@ def build_tools_spec(strict=False):
         "properties":{
             "summary":{"type":"string","minLength":1,"description":"一句话客观、简短地说清这段经历。"},
             "core":{"type":"string","minLength":1,"description":"第一人称的连贯叙述，写给自己的诚实版本：情况、细节、理解和感受都写在这里。"},
-            "significance":{"type":"integer","minimum":1,"maximum":10,"description":"重要度整数 1-10。10=重大项目转折或确定永远要记住；8-9=有实质影响的进展、发现、决定；5-7=有内容的背景；1-4=琐碎。"},
+            "significance":{"type":"integer","minimum":1,"maximum":10,"description":"事件的重要度，填 1 到 10 的整数。任何分数都可以写入。"},
             "kind":{"enum":["daily","relationship","project"],"description":"事件主类：日常、关于两人关系本身的互动、项目。"},
             "focus":{"type":"string","minLength":1,"description":"从来源区间逐字摘一句最重要的原话，写法同 start_quote；系统定位对应消息供 pin 截断，不要填写消息编号。"}}}
     routes={"type":"array","minItems":1,"items":{"type":"object","additionalProperties":False,
@@ -33,6 +33,17 @@ def build_tools_spec(strict=False):
     props={"event":event,"recall_routes":routes,"quote_spans":spans,
         "supersedes":{"type":"array","minItems":1,"uniqueItems":True,"items":{"type":"string","minLength":1},"description":"可选：这条新经历取代的旧 Event ID；旧条退出自动召回但保留可查。关系事件不接受此参数，也不能取代关系事件。"},
         "source_slice_ids":{"type":"array","minItems":1,"uniqueItems":True,"items":{"type":"string","minLength":1},"description":"从提取材料写入时提供切片 ID；与 quote_spans 二选一。写入成功后这些来源切片在提取队列里自动结掉，无需再报 written。"}}
+    props["entity"] = {
+        "type": "object", "additionalProperties": False, "required": ["state"],
+        "description": "非关系事件的对象判断。参考简报中的 Entity 目录，确认同一对象就填写已有 ID。",
+        "properties": {
+            "state": {"enum": ["linked", "proposed", "unresolved", "none"],
+                      "description": "linked 已认出；proposed 提议新对象；unresolved 有对象但认不出；none 无需关联。"},
+            "ids": {"type": "array", "minItems": 1, "uniqueItems": True, "items": {"type": "string", "minLength": 1}},
+            "name": {"type": "string", "minLength": 1, "description": "原文支持的对象名称或可用于辨认的称呼。"},
+            "type": {"enum": ["project", "person", "animal", "place", "object"]},
+        },
+    }
     schema={"type":"object","additionalProperties":False,"required":["event","recall_routes"],"properties":props,
         "allOf":[{"if":{"properties":{"event":{"properties":{"kind":{"const":"relationship"}}}}},"then":{"not":{"required":["supersedes"]}}}],
         "oneOf":[{"required":["quote_spans"],"not":{"required":["source_slice_ids"]}},
@@ -45,7 +56,7 @@ def build_tools_spec(strict=False):
     pe=promise['properties']['event']; pe['properties']['kind']={"const":"promise"}
     pe['properties']['due']={"type":["string","null"],"description":"具体 ISO 日期时间；无明确时间则 null。"}
     # Status and log are maintained by Ember, never supplied on initial write.
-    return [spec(TOOL_NAME,"答应了、说好了、约好了的事，用 write_promise。记录日常、关系或项目经历；系统生成 ID 和时间。来源二选一。旧条过了冷静期时写新条并用 supersedes 取代；关系只接续不取代。成功后不要重复写。",schema),
+    return [spec(TOOL_NAME,"答应了、说好了、约好了的事，用 write_promise。记录日常、关系或项目经历。先判断发生了哪些独立事件，再分别填重要度。系统生成 ID 和时间。来源二选一。旧条过了冷静期时写新条并用 supersedes 取代；关系只接续不取代。成功后不要重复写。",schema),
             spec(PROMISE_TOOL_NAME,"日常、关系、项目，用 write_event。记录单方面承诺或双方约定；kind 固定为 promise，状态初始 open，log 由处理工具追加。取代旧记忆可提供 supersedes；旧条保留可查。",promise),
             spec(READ_SOURCE_TOOL_NAME,"读取记忆对应的原文，核对具体说法或细节。",{"type":"object","additionalProperties":False,"required":["event_id"],"properties":{"event_id":{"type":"string"}}})]
 
@@ -93,6 +104,20 @@ def validate_writer_arguments(args, *, promise=None):
     if error:
         return _invalid_writer(error['field'],error['error'],error['hint'])
     event=args['event']
+    if 'entity' in args:
+        entity = args['entity']
+        state = entity['state']
+        allowed = {
+            'linked': {'state', 'ids'},
+            'proposed': {'state', 'name', 'type'},
+            'unresolved': {'state', 'name'},
+            'none': {'state'},
+        }[state]
+        if (event['kind'] == 'relationship' or set(entity) - allowed
+                or (state == 'linked' and 'ids' not in entity)
+                or (state == 'proposed' and not entity.get('name', '').strip())
+                or ('name' in entity and not entity['name'].strip())):
+            return _invalid_writer('entity', 'Entity 判断与事件类型或所填字段不匹配。')
     for key in ('summary','core','focus'):
         if not event[key].strip():
             return _invalid_writer('event.'+key, key+' 不能为空')

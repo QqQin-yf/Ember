@@ -187,8 +187,13 @@ def fallback(service, args):
         reason = 'local_state_unavailable'
 
     text = snapshot['text']
+    directory = snapshot.get('entity_directory', '')
+    if not isinstance(directory, str) or not directory or not text.endswith(directory):
+        directory = ''
+    if directory:
+        text = text.removesuffix(directory).removesuffix('\n')
     if additions:
-        expanded = '\n'.join([text, NOTICE, *(line for _, line in additions)])
+        expanded = '\n'.join(part for part in [text, NOTICE, *(line for _, line in additions)] if part)
         if reason is None and len(expanded) <= cfg['total_chars']:
             text = expanded
             metadata['expanded_count'] = len(additions)
@@ -199,5 +204,6 @@ def fallback(service, args):
             event_ids = '、'.join(event.event_id for event, _ in additions)
             text += (f'\n{NOTICE}\n有 {len(additions)} 条新记忆没有展开；Event ID：{event_ids}。'
                      '请用 search_memory / read_memory_source 查看。')
+    text = '\n'.join(part for part in (text, directory) if part)
     return dict(metadata, status='ok', text=text, chars=len(text), session_id=sid,
                 revision=snapshot['revision'], refreshed_at=snapshot['refreshed_at'])

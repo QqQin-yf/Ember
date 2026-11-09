@@ -210,7 +210,7 @@ class EmberService:
         """
         from .event_mutation import replacement_targets, apply_replacement
         targets=replacement_targets(self,validated)
-        event = self._build_event(session, turn, validated["event"])
+        event = self._build_event(session, turn, validated["event"], validated.get("entity"))
 
         # 出处句对定位与拒绝判定必须先于落盘：双盲句对（提供了 quote_spans
         # 却一对都定位不上）在写库前拒绝，不留「已入库但回执 failed」的
@@ -469,9 +469,20 @@ class EmberService:
         return None
 
     def _build_event(self, session: Session, turn: int,
-                     w_event: dict[str, Any]) -> Event:
+                     w_event: dict[str, Any], entity_decision=None) -> Event:
         """系统字段由 Proxy/Store 生成，LLM 提供的字段只进 content。"""
         event_id = f"EVT-{len(self.store.all_events()) + 1:03d}-{uuid.uuid4().hex[:6]}"
+        refs = []
+        if entity_decision and entity_decision['state'] == 'linked':
+            from .memory_lifecycle import Lifecycle
+            life = Lifecycle(self.store.root)
+            for entity_id in entity_decision['ids']:
+                canonical = life.canonical(entity_id)
+                if not life.eligible(canonical) or not any(
+                        card.entity_id == canonical for card in self.entity_store.all()):
+                    raise ValueError(f'Unknown or unavailable Entity ID: {entity_id}')
+                if canonical not in refs:
+                    refs.append(canonical)
         return Event(
             event_id=event_id,
             version_id=f"{event_id}-v1",
@@ -485,6 +496,8 @@ class EmberService:
             significance=w_event["significance"],
             kind=w_event["kind"], focus=w_event["focus"],
             due=w_event.get("due"),
+            entity_refs=refs,
+            entity_decision=entity_decision,
             provenance_refs=["memory-writer", f"chat:{session.session_id}"],
         )
 
@@ -629,10 +642,19 @@ class EmberService:
                         occurred_at: str | None = None,
                         activity_revision: int | None = None,
                         window_revision: int | None = None,
-                        context_message_ids: list[int] | None = None) -> dict[str, Any]:
+                        context_message_ids: list[int] | None = None,
+                        revoked_message_ids: list[int] | None = None) -> dict[str, Any]:
         """Persist the identity before work; commit response and effects together."""
         if context_message_ids is not None and (not isinstance(context_message_ids,list) or len(context_message_ids)>50000 or any(type(i) is not int or i<1 for i in context_message_ids)):
             return self._generation_error("invalid_arguments", "Invalid context message IDs")
+        if revoked_message_ids is not None and (
+                not isinstance(revoked_message_ids, list)
+                or any(type(i) is not int or i < 1 for i in revoked_message_ids)
+                or not identity(session_id)):
+            return self._generation_error("invalid_arguments", "Invalid revoked message IDs")
+        if revoked_message_ids:
+            from .turn_slices import TurnSliceStore
+            TurnSliceStore(self.store.root).revoke(self.source_instance, session_id, revoked_message_ids)
         if recall_id is None:
             with self._generation_lock:
                 try:

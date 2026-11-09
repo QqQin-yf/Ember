@@ -44,7 +44,9 @@
   },
   "briefing": {
     "recent_hours": 72,
-    "total_chars": 6000
+    "total_chars": 6000,
+    "entity_directory_chars": 1000,
+    "entity_directory_line_chars": 100
   },
   "extraction": {
     "batch_chars": 8000,

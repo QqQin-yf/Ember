@@ -43,6 +43,11 @@ def fetch_source_increment(cursor=None, *, instance='default', limit=100):
     if (not isinstance(data,dict) or 'cursor' not in data or not isinstance(data.get('turns'),list)
             or type(data.get('has_more')) is not bool or (data['has_more'] and data['cursor']==cursor)):
         raise SourceUnavailable('Invalid source increment','source_increment_invalid')
+    revoked = data.get('revoked', [])
+    if not isinstance(revoked, list) or any(
+            not isinstance(row, dict) or not isinstance(row.get('session_id'), str)
+            or not row['session_id'] or message_seq(row.get('message_id')) is None for row in revoked):
+        raise SourceUnavailable('Invalid source revocations', 'source_increment_invalid')
     for row in data['turns']:
         if (not isinstance(row,dict) or not isinstance(row.get('session_id'),str) or not row['session_id']
                 or not isinstance(row.get('messages'),list) or len(row['messages']) not in (1,2)

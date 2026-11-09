@@ -34,7 +34,10 @@ class Organization:
                 CREATE TABLE IF NOT EXISTS pool(origin TEXT,event_id TEXT,body TEXT,PRIMARY KEY(origin,event_id));
                 CREATE TABLE IF NOT EXISTS themes(id TEXT PRIMARY KEY,origin TEXT,name TEXT,text TEXT,members TEXT,vector TEXT,space TEXT);
                 CREATE TABLE IF NOT EXISTS replacements(event_id TEXT PRIMARY KEY,theme_id TEXT);
-                CREATE TABLE IF NOT EXISTS changed_entities(entity_id TEXT PRIMARY KEY);''')
+                CREATE TABLE IF NOT EXISTS changed_entities(entity_id TEXT PRIMARY KEY);
+                CREATE TABLE IF NOT EXISTS entity_updates(entity_id TEXT PRIMARY KEY, hash TEXT);
+                CREATE TABLE IF NOT EXISTS entity_links(entity_id TEXT,event_id TEXT,hash TEXT,
+                    PRIMARY KEY(entity_id,event_id));''')
             with conn:
                 yield conn
         finally:
@@ -93,46 +96,72 @@ class Organization:
         client=SliceEmbeddingClient(config)
         vector=client.embed('\n'.join([name,*aliases]))
         cards=[]
-        store=EntitySummaryVectorStore(str(self.root));life=Lifecycle(self.root)
+        names = {s.strip().casefold() for s in (name, *aliases)}
+        life=Lifecycle(self.root)
+        eligible=life.eligibility_checker()
         for card in self.service.entity_store.all():
-            if card.entity_id==exclude or life.canonical(card.entity_id)!=card.entity_id:
+            if card.entity_id==exclude or not eligible(card.entity_id):
                 continue
-            text='\n'.join([card.name,*card.aliases,card.summary])
-            row=store.get(card.entity_id)
-            if not row or row['text']!=text or row['model']!=config.space:
-                store.upsert(card.entity_id,text,client.embed(text),config.space)
-                row=store.get(card.entity_id)
-            if len(vector)==len(row['vector']) and cosine(vector,row['vector'])>=lifecycle_config()['grouping']['threshold']:
+            row=self.entity_vector(card,config)
+            exact = any(s.strip().casefold() in names for s in (card.name, *card.aliases))
+            if exact or (len(vector)==len(row['vector']) and cosine(vector,row['vector'])>=lifecycle_config()['grouping']['threshold']):
                 cards.append(card)
         return cards
 
-    def identify(self,group,cards):
+    def entity_vector(self, card, config):
+        store = EntitySummaryVectorStore(str(self.root))
+        text = '\n'.join([card.name, *card.aliases, card.summary])
+        row = store.get(card.entity_id)
+        if not row or row['text'] != text or row['model'] != config.space:
+            vector = SliceEmbeddingClient(config).embed(text)
+            store.upsert(card.entity_id, text, vector, config.space)
+            row = store.get(card.entity_id)
+        return row
+
+    def identify(self,group,cards,*,require_distinct=False):
         if not cards:
-            return None
-        result=ask('entity_identity','只有确定同一具体对象才给 same_id；拿不准返回 null，主题相似不算同一对象。',
+            return None, True
+        result=ask('entity_identity','只有确定同一具体对象才给 same_id。确认是不同的具体对象才填 distinct=true，拿不准填 false。主题相似不算同一对象。',
                    {'object':group,'existing':[e.to_dict() for e in cards]},
-                   {'type':'object','required':['same_id'],'properties':{'same_id':{'type':['string','null']}}})
+                   {'type':'object','required':['same_id'],'properties':{'same_id':{'type':['string','null']},
+                    'distinct':{'type':'boolean'}}})
         if result['same_id'] is not None and result['same_id'] not in {e.entity_id for e in cards}:
             raise ValueError('unknown_entity_identity')
-        return result['same_id']
+        return result['same_id'], result.get('distinct', False) or not require_distinct
 
-    def attach(self,group,config):
-        cards=self.entity_candidates(group['name'],group.get('aliases',[]),config)
-        eid=self.identify(group,cards)
+    def attach(self,group,config,*,entity_id=None,require_distinct=False):
+        eid = entity_id
+        if eid is None:
+            cards=self.entity_candidates(group['name'],group.get('aliases',[]),config)
+            eid, distinct=self.identify(group,cards,require_distinct=require_distinct)
+            if not eid and not distinct:
+                return None
         eid=eid or 'ENT-'+fingerprint([group['name'],sorted(group['event_ids'])])[:16]
         card=next((e for e in self.service.entity_store.all() if e.entity_id==eid),None)
+        new_card = card is None
         card=Entity.from_dict(card.to_dict()) if card else Entity(eid,group['name'],entity_type=group.get('entity_type','object'),created_at=datetime.now(timezone.utc).isoformat())
         events=[e for e in self.service.store.all_events() if eid in e.entity_refs or e.event_id in group['event_ids']]
         project=card.entity_type=='project' or any(e.kind=='project' for e in events)
         old=card.summary
         evidence={e.event_id:fingerprint(document(e)) for e in events}
+        aliases = list(dict.fromkeys(card.aliases+group.get('aliases',[])+([group['name']] if card.name!=group['name'] else [])))
+        update_hash = fingerprint([evidence, aliases, project, old])
+        with self.db() as conn:
+            receipt = conn.execute('SELECT hash FROM entity_updates WHERE entity_id=?',(eid,)).fetchone()
+        if receipt and receipt['hash'] == update_hash and all(eid in e.entity_refs for e in events):
+            self.entity_vector(card, config)
+            self.link_events(eid, group['event_ids'])
+            if project:
+                self.project_supersession(events)
+            return eid
         text=prose('entity_summary',
                    '根据相关事件客观整理。项目只写当前有效现状，新事实取代旧状态。' if project else
                    '根据相关事件客观整理，只返回新知道的补充；不要删除、重写或否定已有内容，没有新增则返回空格。',
                    {'existing':old,'events':[document(e) for e in events]})
-        text=('根据相关事件客观整理：'+text if project or not old else old+'\n'+text.strip())
+        text=('根据相关事件客观整理：'+text if project or not old else
+              old+'\n'+text.strip() if text.strip() and not old.endswith(text.strip()) else old)
         card.summary=text;card.summary_at=datetime.now(timezone.utc).isoformat()
-        card.aliases=list(dict.fromkeys(card.aliases+group.get('aliases',[])+([group['name']] if card.name!=group['name'] else [])))
+        card.aliases=aliases
         with self.service._generation_lock:
             current=next((e for e in self.service.entity_store.all() if e.entity_id==eid),None)
             if current and current.summary!=old:
@@ -145,10 +174,73 @@ class Organization:
                     event.entity_refs=event.entity_refs+[eid]
                     self.service.store.write_event(event)
             with self.db() as conn:
-                conn.execute('INSERT OR IGNORE INTO changed_entities VALUES (?)',(eid,))
+                conn.execute('INSERT OR REPLACE INTO entity_updates VALUES (?,?)',
+                             (eid, fingerprint([evidence, aliases, project, text])))
+                if new_card:
+                    conn.execute('INSERT OR IGNORE INTO changed_entities VALUES (?)',(eid,))
+        self.entity_vector(card, config)
+        self.link_events(eid, group['event_ids'])
         if project:
             self.project_supersession(events)
         return eid
+
+    def link_events(self, entity_id, subjects):
+        from .promises import instant
+        from .relation import EventRelation
+
+        life = Lifecycle(self.root)
+        eligible = life.eligibility_checker()
+        events = []
+        for event in self.service.store.all_events():
+            if (event.kind == 'relationship' or not eligible(event.event_id)
+                    or entity_id not in event.entity_refs):
+                continue
+            try:
+                events.append((instant(event.event_time), event.event_id, event))
+            except (TypeError, ValueError, AttributeError):
+                continue
+        events.sort()
+        limit = lifecycle_config()['grouping']['batch_size']
+        for index, (_, event_id, event) in enumerate(events):
+            if event_id not in subjects:
+                continue
+            window = events[max(0, index-limit):index+limit+1]
+            material = [document(item) for _, _, item in window]
+            digest = fingerprint(material)
+            with self.db() as conn:
+                receipt = conn.execute('SELECT hash FROM entity_links WHERE entity_id=? AND event_id=?',
+                                       (entity_id, event_id)).fetchone()
+            if receipt and receipt['hash'] == digest:
+                continue
+            order = {eid: stamp for stamp, eid, _ in window}
+            result = ask('relationship_links',
+                         '同一 Entity 的历史按发生时间排列。只连中心事件和具体延续或回应它的事件。'
+                         'source 必须早于 target。相邻、同属项目或主题相似不算关系。可不连，不判断取代。',
+                         {'subject': event_id, 'events': material},
+                         {'type':'object','required':['relations'],'properties':{'relations':{'type':'array','items':{
+                             'type':'object','required':['source','target','type'],'properties':{
+                                 'source':{'type':'string'},'target':{'type':'string'},
+                                 'type':{'enum':['continues','responds_to']}}}}}}) if len(window)>1 else {'relations':[]}
+            for edge in result['relations']:
+                source, target = edge['source'], edge['target']
+                if (event_id not in (source,target) or source not in order or target not in order
+                        or order[source] >= order[target]):
+                    raise ValueError('entity_link_outside_history')
+            with self.service._generation_lock:
+                for previous in material:
+                    latest = self.service.store.get_event(previous['event_id'])
+                    if document(latest) != previous or entity_id not in latest.entity_refs:
+                        raise ValueError('entity_history_changed_during_linking')
+                existing = {(r.src_event,r.dst_event,r.type)
+                            for r in self.service.relation_store.all() if r.status=='active'}
+                for edge in result['relations']:
+                    key = (edge['source'],edge['target'],edge['type'])
+                    if key not in existing:
+                        rid = 'rel_'+fingerprint(key)[:16]
+                        self.service.relation_store.add(EventRelation(rid,*key,provenance_refs=['entity-history']))
+                        existing.add(key)
+                with self.db() as conn:
+                    conn.execute('INSERT OR REPLACE INTO entity_links VALUES (?,?,?)',(entity_id,event_id,digest))
 
     def project_supersession(self,events):
         rows=[document(e) for e in events if e.kind=='project']
@@ -171,9 +263,17 @@ class Organization:
         with self.db() as conn:
             ids=[r[0] for r in conn.execute('SELECT entity_id FROM changed_entities')]
         for eid in ids:
+            primary_id = Lifecycle(self.root).canonical(eid)
+            if primary_id != eid:
+                self.entity_vector(self.service.entity_store.get(primary_id), config)
+                self.link_events(primary_id, [e.event_id for e in self.service.store.all_events()
+                                              if primary_id in e.entity_refs])
+                with self.db() as conn:
+                    conn.execute('DELETE FROM changed_entities WHERE entity_id=?',(eid,))
+                continue
             card=self.service.entity_store.get(eid)
             cards=self.entity_candidates(card.name,card.aliases,config,exclude=eid)
-            target=self.identify(card.to_dict(),cards)
+            target,_=self.identify(card.to_dict(),cards)
             if target:
                 order={e.entity_id:i for i,e in enumerate(self.service.entity_store.all())}
                 primary,absorbed=sorted([card,self.service.entity_store.get(target)],key=lambda e:(e.created_at or '',order[e.entity_id]))
@@ -191,6 +291,9 @@ class Organization:
                         conn.execute('INSERT OR REPLACE INTO aliases VALUES (?,?)',(absorbed.entity_id,primary.entity_id))
                     with self.db() as conn:
                         conn.execute('INSERT OR IGNORE INTO changed_entities VALUES (?)',(primary.entity_id,))
+                self.entity_vector(primary, config)
+                self.link_events(primary.entity_id, [e.event_id for e in self.service.store.all_events()
+                                                     if primary.entity_id in e.entity_refs])
             with self.db() as conn:
                 conn.execute('DELETE FROM changed_entities WHERE entity_id=?',(eid,))
 
@@ -210,7 +313,9 @@ class Organization:
         for event in self.service.store.all_events():
             if event.kind=='relationship' or Lifecycle(self.root).canonical(event.event_id)!=event.event_id:
                 continue
-            original=document(event);digest=fingerprint(original)
+            original=document(event)
+            decision = event.entity_decision or {}
+            digest=fingerprint([original,decision]) if decision else fingerprint(original)
             with self.db() as conn:
                 row=conn.execute('SELECT * FROM processed WHERE event_id=?',(event.event_id,)).fetchone()
             if row and row['hash']==digest and not row['error']:
@@ -229,6 +334,19 @@ class Organization:
                                     ('cue:'+route.route_id,route.cue,config.space,json.dumps(cue_vector)))
                 origin=self.copy_pool(event)
                 vector=self.vector(event,config)
+                state = decision.get('state')
+                refs = list(dict.fromkeys(Lifecycle(self.root).canonical(eid) for eid in event.entity_refs))
+                for eid in refs:
+                    card = self.service.entity_store.get(eid)
+                    self.attach({'name':card.name,'event_ids':[event.event_id]},config,entity_id=eid)
+                if state == 'proposed' and not refs:
+                    self.attach({'name':decision['name'],'entity_type':decision.get('type','object'),
+                                 'event_ids':[event.event_id],'evidence':original},config,require_distinct=True)
+                needs_identity = not refs and state not in ('none','proposed')
+                if not needs_identity and not origin:
+                    with self.db() as conn:
+                        conn.execute('INSERT OR REPLACE INTO processed VALUES (?,?,NULL,0)',(event.event_id,digest))
+                    continue
                 nearby=[]
                 for other in self.service.store.all_events():
                     if other.kind!='relationship' and other.event_id!=event.event_id:
@@ -237,8 +355,10 @@ class Organization:
                             nearby.append(other)
                 nearby=nearby[:lifecycle_config()['grouping']['batch_size']]
                 evidence={e.event_id:fingerprint(document(e)) for e in [event,*nearby]}
-                result=ask('memory_group','用向量候选判断是否同一东西。具体对象归 entity，一类事归 theme；关系事件不提 Entity。主题只选足够数量的同类低分日常或完结约定。可以不归组。',
-                           {'subject':original,'nearby':[document(e) for e in nearby],'themes':[{k:v for k,v in t.items() if k not in ('vector','space')} for t in self.themes()]},
+                result=ask('memory_group','用向量候选判断是否同一东西。具体对象归 entity，一类事归 theme；关系事件不提 Entity。主题只选足够数量的同类低分日常或完结约定。可以不归组。'
+                           + ('' if needs_identity else '本事件只允许主题归组。'),
+                           {'subject':original,'entity_hint':decision.get('name'),'nearby':[document(e) for e in nearby],
+                            'themes':[{k:v for k,v in t.items() if k not in ('vector','space')} for t in self.themes()]},
                            {'type':'object','required':['groups'],'properties':{'groups':{'type':'array','items':{
                                'type':'object','required':['category','name','event_ids'],'properties':{
                                    'category':{'enum':['theme','entity']},'name':{'type':'string','minLength':1},
@@ -256,8 +376,16 @@ class Organization:
                         for eid in group['event_ids']:
                             self.copy_pool(self.service.store.get_event(eid))
                         self.summarize_theme(group,origin,config)
-                    elif group['category']=='entity':
-                        self.attach(group,config)
+                    elif group['category']=='entity' and needs_identity:
+                        # A neighboring event may support a grouping, but its own
+                        # author decision must not be overwritten by this subject.
+                        members = [self.service.store.get_event(mid) for mid in group['event_ids']]
+                        members = [e for e in members if not e.entity_refs
+                                   and (e.entity_decision or {}).get('state') not in ('linked','none','proposed')]
+                        if members:
+                            self.attach(dict(group,event_ids=[e.event_id for e in members],
+                                             evidence=[document(e) for e in members]),config,
+                                        require_distinct=state == 'unresolved')
                 with self.db() as conn:
                     conn.execute('INSERT OR REPLACE INTO processed VALUES (?,?,NULL,0)',(event.event_id,digest))
             except Exception as exc:

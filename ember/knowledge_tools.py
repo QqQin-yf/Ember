@@ -80,7 +80,7 @@ def write_event(service, args, context):
     targets=replacement_targets(service,validated)
     sources=store.sources(args.get('source_slice_ids'))
     rows=store.read_sources(sources)
-    event=service._build_event(context['session'],context['turn'],validated['event'])
+    event=service._build_event(context['session'],context['turn'],validated['event'],validated.get('entity'))
     event.source_ref='slice-sources/'+event.event_id
     event.raw_ref=event.source_ref
     event.turn_refs=[]

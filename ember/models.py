@@ -60,6 +60,7 @@ class Event:
     # Existing maintenance annotation, not a model-authored content field.
     change: str = ""
     entity_refs: list[str] = field(default_factory=list)
+    entity_decision: dict[str, Any] | None = None
     merged_into: str = ""
     superseded_by: str = ""
     # provenance

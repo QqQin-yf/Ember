@@ -58,6 +58,28 @@ class IncrementalSliceTests(unittest.TestCase):
         with patch('ember.source_client.fetch_source_increment',side_effect=self.page):
             self.assertEqual(sync_increment(self.service)['status'],'ok')
 
+    def test_revoke_before_recall_and_increment_cannot_restore_old_turn(self):
+        store = TurnSliceStore(self.tmp.name)
+        old = store.save(**self.turn())
+        store.save_embedding(old, self.cfg.space, [1., 0.])
+        other = store.save(**dict(self.turn(), session_id='other'))
+        result = self.service.hook_turn_start('s', 'edited', user_message_id=3,
+                                              recall_id='edit', revoked_message_ids=[1, 2])
+        self.assertEqual(result['turn'], 1)
+        self.assertIsNone(store.get(old['slice_id']))
+        self.assertIsNotNone(store.get(other['slice_id']))
+        self.assertFalse(store.save_embedding(old, self.cfg.space, [1., 0.]))
+
+        page = {'cursor': 'after-edit', 'has_more': False, 'turns': [self.turn(), self.turn(seq=3)],
+                'revoked': [{'session_id': 's', 'message_id': 2}]}
+        with patch('ember.source_client.fetch_source_increment', return_value=page):
+            self.assertEqual(sync_increment(self.service)['status'], 'ok')
+        with store._db() as conn:
+            self.assertEqual([r[0] for r in conn.execute(
+                "SELECT user_message_id FROM turn_slices WHERE session_id='s'")], ['3'])
+            self.assertIsNone(conn.execute('SELECT 1 FROM slice_embeddings WHERE slice_id=?',
+                                           (old['slice_id'],)).fetchone())
+
     def test_empty_orphan_has_no_vector_but_owned_empty_slice_is_kept(self):
         store=TurnSliceStore(self.tmp.name)
         empty=store.save(**self.turn('嗯嗯','好'))

@@ -1,5 +1,6 @@
 """Shared durable cursor for Event-batch and briefing-triggered source pulls."""
 import asyncio
+from collections import defaultdict
 from contextlib import contextmanager
 import json
 from pathlib import Path
@@ -49,9 +50,19 @@ def sync_increment(service):
             cfg=SliceEmbeddingConfig.load()
             while True:
                 page=source_client.fetch_source_increment(cursor,instance=instance,limit=lifecycle_config()['slice']['page_size'])
+                store = TurnSliceStore(service.store.root)
+                revoked = defaultdict(list)
+                for item in page.get('revoked', []):
+                    revoked[item['session_id']].append(item['message_id'])
+                for session_id, ids in revoked.items():
+                    store.revoke(instance, session_id, ids)
                 for item in page['turns']:
-                    TurnSliceStore(service.store.root).save(item['session_id'],item['messages'],instance=instance,
-                        user_is_system=item.get('user_is_system',False))
+                    try:
+                        store.save(item['session_id'],item['messages'],instance=instance,
+                                   user_is_system=item.get('user_is_system',False))
+                    except source_client.SourceUnavailable as exc:
+                        if exc.code != 'source_revoked':
+                            raise
                 prepare_slices(service,cfg)
                 cursor=page['cursor']
                 conn.execute('UPDATE sync SET cursor=?,completed=?,retry_at=0,error=NULL WHERE instance=?',

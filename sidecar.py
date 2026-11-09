@@ -364,7 +364,8 @@ async def _hook_turn_start(request: Request) -> JSONResponse:
         context_start_id=_opt_int(body, "context_start_id"),
         recall_id=body.get("recall_id"), occurred_at=body.get("occurred_at"),
         activity_revision=body.get("activity_revision"), window_revision=body.get("window_revision"),
-        context_message_ids=body.get("context_message_ids")))
+        context_message_ids=body.get("context_message_ids"),
+        revoked_message_ids=body.get("revoked_message_ids")))
 
 
 async def _hook_turn_end(request: Request) -> JSONResponse:
@@ -470,6 +471,19 @@ async def _briefing_get(request: Request) -> JSONResponse:
     if isinstance(svc, JSONResponse):
         return svc
     return JSONResponse(svc.sidecar_briefing_get())
+
+
+async def _events_for_sources(request: Request) -> JSONResponse:
+    svc = _service_or_404(request)
+    if isinstance(svc, JSONResponse):
+        return svc
+    from ember.source_events import events_for_sources
+    try:
+        body = await request.json()
+    except ValueError:
+        body = None
+    result = await asyncio.to_thread(events_for_sources, svc, body)
+    return JSONResponse(result, status_code=200 if result['status']=='ok' else 400)
 
 
 async def _extraction_page(request: Request) -> JSONResponse:
@@ -581,6 +595,7 @@ app = BearerAuthMiddleware(Starlette(
         Route("/ember/briefing", _briefing_get, methods=["GET"]),
         Route("/ember/briefing/fallback", _briefing_fallback, methods=["POST"]),
         Route("/ember/extraction/{operation}", _extraction_page, methods=["POST"]),
+        Route("/ember/memory/by-source", _events_for_sources, methods=["POST"]),
         Route("/ember/memory/pin", _pin_memory, methods=["POST"]),
         Route("/ember/memory/unpin", _unpin_memory, methods=["POST"]),
         Mount("/mcp", app=_handle_mcp),
