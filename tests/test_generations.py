@@ -48,6 +48,100 @@ class GenerationTests(unittest.TestCase):
         self.assertEqual(self.svc.generations.generation("r-1")["state"], "superseded")
         self.assertEqual(first["recall_refs"]["recall_id"], "r-1")
 
+    def test_cc_and_app_write_independently_with_main_evidence(self):
+        past = "Past computer conversation"
+        phone = "Past phone conversation"
+        rows = [
+            {"message_id": 11, "role": "user", "content": past},
+            {"message_id": 12, "role": "assistant", "content": "Computer reply"},
+            {"message_id": 21, "role": "user", "content": phone},
+            {"message_id": 22, "role": "assistant", "content": "Phone reply"},
+        ]
+        with patch.object(self.svc, "run_recall_pipeline", side_effect=AssertionError("historical recall")):
+            for i, text in ((11, past), (21, phone)):
+                rid = f"history-{i}"
+                started = self.svc.hook_turn_start("main", text, user_message_id=i, recall_id=rid, historical=True)
+                replay = self.svc.hook_turn_start("main", text, user_message_id=i, recall_id=rid, historical=True)
+                self.assertEqual(started, replay)
+                self.assertEqual(self.svc.generations.generation(rid)["state"], "registered")
+                end = self.svc.hook_turn_end("main", rows[1 if i == 11 else 3]["content"],
+                                             started["turn"], assistant_message_id=i + 1, recall_id=rid)
+                self.assertTrue(end["ok"], end)
+
+        self.start("app-one", "main", 31)
+        self.assertTrue(self.svc.cc_turn_start("window-one", "cc-one", "main-leaf")["ok"])
+        self.assertEqual(self.svc.generations.generation("app-one")["state"], "running")
+        app_event = self.call("app-one")
+        self.assertEqual(app_event["status"], "created", app_event)
+
+        self.start("app-two", "main", 33)
+        self.assertEqual(self.svc.generations.generation("cc-one")["state"], "running")
+        with patch.object(self.svc, "run_recall_pipeline", side_effect=AssertionError("historical recall")):
+            late = self.svc.hook_turn_start("main", "Late CC original", user_message_id=40,
+                                            recall_id="late-history", historical=True)
+            self.assertIn("turn", late)
+        self.assertEqual(self.svc.generations.generation("cc-one")["state"], "running")
+        self.assertEqual(self.svc.generations.generation("app-two")["state"], "running")
+        args = write_args(quote_spans=[{"start_quote": past, "end_quote": phone}])
+        args["event"]["focus"] = past
+        def pages():
+            yield [rows[3]]
+            yield [rows[2], rows[1]]
+            yield [rows[0]]
+            self.fail("Source search continued after both endpoints and their pairs were found")
+
+        with patch("ember.source_client.iter_source_branch", side_effect=lambda *a, **kw: pages()) as fetch:
+            result = self.svc.sidecar_call_tool("write_event", args, domain="cc")
+            self.assertEqual(result["status"], "created", result)
+            evidence = self.svc.event_sources.get(result["event_id"])
+            self.assertEqual(evidence["source_session_id"], "main")
+            self.assertEqual([(m["user_message_id"], m["assistant_message_id"])
+                              for m in evidence["turn_messages"]], [("11", "12"), ("21", "22")])
+            revised = self.svc.sidecar_call_tool("revise_memory_event", {
+                "event_id": result["event_id"], "summary": "Revised from the CC branch",
+            }, domain="cc")
+            self.assertEqual(revised["status"], "revised", revised)
+            args["event"]["kind"] = "promise"
+            result = self.svc.sidecar_call_tool("write_promise", args, domain="cc")
+            self.assertEqual(result["status"], "created", result)
+            self.assertEqual(self.svc.store.get_event(result["event_id"]).kind, "promise")
+            args["event"]["kind"] = "project"
+            fetch.side_effect = None
+            fetch.return_value = [list(reversed(rows))]
+            args["quote_spans"][0]["end_quote"] = "The unsaved current prompt"
+            result = self.svc.sidecar_call_tool("write_event", args, domain="cc")
+            self.assertEqual(result["code"], "cc_quote_not_in_history")
+            fetch.assert_called_with("main", "main-leaf", instance="default")
+            args["quote_spans"][0]["end_quote"] = phone
+            fetch.return_value = [[*rows, {"message_id": 29, "role": "user", "content": past}]]
+            result = self.svc.sidecar_call_tool("write_event", args, domain="cc")
+            self.assertEqual(result["code"], "quote_ambiguous")
+
+        self.assertTrue(self.svc.cc_turn_start("window-two", "cc-two", "new-leaf")["ok"])
+        self.svc.cc_turn_end("window-one", "cc-one")
+        self.svc.cc_turn_end("window-two", "cc-one")
+        self.assertEqual(self.svc.generations.generation("cc-two")["state"], "running")
+        self.svc.cc_turn_end("window-two", "cc-two")
+        self.assertEqual(self.svc.sidecar_call_tool("write_event", args, domain="cc")["code"], "cc_turn_missing")
+        self.assertEqual(self.svc.generations.generation("app-two")["state"], "running")
+
+    def test_cc_source_page_budget_and_cursor(self):
+        from ember import source_client
+
+        def page(_sid, _anchor, *, instance, before, limit):
+            self.assertEqual(instance, "default")
+            self.assertEqual(limit, 200)
+            start = int(before) if before else 6001
+            rows = [{"message_id": str(seq)} for seq in range(start - 1, start - limit - 1, -1)]
+            return rows, rows[-1]["message_id"]
+
+        with patch.object(source_client, "fetch_source_branch", side_effect=page) as fetch:
+            with self.assertRaises(source_client.SourceUnavailable) as error:
+                list(source_client.iter_source_branch("main", "leaf", instance="default"))
+            self.assertEqual(error.exception.code, "cc_history_limit")
+            self.assertEqual(fetch.call_count, 25)
+            self.assertEqual(fetch.call_args.kwargs["before"], "1201")
+
     def test_changed_start_identity_conflicts_without_mutation(self):
         self.start()
         out = self.start(text="changed user input")
@@ -307,6 +401,27 @@ class GenerationHTTPTests(unittest.IsolatedAsyncioTestCase):
         data = response.json()
         self.assertNotIn("error", data, data)
         return response, json.loads(data["result"]["content"][0]["text"])
+
+    async def test_cc_mcp_uses_cc_slot_without_app_identity_headers(self):
+        self.assertEqual((await self.start(sid="main")).status_code, 200)
+        body = {"cc_session": "window", "recall_id": "cc-turn", "anchor": None}
+        opened = await self.client.post("/ember/hooks/cc/start", json=body)
+        self.assertEqual(opened.json(), {"ok": True})
+        history = await self.client.post("/ember/hooks/cc/history", json={
+            "session_id": "main", "user_message_id": 81, "message": "Historical original",
+            "recall_id": "history-over-http",
+        })
+        self.assertEqual(history.status_code, 200, history.text)
+        self.assertFalse(history.json()["injected"])
+        tool = {"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+                "params": {"name": "write_event", "arguments": write_args()}}
+        response = await self.client.post("/mcp/cc/", json=tool)
+        self.assertEqual(response.status_code, 200, response.text)
+        result = json.loads(response.json()["result"]["content"][0]["text"])
+        self.assertEqual(result["code"], "cc_quote_not_in_history")
+        self.assertEqual((await self.client.post("/ember/hooks/cc/end", json=body)).json(), {"ok": True})
+        _, app = await self.tool({"X-Ember-Recall-Id": "r-1", "X-Ember-Tool-Call-Id": "app-tool"})
+        self.assertEqual(app["status"], "created", app)
 
     async def test_real_mcp_headers_select_bound_context_and_replay_receipt(self):
         self.assertEqual((await self.start()).status_code, 200)

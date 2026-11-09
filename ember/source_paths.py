@@ -71,6 +71,8 @@ class QuoteSourceError(ValueError):
         self.field = field
         self.candidate_count = candidate_count
         messages = {
+            "cc_history_limit": "引文太久远，在本分支最近的 5000 条已入库消息里找不到。",
+            "cc_quote_not_in_history": "在已入库的 main 历史中找不到引文。如果引用的是本轮原话，请在下一轮写入。",
             "source_unconfigured": "原文服务未配置，历史原文不可用，请检查原文连接配置，不必反复重摘。",
             "source_unreachable": "原文服务连接失败或超时，暂时无法核验历史摘录；请恢复原文连接后重试。",
             "source_auth_failed": "原文服务鉴权失败，暂时无法核验历史摘录；请检查原文凭据。",

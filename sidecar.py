@@ -173,10 +173,14 @@ session_manager = StreamableHTTPSessionManager(
     app=mcp_server, json_response=False, stateless=True)
 
 
-async def _handle_mcp(scope, receive, send) -> None:
+async def _handle_cc_mcp(scope, receive, send) -> None:
+    await _handle_mcp(scope, receive, send, domain="cc")
+
+
+async def _handle_mcp(scope, receive, send, *, domain="app") -> None:
     names = {b"x-ember-recall-id": "recall_id", b"x-ember-run-id": "run_id",
              b"x-ember-tool-call-id": "tool_call_id"}
-    context = {}
+    context = {"domain": domain} if domain == "cc" else {}
     seen = set()
     for key, value in scope.get("headers") or []:
         key = key.lower()
@@ -340,7 +344,7 @@ async def _generation_tool_status(request: Request) -> JSONResponse:
         request.path_params["recall_id"], request.path_params["tool_call_id"]))
 
 
-async def _hook_turn_start(request: Request) -> JSONResponse:
+async def _hook_turn_start(request: Request, *, historical=False) -> JSONResponse:
     svc = _service_or_404(request)
     if isinstance(svc, JSONResponse):
         return svc
@@ -365,7 +369,30 @@ async def _hook_turn_start(request: Request) -> JSONResponse:
         recall_id=body.get("recall_id"), occurred_at=body.get("occurred_at"),
         activity_revision=body.get("activity_revision"), window_revision=body.get("window_revision"),
         context_message_ids=body.get("context_message_ids"),
-        revoked_message_ids=body.get("revoked_message_ids")))
+        revoked_message_ids=body.get("revoked_message_ids"),
+        historical=historical))
+
+
+async def _cc_hook(request: Request) -> JSONResponse:
+    if request.path_params["action"] == "history":
+        return await _hook_turn_start(request, historical=True)
+    svc = _service_or_404(request)
+    if isinstance(svc, JSONResponse):
+        return svc
+    try:
+        body = await request.json()
+    except ValueError:
+        body = None
+    if not isinstance(body, dict):
+        return JSONResponse({"code": "invalid_arguments"}, status_code=400)
+    args = [body.get("cc_session"), body.get("recall_id")]
+    if request.path_params["action"] == "start":
+        result = await asyncio.to_thread(svc.cc_turn_start, *args, body.get("anchor"))
+    elif request.path_params["action"] == "end":
+        result = await asyncio.to_thread(svc.cc_turn_end, *args)
+    else:
+        return JSONResponse({"code": "unknown_action"}, status_code=404)
+    return _generation_response(result)
 
 
 async def _hook_turn_end(request: Request) -> JSONResponse:
@@ -598,6 +625,8 @@ app = BearerAuthMiddleware(Starlette(
         Route("/ember/memory/by-source", _events_for_sources, methods=["POST"]),
         Route("/ember/memory/pin", _pin_memory, methods=["POST"]),
         Route("/ember/memory/unpin", _unpin_memory, methods=["POST"]),
+        Route("/ember/hooks/cc/{action}", _cc_hook, methods=["POST"]),
+        Mount("/mcp/cc", app=_handle_cc_mcp),
         Mount("/mcp", app=_handle_mcp),
     ],
     lifespan=_lifespan,

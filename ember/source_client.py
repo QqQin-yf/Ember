@@ -119,3 +119,59 @@ def fetch_source_path(session_id: str, message_ids: list, *,
             raise SourceUnavailable("Source response identity/shape mismatch")
         out.append(dict(row, message_id=int(seq)))
     return out
+
+
+def fetch_source_branch(session_id: str, anchor: str, *, instance: str, before: str | None, limit: int):
+    if not SOURCE_URL:
+        raise SourceUnavailable("Source provider is not configured", "source_unconfigured")
+    params = {"session_id": session_id, "anchor": anchor, "limit": limit}
+    if before is not None:
+        params["before"] = before
+    query = urllib.parse.urlencode(params)
+    req = urllib.request.Request(SOURCE_URL.rstrip("/") + "/api/source/branch?" + query)
+    req.add_header("X-Heart-Instance", instance)
+    if SOURCE_TOKEN:
+        req.add_header("Authorization", "Bearer " + SOURCE_TOKEN)
+    try:
+        with _open_source(req) as response:
+            data = json.load(response)
+    except urllib.error.HTTPError as exc:
+        code = {401: "source_auth_failed", 403: "source_instance_unknown",
+                404: "source_session_unknown", 409: "source_path_unknown"}.get(exc.code, "source_unreachable")
+        exc.close()
+        raise SourceUnavailable("Source branch rejected", code) from exc
+    except (OSError, ValueError) as exc:
+        raise SourceUnavailable("Source branch unavailable", "source_unreachable") from exc
+    rows = data.get("messages") if isinstance(data, dict) else None
+    if not isinstance(rows, list) or len(rows) > limit or data.get("anchor") != anchor:
+        raise SourceUnavailable("Source branch identity mismatch", "source_path_unknown")
+    seen = set()
+    for row in rows:
+        seq = message_seq(row.get("message_id")) if isinstance(row, dict) else None
+        if (seq is None or seq in seen or row.get("role") not in ("user", "assistant")
+                or not isinstance(row.get("content"), str)):
+            raise SourceUnavailable("Source branch identity mismatch", "source_path_unknown")
+        seen.add(seq)
+    cursor = data.get("next_before")
+    if "next_before" not in data or (cursor is not None and
+            (len(rows) != limit or message_seq(cursor) != message_seq(rows[-1]["message_id"]))):
+        raise SourceUnavailable("Source branch cursor mismatch", "source_path_unknown")
+    return rows, message_seq(cursor)
+
+
+def iter_source_branch(session_id: str, anchor: str, *, instance: str):
+    """Yield newest-first pages from a fixed branch, bounded across the whole search."""
+    before = None
+    seen = set()
+    while len(seen) < 5000:
+        limit = min(200, 5000 - len(seen))
+        rows, cursor = fetch_source_branch(session_id, anchor, instance=instance, before=before, limit=limit)
+        ids = {message_seq(row["message_id"]) for row in rows}
+        if seen & ids:
+            raise SourceUnavailable("Source branch repeated a message", "source_path_unknown")
+        seen.update(ids)
+        yield rows
+        if cursor is None:
+            return
+        before = cursor
+    raise SourceUnavailable("Source branch search limit reached", "cc_history_limit")

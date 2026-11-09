@@ -70,7 +70,8 @@ def _conversation(messages: list[dict]) -> list[dict]:
             and isinstance(m.get("turn"), int)]
 
 
-def _locate_index(quote: str, corpus: list[dict], *, field: str = "quote_spans") -> int | None:
+def _locate_index(quote: str, corpus: list[dict], *, field: str = "quote_spans",
+                  unique_exact: bool = False) -> int | None:
     """quote 在语料中的消息下标。
 
     先精确子串；失败后仅保留文字和数字，忽略格式、emoji 和空白。
@@ -79,9 +80,16 @@ def _locate_index(quote: str, corpus: list[dict], *, field: str = "quote_spans")
     """
     if not quote.strip():
         return None
+    exact = None
     for i, m in enumerate(corpus):
         if quote in (m.get("content") or ""):
-            return i
+            if not unique_exact:
+                return i
+            if exact is not None:
+                raise QuoteSourceError("quote_ambiguous", field=field)
+            exact = i
+    if exact is not None:
+        return exact
     norm = "".join(c for c in quote if c.isalnum())
     if not norm:
         return None
@@ -108,10 +116,11 @@ def locate_turn(quote: str, messages: list[dict]) -> int | None:
     return corpus[idx]["turn"] if idx is not None else None
 
 
-def locate_message(quote: str, messages: list[dict], *, field="event.focus") -> dict | None:
+def locate_message(quote: str, messages: list[dict], *, field="event.focus",
+                   unique_exact: bool = False) -> dict | None:
     """Use the same exact/unique-formatting matcher for chat and slice sources."""
     corpus=[m for m in messages if m.get('role') in ('user','assistant')]
-    index=_locate_index(quote,corpus,field=field)
+    index=_locate_index(quote,corpus,field=field,unique_exact=unique_exact)
     return corpus[index] if index is not None else None
 
 

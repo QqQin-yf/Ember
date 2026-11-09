@@ -59,7 +59,8 @@ class GenerationStore:
                     superseded_by TEXT,
                     end_hash TEXT,
                     end_result TEXT,
-                    assistant_message_id TEXT
+                    assistant_message_id TEXT,
+                    domain TEXT NOT NULL DEFAULT 'app'
                 );
                 CREATE TABLE IF NOT EXISTS recall_snapshots (
                     recall_id TEXT PRIMARY KEY,
@@ -101,6 +102,12 @@ class GenerationStore:
                 );
             """)
             with db:
+                columns = {row["name"] for row in db.execute("PRAGMA table_info(generations)")}
+                if "domain" not in columns:
+                    db.execute("BEGIN IMMEDIATE")
+                    columns = {row["name"] for row in db.execute("PRAGMA table_info(generations)")}
+                    if "domain" not in columns:
+                        db.execute("ALTER TABLE generations ADD COLUMN domain TEXT NOT NULL DEFAULT 'app'")
                 yield db
         finally:
             db.close()
@@ -113,23 +120,25 @@ class GenerationStore:
             return dict(row) if row else None
 
     def reserve(self, recall_id: str, session_id: str, request_hash: str,
-                turn: int | None = None, snapshot_metadata: dict | None = None) -> None:
+                turn: int | None = None, snapshot_metadata: dict | None = None, *,
+                domain: str = "app", historical: bool = False) -> None:
         with self._db() as db:
-            db.execute("UPDATE generations SET state='superseded', superseded_by=? "
-                       "WHERE state IN ('starting','running')", (recall_id,))
-            db.execute("INSERT INTO generations(recall_id, session_id, request_hash, turn, state) "
-                       "VALUES (?,?,?,?,'starting')", (recall_id, session_id, request_hash, turn))
+            if not historical:
+                db.execute("UPDATE generations SET state='superseded', superseded_by=? "
+                           "WHERE domain=? AND state IN ('starting','running')", (recall_id, domain))
+            state = "running" if domain == "cc" and not historical else "starting"
+            db.execute("INSERT INTO generations(recall_id, session_id, request_hash, turn, state, domain) "
+                       "VALUES (?,?,?,?,?,?)", (recall_id, session_id, request_hash, turn, state, domain))
             if snapshot_metadata is not None:
                 db.execute("INSERT INTO recall_snapshots(recall_id,state,created_at,metadata_json) "
                            "VALUES (?,'in_progress',?,?)", (recall_id, time.time(),
                                json.dumps(snapshot_metadata, ensure_ascii=False)))
 
-    def supersede(self) -> None:
+    def supersede(self, domain: str = "app") -> None:
         if os.path.exists(self.path):
             with self._db() as db:
                 db.execute("UPDATE generations SET state='superseded' "
-                           "WHERE state IN ('starting','running')")
-
+                           "WHERE domain=? AND state IN ('starting','running')", (domain,))
 
     def interrupt(self, recall_id: str) -> None:
         with self._db() as db:
@@ -184,7 +193,7 @@ class GenerationStore:
             return row[0] or 0
 
     def commit_snapshot(self, recall_id: str, turn: int, response: dict,
-                        metadata: dict, effects: list[tuple[str, dict]]) -> None:
+                        metadata: dict, effects: list[tuple[str, dict]], *, historical: bool = False) -> None:
         now = time.time()
         with self._db() as db:
             changed = db.execute("UPDATE recall_snapshots SET state='ready', completed_at=?, "
@@ -193,7 +202,8 @@ class GenerationStore:
                  json.dumps(response, ensure_ascii=False), recall_id)).rowcount
             if changed != 1:
                 raise ValueError("Recall snapshot is not awaiting a first commit")
-            db.execute("UPDATE generations SET turn=?, state='running' WHERE recall_id=?", (turn, recall_id))
+            db.execute("UPDATE generations SET turn=?, state=? WHERE recall_id=?",
+                       (turn, "registered" if historical else "running", recall_id))
             for index, (kind, entry) in enumerate(effects):
                 operation_id = fingerprint({"recall_id": recall_id, "effect": index})
                 db.execute("INSERT INTO recall_effects(operation_id,recall_id,kind,entry_json) "

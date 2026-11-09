@@ -47,6 +47,20 @@ def visible(service,event,context=None):
     required={str(s[key]) for s in sources for key in ('user_message_id','assistant_message_id') if s.get(key) is not None}
     if not required:
         return False
+    if 'cc_session' in context:
+        from . import source_client
+        from .source_paths import QuoteSourceError
+        anchor = context['anchor']
+        if anchor is None:
+            return False
+        try:
+            for rows in source_client.iter_source_branch(sid, anchor, instance=service.source_instance):
+                required.difference_update(str(row['message_id']) for row in rows)
+                if not required:
+                    return True
+        except source_client.SourceUnavailable as exc:
+            raise QuoteSourceError(exc.code) from exc
+        return False
     request=context.get('request_context',{})
     with Lifecycle(service.store.root).db() as conn:
         conn.execute('CREATE TABLE IF NOT EXISTS context_windows(session TEXT PRIMARY KEY,start INTEGER,ids TEXT,turn INTEGER)')

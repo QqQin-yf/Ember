@@ -153,6 +153,7 @@ class EmberService:
         self._generation_lock = threading.RLock()
         self._briefing_lock = threading.RLock()
         self._generation_contexts: dict[str, dict] = {}
+        self._cc_recall_id: str | None = None
         self._volatile_tool_results: dict[tuple[str, str], dict] = {}
         from .promises import Promises
         Promises(self).sweep()
@@ -200,7 +201,8 @@ class EmberService:
     def write_validated_event(self, session: Session, turn: int,
                               validated: dict[str, Any],
                               writer_recall_id: str | None = None,
-                              writer_tool_call_id: str | None = None) -> dict[str, Any]:
+                              writer_tool_call_id: str | None = None, *,
+                              cc_context: dict | None = None) -> dict[str, Any]:
         """validated 参数 → Event 落库全流程（quotes 核对 / turn_span / Routes）。
 
         显式记忆工具共用的写入主路。
@@ -223,11 +225,16 @@ class EmberService:
         # quote_spans 必填非空（writer.validate 封死省略路径）——粗锚点只
         # 作为旧事件的查询时降级存在，新事件一律带真实时间坐标。
         quote_spans = validated["quote_spans"]
-        corpus = self._quote_corpus(session)
-        span_pairs = spans_from_quotes(quote_spans, corpus)
+        if cc_context is None:
+            corpus = self._quote_corpus(session)
+            span_pairs = spans_from_quotes(quote_spans, corpus)
+        else:
+            corpus, span_pairs = self._cc_quote_evidence(cc_context["anchor"], quote_spans)
+            turn = span_pairs[0][0]
         if not span_pairs:
             raise QuoteSourceError(getattr(corpus, "issue", None) or "quote_not_found")
 
+        event = self._build_event(session, turn, validated["event"])
         self._validate_focus(event, corpus, span_pairs)
 
         self.event_sources.capture(
@@ -250,7 +257,7 @@ class EmberService:
                 cue_type=r["cue_type"],
                 cue=r["cue"],
                 status="active",
-                evidence_refs=[session.raw_ref(turn)],
+                evidence_refs=[event.raw_ref],
                 provenance_refs=["memory-writer"],
             )
             self.store.write_route(route)
@@ -634,6 +641,108 @@ class EmberService:
         result = self.sidecar_recall_snapshot(recall_id, "response")
         return result["response"] if "response" in result else result
 
+    def _clear_app_contexts(self):
+        for rid in list(self._generation_contexts):
+            if rid != self._cc_recall_id:
+                del self._generation_contexts[rid]
+
+    def cc_turn_start(self, cc_session, recall_id, anchor):
+        if (not identity(cc_session) or not identity(recall_id)
+                or (anchor is not None and not identity(anchor))):
+            return self._generation_error("invalid_identity", "Invalid CC turn identity or anchor")
+        with self._generation_lock:
+            request_hash = fingerprint([cc_session, anchor])
+            old = self.generations.generation(recall_id)
+            if old is not None:
+                if old["domain"] == "cc" and old["request_hash"] == request_hash and recall_id == self._cc_recall_id:
+                    return {"ok": True}
+                return self._generation_error("stale_generation", "CC turn is no longer active")
+            session = self.get_or_create_session("main")
+            # Stop's historical registration assigns the real dialogue turn number.
+            self.generations.reserve(recall_id, "main", request_hash, domain="cc")
+            self._generation_contexts.pop(self._cc_recall_id, None)
+            self._cc_recall_id = recall_id
+            self._generation_contexts[recall_id] = {
+                "session": session, "turn": None, "cc_session": cc_session,
+                "anchor": anchor,
+            }
+            return {"ok": True}
+
+    def cc_turn_end(self, cc_session, recall_id):
+        if not identity(cc_session) or not identity(recall_id):
+            return self._generation_error("invalid_identity", "Invalid CC turn identity")
+        with self._generation_lock:
+            ctx = self._generation_contexts.get(self._cc_recall_id)
+            if recall_id == self._cc_recall_id and ctx and ctx["cc_session"] == cc_session:
+                self.generations.finish(recall_id, "closed", fingerprint([cc_session, recall_id]),
+                                        {"ok": True}, None)
+                del self._generation_contexts[recall_id]
+                self._cc_recall_id = None
+            return {"ok": True}
+
+    def _cc_quote_evidence(self, anchor, quote_spans):
+        from .turn_span import locate_message
+        modern = generation_messages(self.generations, "main")
+        identities = {(row["role"], message_seq(row["message_id"])): row
+                      for row in legacy_messages(self.turn_ledger, "main") + modern}
+        rows = []
+        matched_spans = None
+        try:
+            pages = source_client.iter_source_branch("main", anchor, instance=self.source_instance) if anchor else ()
+            for page in pages:
+                rows.extend(page)
+                matched_spans = [
+                    [locate_message(span[key], rows, field=f"quote_spans[{index}].{key}", unique_exact=True)
+                     for key in ("start_quote", "end_quote")]
+                    for index, span in enumerate(quote_spans)
+                ]
+                if any(match is None for pair in matched_spans for match in pair):
+                    continue
+                # A page can end at an assistant reply with its user message on the next page.
+                roles = {}
+                for row in rows:
+                    known = identities.get((row["role"], message_seq(row["message_id"])))
+                    if known:
+                        roles.setdefault(known["turn"], set()).add(row["role"])
+                endpoints = [identities.get((row["role"], message_seq(row["message_id"])))
+                             for pair in matched_spans for row in pair]
+                if all(not endpoint or len(roles[endpoint["turn"]]) == 2 for endpoint in endpoints):
+                    break
+        except source_client.SourceUnavailable as exc:
+            raise QuoteSourceError(exc.code) from exc
+        if not matched_spans:
+            raise QuoteSourceError("cc_quote_not_in_history")
+        rows.reverse()
+        corpus = []
+        roles_by_turn = {}
+        for row in rows:
+            seq = message_seq(row["message_id"])
+            known = identities.get((row["role"], seq))
+            if known:
+                turn = known["turn"]
+                roles_by_turn.setdefault(turn, []).append(row["role"])
+                corpus.append(dict(row, turn=turn, _source_session_id="main",
+                                   _source_message_id=seq, _source_recall_id=known.get("recall_id")))
+        corpus = [row for row in corpus
+                  if sorted(roles_by_turn[row["turn"]]) == ["assistant", "user"]]
+        positions = {row["_source_message_id"]: i for i, row in enumerate(corpus)}
+        matched_turns = set()
+        for index, pair in enumerate(matched_spans):
+            endpoints = []
+            for key, match in zip(("start_quote", "end_quote"), pair):
+                field = f"quote_spans[{index}].{key}"
+                if match is None:
+                    raise QuoteSourceError("cc_quote_not_in_history", field=field)
+                position = positions.get(message_seq(match["message_id"]))
+                if position is None:
+                    raise QuoteSourceError("source_identity_missing", field=field)
+                endpoints.append(position)
+            lo, hi = sorted(endpoints)
+            matched_turns.update(row["turn"] for row in corpus[lo:hi + 1])
+        # Live slots and off-branch turns leave gaps in the shared numbering.
+        # Keep only the verified pairs found between the actual endpoints.
+        return corpus, [(turn, turn) for turn in sorted(matched_turns)]
+
     def hook_turn_start(self, session_id: str | None, message: str,
                         heart_turn_id: str | None = None,
                         user_message_id: int | None = None,
@@ -643,8 +752,11 @@ class EmberService:
                         activity_revision: int | None = None,
                         window_revision: int | None = None,
                         context_message_ids: list[int] | None = None,
-                        revoked_message_ids: list[int] | None = None) -> dict[str, Any]:
+                        revoked_message_ids: list[int] | None = None,
+                        historical: bool = False) -> dict[str, Any]:
         """Persist the identity before work; commit response and effects together."""
+        if type(historical) is not bool or (historical and (session_id != "main" or not recall_id)):
+            return self._generation_error("invalid_arguments", "Historical registration requires main and recall_id")
         if context_message_ids is not None and (not isinstance(context_message_ids,list) or len(context_message_ids)>50000 or any(type(i) is not int or i<1 for i in context_message_ids)):
             return self._generation_error("invalid_arguments", "Invalid context message IDs")
         if revoked_message_ids is not None and (
@@ -662,7 +774,7 @@ class EmberService:
                 except Exception:
                     return self._generation_error("ledger_recovery_pending", "Earlier recall effects need recovery")
                 self.generations.supersede()
-                self._generation_contexts.clear()
+                self._clear_app_contexts()
                 result=self._hook_turn_start_legacy(
                     session_id, message, heart_turn_id, user_message_id, context_start_id,
                     context_message_ids)
@@ -698,16 +810,20 @@ class EmberService:
             request_context["context_message_ids"] = sorted(set(context_message_ids))
         semantic_context = {k: v for k, v in request_context.items()
                             if k not in ("occurred_at", "activity_revision", "window_revision") or v is not None}
-        request_hash = fingerprint(dict(semantic_context, message=message))
+        app_request_hash = fingerprint(dict(semantic_context, message=message))
+        request_hash = (fingerprint({"historical": True, "app_request_hash": app_request_hash})
+                        if historical else app_request_hash)
+        # Older CC bookkeeping may have committed the ordinary start before upgrading.
+        valid_hashes = (request_hash, app_request_hash) if historical else (request_hash,)
         old = self.generations.generation(rid)
         if old is not None:
-            if old["request_hash"] != request_hash:
+            if old["request_hash"] not in valid_hashes:
                 return self._generation_error("id_conflict", "recall_id content conflict")
             return self._replay_recall(rid)
         with self._generation_lock:
             old = self.generations.generation(rid)
             if old is not None:
-                if old["request_hash"] != request_hash:
+                if old["request_hash"] not in valid_hashes:
                     return self._generation_error("id_conflict", "recall_id content conflict")
                 return self._replay_recall(rid)
             try:
@@ -716,9 +832,23 @@ class EmberService:
                 return self._generation_error("ledger_recovery_pending", "Earlier recall effects need recovery")
             session = self.get_or_create_session(sid)
             turn = max(session.turn_counter, self.generations.max_turn(sid)) + 1
-            self.generations.reserve(rid, sid, request_hash, turn, {"request_context": request_context})
+            self.generations.reserve(rid, sid, request_hash, turn, {"request_context": request_context},
+                                     domain="cc" if historical else "app", historical=historical)
+            if historical:
+                out = {"session_id": sid, "turn": turn, "recall_id": rid, "injected": False}
+                entry = {"ember_session": sid, "ember_turn": turn,
+                         "user_message_id": int(seq), "recorded_at": _now_iso()}
+                refs = {"recall_id": rid, "session_id": sid, "anchor_message_id": seq, "events": []}
+                metadata = {"session_id": sid, "turn": turn, "request_context": request_context,
+                            "recall_refs": refs}
+                try:
+                    self.generations.commit_snapshot(rid, turn, out, metadata, [("turn_start", entry)], historical=True)
+                except Exception:
+                    self.generations.interrupt(rid)
+                    return self._generation_error("recall_outcome_unknown", "Historical registration failed before commit")
+                return self._replay_recall(rid)
             session.turn_counter = turn
-            self._generation_contexts.clear()
+            self._clear_app_contexts()
             self._live_turn = None
             key = (sid, turn)
             # Preview only the known real user seq. This preserves legacy window
@@ -905,8 +1035,19 @@ class EmberService:
     def sidecar_call_tool(self, name: str, arguments: dict,
                           recall_id: str | None = None,
                           tool_call_id: str | None = None,
-                          run_id: str | None = None) -> dict:
+                          run_id: str | None = None, domain: str = "app") -> dict:
         """HTTP-provided identity only. No identified request falls back to live."""
+        if domain == "cc":
+            if any(value is not None for value in (recall_id, tool_call_id, run_id)):
+                return self._generation_error("invalid_identity", "CC tools use the CC slot")
+            with self._generation_lock:
+                context = self._generation_contexts.get(self._cc_recall_id)
+                if context is None:
+                    if name in (TOOL_NAME, PROMISE_TOOL_NAME, REVISE_TOOL_NAME, "write_memory_knowledge"):
+                        return self._generation_error("cc_turn_missing", "No active CC turn. Submit a new prompt.")
+                    # Non-authoring tools continue to work between prompts.
+                    return self._dispatch_memory_tool(name, arguments, context={})
+                return self._dispatch_memory_tool(name, arguments, context=context)
         if run_id is not None:
             if recall_id is not None:
                 return run_failure("context_mismatch", "Ordinary recall and active run identities cannot be mixed")
@@ -936,7 +1077,7 @@ class EmberService:
             if row is None:
                 return self._generation_error("unknown_recall", "Unknown generation")
             ctx = self._generation_contexts.get(rid)
-            if row["state"] != "running" or ctx is None:
+            if row["state"] != "running" or ctx is None or row["domain"] != "app":
                 return self._generation_error("stale_generation", "Generation ended, was superseded or lost its live context")
             self.generations.begin_call(rid, cid, request_hash, name)
             try:
@@ -1008,7 +1149,7 @@ class EmberService:
                     return {'status':'failed','code':'invalid_memory_material','error':str(exc)}
             if context is not None:
                 return self._create_memory_in_context(context["session"], context["turn"],
-                    arguments, recall_id, tool_call_id)
+                    arguments, recall_id, tool_call_id, cc_context=context if "cc_session" in context else None)
             return self.sidecar_create_memory_event(arguments)
         if name == REVISE_TOOL_NAME:
             return self.sidecar_revise_memory_event(arguments,context)
@@ -1040,6 +1181,7 @@ class EmberService:
         召回起点过滤（来源全在窗口内的候选滤掉）。
         """
         session = self.get_or_create_session(session_id)
+        session.turn_counter = max(session.turn_counter, self.generations.max_turn(session.session_id))
         turn = session.next_turn()
         self.turn_ledger.record(session.session_id, turn, heart_turn_id,
                                 user_message_id=user_message_id)
@@ -1144,13 +1286,13 @@ class EmberService:
 
     def _create_memory_in_context(self, session: Session, turn: int, arguments: dict,
                                   recall_id: str | None = None,
-                                  tool_call_id: str | None = None) -> dict:
+                                  tool_call_id: str | None = None, *, cc_context: dict | None = None) -> dict:
         validated, err = validate_writer_arguments(arguments)
         if err:
             return writer_error_result(err)
         try:
             return self.write_validated_event(session, turn, validated,
-                writer_recall_id=recall_id, writer_tool_call_id=tool_call_id)
+                writer_recall_id=recall_id, writer_tool_call_id=tool_call_id, cc_context=cc_context)
         except QuoteSourceError as ex:
             return ex.as_result()
         except SupersessionError as ex:
@@ -1212,7 +1354,11 @@ class EmberService:
         event = self.store.get_event(resolved)
 
         from .event_mutation import visible, COOLDOWN_HINT
-        if not visible(self,event,context):
+        try:
+            editable = visible(self, event, context)
+        except QuoteSourceError as exc:
+            return exc.as_result()
+        if not editable:
             return {'status':'rejected','code':'cooldown_expired','event_id':resolved,'reason':COOLDOWN_HINT,'hint':COOLDOWN_HINT}
 
         # 锁死字段显式拒绝（防模型绕过白名单）
