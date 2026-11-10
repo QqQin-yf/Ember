@@ -136,6 +136,15 @@ class SliceRerankerTests(unittest.TestCase):
         self.assertEqual(result['slice_recall']['presentation_status'],'unavailable')
         self.assertEqual(len(self.recall.trace(self.metadata['trace_id'])['candidate_pool']),3)
 
+    def test_slice_cannot_reintroduce_visible_parent_event(self):
+        original={'prefix':'','presentations':[],'recall_refs':{'events':[]},'slice_recall':self.metadata}
+        with patch('ember.slice_presentation.RerankerConfig.load',return_value=self.rerank), \
+             patch('ember.slice_presentation.SliceEmbeddingConfig.load',return_value=self.config), \
+             patch('ember.slice_presentation.SliceReranker.rank',return_value=[
+                 {'index': i, 'relevance_score': 0.95} for i in range(3)]):
+            result=append_slice_presentations(self.svc,original,'query',blocked_events={'A'})
+        self.assertEqual([p['event_id'] for p in result['presentations'] if p['presentation']=='event_text'],['B'])
+
 
 if __name__=='__main__':
     unittest.main()

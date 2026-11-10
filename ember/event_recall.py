@@ -9,9 +9,10 @@ from .slice_embedding import SliceEmbeddingConfig
 from .slice_recall import SliceRecall
 
 
-def append_events(service,result,session,turn,text,start=None,entries=None,context_ids=None):
+def append_events(service,result,session,turn,text,start=None,entries=None,context_ids=None,*,visible=None):
     life=Lifecycle(service.store.root,service.source_instance)
-    blocked=filter_recall(service,{},session,start,context_ids)
+    blocked=filter_recall(service,{},session,start,context_ids) if visible is None else visible
+    eligible=life.eligibility_checker()
     trace_id=result['slice_recall'].get('trace_id')
     query=None;space=None
     if trace_id:
@@ -37,9 +38,10 @@ def append_events(service,result,session,turn,text,start=None,entries=None,conte
             routes.setdefault(route.event_id,[]).append(route.cue)
     selected=[]
     for event in service.store.all_events():
-        if event.event_id in blocked or service.pin_store.is_pinned(event.event_id) or not service.sleep_state.recall_allowed(event.event_id):
+        if (event.event_id in blocked or not eligible(event.event_id)
+                or service.pin_store.is_pinned(event.event_id) or not service.sleep_state.recall_allowed(event.event_id)):
             continue
-        if event.kind=='relationship':
+        if visible is None and event.kind=='relationship':
             from pathlib import Path
             if (Path(service.store.root)/'relationship_timeline.sqlite3').exists():
                 from .timeline import Timeline

@@ -187,6 +187,9 @@ def fallback(service, args):
         reason = 'local_state_unavailable'
 
     text = snapshot['text']
+    visible_ids = snapshot.get('visible_event_ids')
+    if isinstance(visible_ids, list):
+        metadata['visible_event_ids'] = list(visible_ids)
     directory = snapshot.get('entity_directory', '')
     if not isinstance(directory, str) or not directory or not text.endswith(directory):
         directory = ''
@@ -197,6 +200,9 @@ def fallback(service, args):
         if reason is None and len(expanded) <= cfg['total_chars']:
             text = expanded
             metadata['expanded_count'] = len(additions)
+            if isinstance(visible_ids, list):
+                metadata['visible_event_ids'] = list(dict.fromkeys(
+                    visible_ids + [event.event_id for event, _ in additions]))
         else:
             reason = reason or 'total_chars_exceeded'
             metadata['unexpanded'] = [{'event_id': event.event_id, 'reason': reason} for event, _ in additions]

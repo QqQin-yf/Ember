@@ -189,11 +189,13 @@ class EmberService:
                             user_text: str,
                             context_start_id: int | None = None,
                             deferred_entries: list[dict] | None = None,
-                            context_message_ids: list[int] | None = None
+                            context_message_ids: list[int] | None = None,
+                            visible_event_ids: list[str] | None = None
                             ) -> dict[str, Any]:
         """Retain Event/Entity recall; raw-slice retrieval is an independent branch."""
         from .hybrid_recall import automatic_hybrid_recall
-        return automatic_hybrid_recall(self, session, turn, user_text, context_start_id, deferred_entries, context_message_ids)
+        return automatic_hybrid_recall(self, session, turn, user_text, context_start_id,
+                                       deferred_entries, context_message_ids, visible_event_ids)
 
 
     # ---------- 记忆写入（对话流内，模型自主触发） ----------
@@ -753,12 +755,17 @@ class EmberService:
                         window_revision: int | None = None,
                         context_message_ids: list[int] | None = None,
                         revoked_message_ids: list[int] | None = None,
-                        historical: bool = False) -> dict[str, Any]:
+                        historical: bool = False,
+                        visible_event_ids: list[str] | None = None) -> dict[str, Any]:
         """Persist the identity before work; commit response and effects together."""
         if type(historical) is not bool or (historical and (session_id != "main" or not recall_id)):
             return self._generation_error("invalid_arguments", "Historical registration requires main and recall_id")
         if context_message_ids is not None and (not isinstance(context_message_ids,list) or len(context_message_ids)>50000 or any(type(i) is not int or i<1 for i in context_message_ids)):
             return self._generation_error("invalid_arguments", "Invalid context message IDs")
+        if visible_event_ids is not None and (
+                not isinstance(visible_event_ids, list) or len(visible_event_ids) > 10000
+                or any(not isinstance(eid, str) or not eid.strip() or len(eid)>256 for eid in visible_event_ids)):
+            return self._generation_error("invalid_arguments", "Invalid visible Event IDs")
         if revoked_message_ids is not None and (
                 not isinstance(revoked_message_ids, list)
                 or any(type(i) is not int or i < 1 for i in revoked_message_ids)
@@ -777,7 +784,7 @@ class EmberService:
                 self._clear_app_contexts()
                 result=self._hook_turn_start_legacy(
                     session_id, message, heart_turn_id, user_message_id, context_start_id,
-                    context_message_ids)
+                    context_message_ids, visible_event_ids)
                 from .promises import Promises
                 for item in result.get('presentations',[]):
                     if item.get('event_id'):
@@ -808,6 +815,8 @@ class EmberService:
             "window_revision": window_revision}
         if context_message_ids is not None:
             request_context["context_message_ids"] = sorted(set(context_message_ids))
+        if visible_event_ids is not None:
+            request_context["visible_event_ids"] = sorted(set(visible_event_ids))
         semantic_context = {k: v for k, v in request_context.items()
                             if k not in ("occurred_at", "activity_revision", "window_revision") or v is not None}
         app_request_hash = fingerprint(dict(semantic_context, message=message))
@@ -857,7 +866,8 @@ class EmberService:
             try:
                 entries: list[dict] = []
                 rec = self.run_recall_pipeline(session, turn, message,
-                    context_start_id=context_start_id, deferred_entries=entries,context_message_ids=context_message_ids)
+                    context_start_id=context_start_id, deferred_entries=entries, context_message_ids=context_message_ids,
+                    visible_event_ids=visible_event_ids)
                 stats = {k: rec[k] for k in (
                     "recalled_count", "entity_recalled", "entity_names", "filtered_by_sleep",
                     "filtered_by_window", "resolved_brought", "semantic_matched", "semantic_reason")}
@@ -1167,7 +1177,8 @@ class EmberService:
                         heart_turn_id: str | None = None,
                         user_message_id: int | None = None,
                         context_start_id: int | None = None,
-                        context_message_ids: list[int] | None = None) -> dict[str, Any]:
+                        context_message_ids: list[int] | None = None,
+                        visible_event_ids: list[str] | None = None) -> dict[str, Any]:
         """轮前钩子：开新一轮 + 本地召回，返回注入文本。
 
         返回 {injected, injected_text, session_id, turn, memory}。
@@ -1187,7 +1198,8 @@ class EmberService:
                                 user_message_id=user_message_id)
         rec = self.run_recall_pipeline(session, turn, message,
                                        context_start_id=context_start_id,
-                                       context_message_ids=context_message_ids)
+                                       context_message_ids=context_message_ids,
+                                       visible_event_ids=visible_event_ids)
         session.messages.append({"role": "user", "content": message, "turn": turn,
                                  "_source_session_id": session.session_id,
                                  "_source_message_id": message_seq(user_message_id)})

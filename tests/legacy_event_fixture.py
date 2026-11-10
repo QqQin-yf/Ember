@@ -164,7 +164,8 @@ class LegacyEventService(EmberService):
                             user_text: str,
                             context_start_id: int | None = None,
                             deferred_entries: list[dict] | None = None,
-                            context_message_ids: list[int] | None = None
+                            context_message_ids: list[int] | None = None,
+                            visible_event_ids: list[str] | None = None
                             ) -> dict[str, Any]:
         """保留的 Event 召回：Cue/Entity 双路 → Sleep 过滤 → 窗口过滤
         → Relation 展开 → 召回记账 → 前缀块构建。

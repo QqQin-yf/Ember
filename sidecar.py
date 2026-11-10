@@ -370,6 +370,7 @@ async def _hook_turn_start(request: Request, *, historical=False) -> JSONRespons
         activity_revision=body.get("activity_revision"), window_revision=body.get("window_revision"),
         context_message_ids=body.get("context_message_ids"),
         revoked_message_ids=body.get("revoked_message_ids"),
+        visible_event_ids=body.get("visible_event_ids"),
         historical=historical))
 
 

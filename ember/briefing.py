@@ -178,11 +178,13 @@ def _refresh(service,args,sid,mid,ids):
     with Timeline(service).db() as conn:
         relationship_ids=[r[0] for r in conn.execute('SELECT event_id FROM timeline WHERE published_mode IS NOT NULL')]
     included=list(dict.fromkeys(relationship_ids+[e.event_id for e in pinned]+[row['event'].event_id for row in chosen]+[e.event_id for e in due]))
+    visible_ids=list(dict.fromkeys(timeline['original_event_ids']+[e.event_id for e in pinned]+[row['event'].event_id for row in chosen]+[e.event_id for e in due]))
     if included:
         service.recall_ledger.record(sid,0,'briefing',included)
     report={'status':'ok','text':text,'chars':len(text),'session_id':sid,'revision':revision,
             'refreshed_at':now.isoformat(),'source_sync':source_sync,'timeline':timeline['health'],'knowledge':knowledge,
             'entity_directory':directory,
+            'visible_event_ids':visible_ids,
             'stats':{'relationship':len(relationship_ids),'pinned':len(pinned),'new72':len(recent),'kept_recent':len(chosen),
                      'due_promises':len(due),'pending_promises':pending,'dropped':dropped}}
     path=service._briefing_path()

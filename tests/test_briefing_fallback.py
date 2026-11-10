@@ -47,6 +47,8 @@ class BriefingFallbackTests(unittest.TestCase):
         self.assertTrue(report['text'].startswith(snapshot['text']+'\n以下为'))
         self.assertEqual(report['snapshot_revision'], snapshot['revision'])
         self.assertEqual(report['expanded_count'], 4)
+        self.assertEqual(set(report['visible_event_ids']),
+                         {'existing','new-summary','new-core','new-ten','new-due'})
         self.assertEqual(report['unexpanded_count'], 0)
         text = report['text']
         for value in ('CORE-new-core', 'CORE-new-ten', 'SUMMARY-new-summary', 'CORE-new-due'):

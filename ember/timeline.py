@@ -217,6 +217,7 @@ class Timeline:
                 rows={r['event_id']:dict(r) for r in conn.execute('SELECT * FROM timeline')}
                 conn.execute('UPDATE timeline SET published_mode=NULL')
                 blocks=[]
+                original_ids=[]
                 order={eid:i for i,eid in enumerate(events)}
                 for point in self.points(conn):
                     if all(onstage(events[eid]) for eid in point['event_ids'] if eid in events):
@@ -230,9 +231,12 @@ class Timeline:
                     text=(self.service._briefing_source_block(event) if self.service.pin_store.is_pinned(eid) else
                           rows[eid]['compressed'] if mode=='compressed' else event.core)
                     blocks.append((order[eid],text))
+                    if mode=='original':
+                        original_ids.append(eid)
                     conn.execute('UPDATE timeline SET published_mode=? WHERE event_id=?',(mode,eid))
                 health=self.health(conn,events)
-                return {'text':'\n'.join(text for _,text in sorted(blocks,key=lambda item:item[0])),'health':health}
+                return {'text':'\n'.join(text for _,text in sorted(blocks,key=lambda item:item[0])),
+                        'health':health, 'original_event_ids':original_ids}
 
     def mode(self,eid):
         if not self.path.exists():
