@@ -478,13 +478,18 @@ async def _events_for_sources(request: Request) -> JSONResponse:
     svc = _service_or_404(request)
     if isinstance(svc, JSONResponse):
         return svc
-    from ember.source_events import events_for_sources
+    from ember.source_events import events_for_sources, failure_from_exception, response_for
     try:
         body = await request.json()
     except ValueError:
         body = None
-    result = await asyncio.to_thread(events_for_sources, svc, body)
-    return JSONResponse(result, status_code=200 if result['status']=='ok' else 400)
+    try:
+        result = await asyncio.to_thread(events_for_sources, svc, body)
+    except Exception as exc:
+        payload, status = failure_from_exception(exc)
+        return JSONResponse(payload, status_code=status)
+    payload, status = response_for(result)
+    return JSONResponse(payload, status_code=status)
 
 
 async def _extraction_page(request: Request) -> JSONResponse:
