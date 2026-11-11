@@ -2,6 +2,7 @@
 from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
 import json
+import logging
 from pathlib import Path
 import sqlite3
 
@@ -14,10 +15,25 @@ from .source_refs import event_reference
 
 
 NOTICE = '以下为上次简报之后的新记忆，简报尚未完成刷新'
+# A conflicting writer usually holds the lock only for a commit. 300ms rides
+# that out. by-source's caller stops at 5s, and one read may open several
+# files, so a longer wait would look like a dropped call instead of store_busy.
+# Zero fails on any in-flight commit.
+READ_LOCK_WAIT_SECONDS = 0.3
+_log = logging.getLogger(__name__)
+
+
+def _skip(kind, exc):
+    """Record the exception type only. Messages can carry paths or row text."""
+    name = type(exc).__name__ if isinstance(exc, BaseException) else exc
+    _log.warning("source read skipped %s: %s", kind, name)
 
 
 class ReadState:
-    """Local SQLite reads only; absent databases stay absent, busy reads fail fast."""
+    """Local SQLite reads only; absent databases stay absent.
+
+    A busy file is waited on briefly, then the read fails.
+    """
     def __init__(self, service, stack):
         self.service, self.stack = service, stack
         self.connections = {}
@@ -29,7 +45,8 @@ class ReadState:
             path = Path(self.service.store.root, name)
             conn = None
             if path.exists():
-                conn = sqlite3.connect(path.resolve().as_uri()+'?mode=ro', uri=True, timeout=0)
+                conn = sqlite3.connect(path.resolve().as_uri()+'?mode=ro', uri=True,
+                                       timeout=READ_LOCK_WAIT_SECONDS)
                 self.stack.callback(conn.close)
                 conn.row_factory = sqlite3.Row
                 conn.execute('PRAGMA query_only=ON')
@@ -48,35 +65,111 @@ class ReadState:
     def sources(self, event):
         merged = self.rows('pin_policy.sqlite3', 'merged',
                            'SELECT source_ids FROM merged WHERE event_id=?', (event.event_id,))
-        members = json.loads(merged[0][0]) if merged else []
+        try:
+            members = self._member_ids(merged, event)
+        except sqlite3.Error:
+            raise
+        except (KeyError, TypeError, ValueError, IndexError) as exc:
+            _skip('merge', exc)
+            return None
+        if members is None:
+            return None
         sources = []
-        for eid in members or [event.event_id]:
-            explicit = self.rows('knowledge.sqlite3', 'slice_memory_sources',
-                'SELECT sources_json FROM slice_memory_sources WHERE instance=? AND memory_id=?',
-                (self.service.source_instance, eid))
-            if explicit:
-                refs = json.loads(explicit[0][0])
-                for ref in refs:
-                    saved = self.rows('turn_slices.sqlite3', 'turn_slices',
-                        'SELECT instance,content_hash FROM turn_slices WHERE slice_id=?', (ref['slice_id'],))
-                    if (not saved or saved[0]['instance'] != self.service.source_instance
-                            or saved[0]['content_hash'] != ref['content_hash']):
-                        return None
-                sources.extend(refs)
+        for eid in members:
+            try:
+                part = self._member_sources(eid)
+            except sqlite3.Error:
+                raise
+            except (KeyError, TypeError, ValueError, AttributeError, IndexError) as exc:
+                # One member of a merge can be half-written. Keep the others.
+                _skip('member', exc)
                 continue
-            original = self.service.store.get_event(eid)
-            ref = event_reference(original, 'expanded', self.service.event_sources,
-                                  self.service.turn_spans.span_of_event(original))
-            if any(m.get('assistant_message_id') is None for m in ref['turn_messages']):
-                if self.bindings is None:
-                    rows = self.rows(Path(self.service.generations.path).name, 'source_completions',
-                                     'SELECT * FROM source_completions')
-                    self.bindings = {(r['source_hash'], r['turn']): json.loads(r['binding_json']) for r in rows}
-                ref = _project(ref, self.service.event_sources.get(eid), self.bindings)
-            if ref['source_evidence'] not in ('frozen_messages', 'generation_completed') or not ref['turn_messages']:
+            if part is None:
                 return None
-            sources.extend(dict(row, session_id=ref['source_session_id']) for row in ref['turn_messages'])
+            sources.extend(part)
         return sources
+
+    def _member_ids(self, merged, event):
+        if not merged:
+            return [event.event_id]
+        parsed = json.loads(merged[0][0])
+        if not parsed:
+            return [event.event_id]
+        if (not isinstance(parsed, list) or any(
+                not isinstance(item, str) or not item for item in parsed)):
+            _skip('merge', 'incomplete')
+            return None
+        return parsed
+
+    def _member_sources(self, eid):
+        explicit = self.rows('knowledge.sqlite3', 'slice_memory_sources',
+            'SELECT sources_json FROM slice_memory_sources WHERE instance=? AND memory_id=?',
+            (self.service.source_instance, eid))
+        if explicit:
+            refs = json.loads(explicit[0][0])
+            return self._explicit_refs(refs)
+        original = self.service.store.get_event(eid)
+        ref = event_reference(original, 'expanded', self.service.event_sources,
+                              self.service.turn_spans.span_of_event(original))
+        messages = ref['turn_messages']
+        if not isinstance(messages, list):
+            return None
+        if any(not isinstance(item, dict) for item in messages):
+            _skip('turn-message', 'incomplete')
+            messages = [item for item in messages if isinstance(item, dict)]
+            if not messages:
+                return None
+            ref = dict(ref, turn_messages=messages)
+        if any(item.get('assistant_message_id') is None for item in messages):
+            if self.bindings is None:
+                self._load_bindings()
+            ref = _project(ref, self.service.event_sources.get(eid), self.bindings)
+        if ref['source_evidence'] not in ('frozen_messages', 'generation_completed') or not ref['turn_messages']:
+            return None
+        session_id = ref['source_session_id']
+        if not isinstance(session_id, str):
+            return None
+        usable = []
+        for row in ref['turn_messages']:
+            if not isinstance(row, dict):
+                _skip('turn-message', 'incomplete')
+                continue
+            usable.append(dict(row, session_id=session_id))
+        return usable
+
+    def _explicit_refs(self, refs):
+        if not isinstance(refs, list):
+            _skip('slice-sources', 'incomplete')
+            return None
+        usable = []
+        for ref in refs:
+            # A slice that was stored without its id or hash cannot be checked.
+            # Leave verified siblings in place. A hash mismatch still rejects
+            # the whole event, same as a changed slice.
+            if not isinstance(ref, dict) or 'slice_id' not in ref or 'content_hash' not in ref:
+                _skip('slice-ref', 'incomplete')
+                continue
+            saved = self.rows('turn_slices.sqlite3', 'turn_slices',
+                'SELECT instance,content_hash FROM turn_slices WHERE slice_id=?', (ref['slice_id'],))
+            if (not saved or saved[0]['instance'] != self.service.source_instance
+                    or saved[0]['content_hash'] != ref['content_hash']):
+                return None
+            usable.append(ref)
+        return usable
+
+    def _load_bindings(self):
+        rows = self.rows(Path(self.service.generations.path).name, 'source_completions',
+                         'SELECT * FROM source_completions')
+        bindings = {}
+        for row in rows:
+            try:
+                payload = json.loads(row['binding_json'])
+                if not isinstance(payload, dict):
+                    raise TypeError
+                bindings[(row['source_hash'], row['turn'])] = payload
+            except (KeyError, TypeError, ValueError, IndexError) as exc:
+                _skip('binding', exc)
+        self.bindings = bindings
 
 
 def fallback(service, args):
