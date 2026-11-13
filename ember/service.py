@@ -1211,6 +1211,9 @@ class EmberService:
         from .promises import TOOL_NAMES as PROMISE_TOOLS, dispatch as promise_dispatch
         if name in PROMISE_TOOLS:
             return promise_dispatch(self,name,arguments,context,recall_id)
+        from .proposals import TOOLS as PROPOSAL_TOOLS, dispatch as proposal_dispatch
+        if name in PROPOSAL_TOOLS:
+            return proposal_dispatch(self,name,arguments,context)
         from .extraction import TOOL_NAMES as EXTRACTION_TOOLS, dispatch as extraction_dispatch
         if name in EXTRACTION_TOOLS:
             return extraction_dispatch(self,name,arguments)
@@ -1351,10 +1354,11 @@ class EmberService:
         from .organization_tools import tool_specs as organization_specs
         from .timeline import tool_specs as timeline_specs
         from .pin_policy import tool_specs as pin_specs
+        from .proposals import tool_specs as proposal_specs
         from .extraction import tool_specs as extraction_specs
         return (build_tools_spec() + [build_revise_tool_spec()[0]]
                 + build_search_tool_spec() + build_pin_tool_specs()
-                + tool_specs() + promise_specs() + organization_specs() + timeline_specs() + pin_specs() + extraction_specs())
+                + tool_specs() + promise_specs() + organization_specs() + timeline_specs() + pin_specs() + extraction_specs() + proposal_specs())
 
     def sidecar_create_memory_event(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """MCP 工具 create_memory_event 执行体：进行中的一轮 + 参数 → 落库。

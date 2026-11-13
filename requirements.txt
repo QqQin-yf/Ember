@@ -4,6 +4,7 @@
 # 上界 <2 是硬约束：mcp 2.x 改掉了 lowlevel Server API（list_tools 装饰器
 # 不复存在），sidecar.py 按 1.x API 编写——2026-10-15 VPS 部署实测踩坑
 mcp>=1.8,<2
+google-auth[requests]>=2,<3
 
 # IANA time zones on Windows, for local-midnight promise expiry.
 tzdata

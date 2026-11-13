@@ -106,6 +106,8 @@ class Pins:
     def pin(self,eid):
         eid=Lifecycle(self.service.store.root).canonical(eid)
         event=self.service.store.get_event(eid);name=category(event)
+        if event.confidence is not None and event.confidence <= 5:
+            raise ValueError('low_confidence_no_recall')
         cfg=lifecycle_config()['pin']
         if not self.service.pin_store.is_pinned(eid) and name!='promise':
             items=[e for e in self.events() if category(e)==name]

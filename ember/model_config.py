@@ -72,7 +72,9 @@ def settings(purpose, *, require_key=True, path=None):
         name=use['provider'];p=provider(name)
         policy={**data.get('policy',{}),**use}
         model=use['model'];transport=p.get('transport','http')
-        if not isinstance(model,str) or not model.strip() or transport not in ('http','docker'):
+        if not isinstance(model,str) or not model.strip() or transport not in ('http','docker','vertex'):
+            raise ValueError
+        if transport == 'vertex' and use['operation'] != 'chat':
             raise ValueError
         base_env=p.get('base_url_env','')
         if base_env and (not isinstance(base_env,str) or not re.fullmatch('[A-Z][A-Z0-9_]*',base_env)):

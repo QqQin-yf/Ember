@@ -78,9 +78,13 @@ def write_event(service, args, context):
         raise ValueError(str(error))
     from .event_mutation import replacement_targets, apply_replacement
     targets=replacement_targets(service,validated)
-    sources=store.sources(args.get('source_slice_ids'))
+    sources=context.get('source_versions') or store.sources(args.get('source_slice_ids'))
     rows=store.read_sources(sources)
     event=service._build_event(context['session'],context['turn'],validated['event'],validated.get('entity'))
+    if context.get('proposal_id'):
+        event.event_id = context['reviewed_event_id']
+        event.version_id = event.event_id + '-v1'
+        event.confidence = context['review_confidence']
     event.source_ref='slice-sources/'+event.event_id
     event.raw_ref=event.source_ref
     event.turn_refs=[]
@@ -88,6 +92,12 @@ def write_event(service, args, context):
     corpus=[m for r in rows for m in r['messages']]
     service._validate_focus(event,corpus)
     store.save_event_sources(event.event_id,sources)
+    if context.get('proposal_id'):
+        event.provenance_refs.extend(['gemini-proposal', 'app-reviewed', context['proposal_id']])
+        if event.confidence <= 5:
+            from .memory_lifecycle import Lifecycle
+            Lifecycle(service.store.root,service.source_instance).mark(
+                event.event_id,'no_recall','low_confidence',[context['proposal_id']])
     service.store.write_event(event)
     for index,route in enumerate(validated['recall_routes'],1):
         service.store.write_route(RecallRoute(route_id=f'rt_{event.event_id}_{index:02d}',event_id=event.event_id,

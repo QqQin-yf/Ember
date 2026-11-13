@@ -45,6 +45,11 @@ class KnowledgeStore:
                 sources_json TEXT NOT NULL,reason TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'pending');''')
             if 'confidence' not in {r[1] for r in db.execute('PRAGMA table_info(knowledge)')}:
                 db.execute('ALTER TABLE knowledge ADD COLUMN confidence INTEGER NOT NULL DEFAULT 8')
+            columns = {row[1] for row in db.execute('PRAGMA table_info(knowledge)')}
+            if 'proposal_id' not in columns:
+                db.execute('ALTER TABLE knowledge ADD COLUMN proposal_id TEXT')
+            if 'significance' not in columns:
+                db.execute('ALTER TABLE knowledge ADD COLUMN significance INTEGER')
             with db:
                 yield db
         finally:
@@ -89,18 +94,23 @@ class KnowledgeStore:
             row['pinned'] = bool(row['pinned'])
         return rows
 
-    def create(self, kind, content, cues, source_ids):
+    def create(self, kind, content, cues, source_ids, *, confidence=8, significance=None, proposal_id=None, source_versions=None):
         if kind not in ('cognition','pattern') or not isinstance(content,str) or not content.strip():
             raise ValueError('kind and nonempty content required')
         if not isinstance(cues,list) or not cues or any(not isinstance(c,str) or not c.strip() for c in cues):
             raise ValueError('At least one nonempty recall cue required')
-        sources = self.sources(source_ids)
+        sources = source_versions if source_versions is not None else self.sources(source_ids)
+        if source_versions is not None:
+            self.read_sources(sources)
         digest = fingerprint([kind,content.strip(),cues,sources])
-        mid = 'KN-' + fingerprint([self.instance,digest])[:24]
+        mid = 'KN-' + fingerprint([self.instance,proposal_id or digest])[:24]
+        if proposal_id and confidence <= 5:
+            from .memory_lifecycle import Lifecycle
+            Lifecycle(self.root,self.instance).mark(mid,'no_recall','low_confidence',[proposal_id])
         with self.db() as db:
-            db.execute('INSERT OR IGNORE INTO knowledge(memory_id,instance,kind,content,cues_json,sources_json,content_hash) VALUES (?,?,?,?,?,?,?)',
-                (mid,self.instance,kind,content.strip(),json.dumps(cues,ensure_ascii=False),json.dumps(sources),digest))
-        pin = self.pin(mid, True)
+            db.execute('INSERT OR IGNORE INTO knowledge(memory_id,instance,kind,content,cues_json,sources_json,content_hash,confidence,significance,proposal_id) VALUES (?,?,?,?,?,?,?,?,?,?)',
+                (mid,self.instance,kind,content.strip(),json.dumps(cues,ensure_ascii=False),json.dumps(sources),digest,confidence,significance,proposal_id))
+        pin = self.pin(mid, True) if confidence > 5 else {'pinned':False,'reason':'low_confidence'}
         return {'status':'created','memory_id':mid,'pin':pin,'source_slice_ids':source_ids,
                 'embedding_status':'pending' if not next(r for r in self.all() if r['memory_id']==mid)['vector'] else 'ready'}
 
@@ -146,7 +156,10 @@ class KnowledgeStore:
 
     def save_event_sources(self, eid, sources):
         with self.db() as db:
-            db.execute('INSERT INTO slice_memory_sources VALUES (?,?,?)',(eid,self.instance,json.dumps(sources)))
+            db.execute('INSERT OR IGNORE INTO slice_memory_sources VALUES (?,?,?)',(eid,self.instance,json.dumps(sources)))
+            saved = db.execute('SELECT instance,sources_json FROM slice_memory_sources WHERE memory_id=?',(eid,)).fetchone()
+            if saved['instance'] != self.instance or json.loads(saved['sources_json']) != sources:
+                raise ValueError('event_source_conflict')
 
     def groups(self, pending=True):
         if not self.path.exists():

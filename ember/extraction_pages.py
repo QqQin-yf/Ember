@@ -93,10 +93,18 @@ def registered_runs(service):
 def start(service, body):
     from .source_sync import sync_increment
     session_id, ids = scope(body)
+    proposal_mode = body.get('mode') == 'proposals'
+    if body.get('mode', 'raw') not in ('raw', 'proposals') or (proposal_mode and ids is not None):
+        raise ValueError('invalid_extraction_mode')
+    if proposal_mode:
+        from .proposals import TOOLS
+        allowed_tools = TOOLS
+    else:
+        allowed_tools = ALLOWED_TOOLS
     rid = body.get('maintenance_id')
     if not isinstance(rid, str) or not rid.startswith('extraction-') or len(rid) > 200:
         raise ValueError('extraction maintenance_id required')
-    request_hash = fingerprint({'kind': 'extraction', 'session_id': session_id,
+    request_hash = fingerprint({'kind': 'proposals' if proposal_mode else 'extraction', 'session_id': session_id,
                                 'assistant_message_ids': None if ids is None else sorted(ids, key=int)})
     with service._generation_lock:
         registered = registered_runs(service)
@@ -105,8 +113,8 @@ def start(service, body):
             if rid not in registered or previous['request_hash'] != request_hash:
                 return {'status': 'failed', 'code': 'id_conflict'}
             if previous['state'] == 'running' and rid in service._generation_contexts:
-                view = status(service, service._generation_contexts[rid]['extraction_scope'])
-                return {'status': 'ok', 'maintenance_id': rid, 'allowed_tools': sorted(ALLOWED_TOOLS),
+                view = _view(service, service._generation_contexts[rid]['extraction_scope'])
+                return {'status': 'ok', 'maintenance_id': rid, 'allowed_tools': sorted(allowed_tools),
                         'complete': view['complete'], 'pending_count': view['pending_count']}
             return {'status': 'failed', 'code': 'extraction_context_lost'}
         with service.generations._db() as conn:
@@ -123,12 +131,13 @@ def start(service, body):
         with service.runs.db() as conn:
             if conn.execute("SELECT 1 FROM runs WHERE state IN ('running','finishing')").fetchone():
                 return {'status': 'failed', 'code': 'generation_busy'}
-        result = sync_increment(service)
+        result = {'status':'ok'} if proposal_mode else sync_increment(service)
         if result.get('status') != 'ok':
             return result
         queue = Extraction(service)
-        queue.discover()
-        selected = sources(service, session_id, ids)
+        if not proposal_mode:
+            queue.discover()
+        selected = [] if proposal_mode else sources(service, session_id, ids)
         if ids is not None and ids - {str(row['assistant_message_id']) for row in selected}:
             return {'status': 'failed', 'code': 'extraction_sources_pending'}
         session = service.get_or_create_session(session_id)
@@ -136,6 +145,8 @@ def start(service, body):
         selected_scope = {'session_id': session_id,
                           'assistant_message_ids': [int(row['assistant_message_id']) for row in selected],
                           'slice_ids': [row['slice_id'] for row in selected]}
+        if proposal_mode:
+            selected_scope['mode'] = 'proposals'
         with service.generations._db() as conn:
             conn.execute("INSERT INTO generations(recall_id,session_id,request_hash,turn,state) VALUES (?,?,?,?,'running')",
                          (rid, session_id, request_hash, turn))
@@ -146,8 +157,8 @@ def start(service, body):
             'request_context': {'session_id': session_id,
                                 'context_message_ids': [int(message['message_id']) for row in selected for message in row['messages']]},
         }
-        view = status(service, service._generation_contexts[rid]['extraction_scope'])
-        return {'status': 'ok', 'maintenance_id': rid, 'allowed_tools': sorted(ALLOWED_TOOLS),
+        view = _view(service, service._generation_contexts[rid]['extraction_scope'])
+        return {'status': 'ok', 'maintenance_id': rid, 'allowed_tools': sorted(allowed_tools),
                 'complete': view['complete'], 'pending_count': view['pending_count']}
 
 
@@ -167,15 +178,28 @@ def finish(service, body):
         calls = service.generations.calls_for(rid)
         if any(call['state'] != 'completed' for call in calls):
             return {'status': 'failed', 'code': 'tool_outcome_unknown'}
-        result = status(service, context['extraction_scope'])
+        result = _view(service, context['extraction_scope'])
         service.generations.finish(rid, 'done', fingerprint(body), result, None)
         service._generation_contexts.pop(rid, None)
         return result
 
 
+def _view(service, selected):
+    if selected.get('mode') != 'proposals':
+        return status(service, selected)
+    from .proposals import pending_count
+    pending = pending_count(service, selected['session_id'], selected.get('review_id'))
+    return {'status':'ok','complete':pending == 0,'pending_count':pending}
+
+
 def scoped_arguments(service, context, name, arguments):
     """Enforce the page scope at the tool boundary, including skip operations."""
     selected = context['extraction_scope']
+    if selected.get('mode') == 'proposals':
+        from .proposals import TOOLS
+        if name not in TOOLS:
+            raise ValueError('extraction_tool_not_allowed')
+        return dict(arguments)
     allowed = set(selected['slice_ids'])
     if name not in ALLOWED_TOOLS:
         raise ValueError('extraction_tool_not_allowed')

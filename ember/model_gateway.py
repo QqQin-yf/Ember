@@ -13,6 +13,23 @@ from .model_config import settings, ModelConfigError
 log=logging.getLogger('ember.models')
 
 
+def _vertex_request(cfg, body):
+    from google.auth import default
+    from google.auth.transport.requests import AuthorizedSession
+    credentials, project = default(scopes=['https://www.googleapis.com/auth/cloud-platform'])
+    project = os.environ.get('GOOGLE_CLOUD_PROJECT') or project
+    if not project:
+        raise ModelConfigError('vertex_project_missing')
+    from urllib.parse import quote
+    base = 'https://aiplatform.googleapis.com/v1/projects/' + quote(project, safe='')
+    url = base + '/locations/global/endpoints/openapi/chat/completions'
+    with AuthorizedSession(credentials) as session:
+        response = session.post(url, json=body, timeout=cfg.timeout_seconds)
+        if not response.ok:
+            raise ModelCallError('http', response.status_code)
+        return response.json()
+
+
 class ModelCallError(RuntimeError):
     def __init__(self,kind,status=None):
         self.kind,self.status=kind,status
@@ -48,6 +65,13 @@ def call_model(purpose,payload,*,config=None,timeout_seconds=None,retries=None):
         if cfg.temperature is not None:body.setdefault('temperature',cfg.temperature)
         if cfg.max_tokens is not None:body.setdefault('max_tokens',cfg.max_tokens)
     endpoint={'chat':'/chat/completions','embedding':'/embeddings','rerank':'/rerank'}[cfg.operation]
+    if cfg.transport == 'vertex':
+        from google.auth.exceptions import GoogleAuthError
+        from requests.exceptions import RequestException
+        try:
+            return _vertex_request(cfg, body)
+        except (GoogleAuthError, RequestException):
+            raise ModelCallError('vertex_unavailable') from None
     for attempt in range(cfg.retries+1):
         start=time.monotonic();failure=None
         try:

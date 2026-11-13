@@ -73,6 +73,34 @@ def index_text(row):
     return slice_text(doc)
 
 
+def merge_exact_duplicates(service, rows):
+    """Consolidate only identical formal records with the same evidence."""
+    life = Lifecycle(service.store.root, service.source_instance)
+    seen = {}
+    with service._generation_lock:
+        for row in rows:
+            if row['kind'] not in ('event', 'knowledge') or not row['sources'] or not life.eligible(row['id']):
+                continue
+            doc = row['document']
+            if row['kind'] == 'event':
+                event = service.store.get_event(row['id'])
+                if event.kind != 'daily' or service.pin_store.is_pinned(event.event_id):
+                    continue
+                fields = [event.summary, event.core, event.entity_refs,
+                          event.confidence, event.significance]
+            else:
+                if doc['pinned']:
+                    continue
+                fields = [doc['kind'], doc['content'], doc['cues'], doc['confidence']]
+            key = fingerprint([row['kind'], fields, sorted(
+                (ref['slice_id'], ref['content_hash']) for ref in row['sources'])])
+            target = seen.setdefault(key, row['id'])
+            if target == row['id']:
+                continue
+            with life.db() as db:
+                db.execute('INSERT OR IGNORE INTO aliases VALUES (?,?)', (row['id'], target))
+
+
 def knowledge_reviews(service, rows, vectors):
     life=Lifecycle(service.store.root,service.source_instance)
     items=[r for r in rows if r['kind']=='knowledge' and life.eligible(r['id'])]
@@ -208,6 +236,8 @@ def apply_result(service,payload,output):
         source=service.entity_store.get(item['source']);target=service.entity_store.get(life.canonical(item['target']))
         if source.entity_id==target.entity_id:
             continue
+        if source.summary and source.summary != target.summary:
+            target.summary = '\n'.join(filter(None,(target.summary,source.summary)))
         target.aliases=list(dict.fromkeys(target.aliases+[source.name]+source.aliases))
         target.directions=list({d.direction_id:d for d in target.directions+source.directions}.values())
         target.provenance_refs=list(dict.fromkeys(target.provenance_refs+source.provenance_refs+['merged:'+source.entity_id]))
@@ -215,8 +245,6 @@ def apply_result(service,payload,output):
         with life.db() as db:
             db.execute('INSERT OR REPLACE INTO aliases VALUES (?,?)',(source.entity_id,target.entity_id))
         patch_members(service,source.entity_id,target.entity_id)
-    for item in output.get('attachments',[]):
-        patch_members(service,None,life.canonical(item['entity_id']),item['event_id'])
     for item in output.get('extensions',[]):
         group=next(g for g in payload['known_groups'] if g['group_id']==item['group_id'])
         material=life.material(item['group_id'])
@@ -295,10 +323,10 @@ class MemoryMaintenanceWorker:
                 vectors[row['id']]=json.loads(old['vector'])
             with service._generation_lock:
                 legacy_backfill(service,rows,vectors,embedding)
-            knowledge_reviews(service,rows,vectors)
+            merge_exact_duplicates(service, rows)
             active=[r for r in rows if life.canonical(r['id'])==r['id']]
             for row in active:
-                if row['kind']=='knowledge':
+                if row['kind'] not in ('event','entity'):
                     continue
                 nearby=sorted([r for r in active if r['id']!=row['id'] and
                     r['kind'] in ({'event','entity'} if row['kind'] in ('event','entity') else {'slice','knowledge'}) and
@@ -330,7 +358,10 @@ class MemoryMaintenanceWorker:
                         current={r['id']:r for r in catalog(service)}
                         if any(fingerprint(current.get(r['id']))!=fingerprint(r) for r in payload['materials']):
                             raise ValueError('maintenance_source_changed')
-                        apply_result(service,payload,result)
+                        maintenance = {key: result[key] for key in ('relations','entity_merges') if key in result}
+                        maintenance['relations'] = [r for r in maintenance.get('relations', [])
+                                                    if r['type'] in ('continues','related_to','contrasts')]
+                        apply_result(service,payload,maintenance)
                     with life.db() as db:
                         db.execute("UPDATE tasks SET state='done',error=NULL WHERE id=?",(key,))
                 except Exception as exc:

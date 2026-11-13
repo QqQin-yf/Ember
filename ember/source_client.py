@@ -59,6 +59,25 @@ def fetch_source_increment(cursor=None, *, instance='default', limit=100):
                 raise SourceUnavailable('Invalid source message','source_increment_invalid')
     return data
 
+def fetch_source_timestamps(session_id, message_ids, *, instance):
+    query = urllib.parse.urlencode({'session_id':session_id,'message_ids':','.join(message_ids)})
+    req = urllib.request.Request(SOURCE_URL.rstrip('/')+'/api/source/timestamps?'+query)
+    req.add_header('X-Heart-Instance',instance)
+    if SOURCE_TOKEN:
+        req.add_header('Authorization','Bearer '+SOURCE_TOKEN)
+    try:
+        with _open_source(req) as response:
+            data = json.load(response)
+    except (OSError,ValueError):
+        return {}
+    if not isinstance(data,dict) or not isinstance(data.get('messages'),list):
+        return {}
+    allowed = set(message_ids)
+    return {seq:row['created_at'] for row in data['messages'] if isinstance(row,dict)
+            and (seq:=message_seq(row.get('message_id'))) in allowed
+            and type(row.get('created_at')) is int}
+
+
 def _open_source(request):
     # Loopback and Tailscale providers must not be sent to a public HTTP proxy.
     import ipaddress

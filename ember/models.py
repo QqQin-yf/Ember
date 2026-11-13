@@ -70,6 +70,7 @@ class Event:
     # 无 cue、语义召回走附加席）；被判联印证（判出 relation）后
     # 改写为 "affirmed"（2026-10-16 设计夜定稿）。
     origin: str = ""
+    confidence: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

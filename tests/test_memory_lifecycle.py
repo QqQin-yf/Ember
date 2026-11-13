@@ -159,7 +159,7 @@ class MemoryLifecycleTests(unittest.TestCase):
         self.assertNotIn(a,self.store.briefing()['memory_ids'])
         self.assertEqual(call('review_memory_knowledge',args,'write'),result)
 
-    def test_worker_restart_does_not_resend_completed_judgments(self):
+    def test_worker_indexes_raw_slice_without_legacy_model_judgment(self):
         config=SliceEmbeddingConfig('test')
         self.slices.save_embedding(self.source,config.space,[1.,0.])
         reg=SimpleNamespace(names=['default'],service=lambda n:self.service)
@@ -169,9 +169,8 @@ class MemoryLifecycleTests(unittest.TestCase):
              patch('ember.memory_maintenance.MaintenanceClient.judge',return_value=[{}]) as judge:
             worker=MemoryMaintenanceWorker(reg)
             self.assertTrue(worker.process_one())
-            self.assertTrue(worker.process_one())
             self.assertFalse(MemoryMaintenanceWorker(reg).process_one())
-            self.assertEqual(judge.call_count,1)
+            judge.assert_not_called()
             self.assertEqual(embed.call_count,0) # reuse the persisted slice vector
 
     def test_sleep_merges_knowledge_and_old_id_still_drills_to_sources(self):

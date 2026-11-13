@@ -34,6 +34,8 @@ class TurnSliceStore:
                 content_hash TEXT NOT NULL,
                 saved_at TEXT NOT NULL
             )""")
+            db.execute("""CREATE TABLE IF NOT EXISTS slice_source_times (
+                slice_id TEXT PRIMARY KEY, occurred_at TEXT NOT NULL)""")
             db.execute("""CREATE TABLE IF NOT EXISTS slice_embeddings (
                 slice_id TEXT NOT NULL,
                 space TEXT NOT NULL,
@@ -111,6 +113,15 @@ class TurnSliceStore:
                    OR turn_slices.user_is_system != excluded.user_is_system""",
                 (slice_id, instance, session_id, key[2], key[3], int(omitted),
                  body, content_hash, now))
+            # A turn belongs to the date its reply completes, including midnight crossings.
+            stamp = messages[-1].get('created_at')
+            if type(stamp) in (int, float):
+                try:
+                    occurred = datetime.fromtimestamp(stamp / 1000, timezone.utc).isoformat()
+                except (OverflowError, OSError, ValueError):
+                    pass
+                else:
+                    db.execute('INSERT OR REPLACE INTO slice_source_times VALUES (?,?)', (slice_id, occurred))
         saved = self.get(slice_id)
         if saved is None:
             raise source_client.SourceUnavailable('Source turn was revoked', 'source_revoked')

@@ -345,12 +345,28 @@ class ExtractionWorker:
         self.registry=registry;self.stop_event=asyncio.Event()
 
     async def run(self):
+        import logging
+        from .extraction_consumer import consume
+        next_discovery = {}
         while not self.stop_event.is_set():
+            progressed = False
+            interval = lifecycle_config()['extraction']['worker_seconds']
             for name in self.registry.names:
+                if self.stop_event.is_set():
+                    return
+                queue = Extraction(self.registry.service(name))
                 try:
-                    await asyncio.to_thread(Extraction(self.registry.service(name)).discover)
+                    progressed = await asyncio.to_thread(consume, queue) or progressed
                 except Exception:
-                    pass  # Unacknowledged sources remain candidates for retry.
+                    logging.getLogger(__name__).exception('extraction background worker failed')
+                if time.monotonic() >= next_discovery.get(name, 0):
+                    try:
+                        await asyncio.to_thread(queue.discover)
+                    except Exception:
+                        pass  # Unacknowledged sources remain candidates for retry.
+                    next_discovery[name] = time.monotonic() + interval
+            if progressed:
+                continue
             try:
                 await asyncio.wait_for(self.stop_event.wait(),timeout=lifecycle_config()['extraction']['worker_seconds'])
             except asyncio.TimeoutError:

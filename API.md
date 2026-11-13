@@ -318,3 +318,11 @@ POST /ember/runs/start、POST /ember/runs/finish、GET /ember/runs/{run_id} 提�
 维护模型调用普通 `/mcp/`，用维护身份作为 X-Ember-Recall-Id，并提供独立 X-Ember-Tool-Call-Id。只开放原文批次、Event／约定／知识写入及必要读取工具。写入必须携带范围内的 source_slice_ids，整组跳过会限制在当前范围，范围之外的材料保留。get_memory_extraction_batch 可选 source_session_id 与 assistant_message_ids，维护会话会自动施加自身范围。
 
 `POST /ember/extraction/finish` 接收 maintenance_id，关闭该次整理并返回其快照范围的实际状态。complete=false 表示仍有未处理来源，可以新建尝试继续。工具结果未知时保留不确定状态并返回 tool_outcome_unknown，不能盲目重发写入。已完成的 finish 可重放。
+
+### 原话提议审阅
+
+`get_memory_proposals` 开启或继续一次审阅。首次最多选十条，按重要度排序，截止同分随机选，名单随 review_id 固定。每次返回最多三条，以及 remaining 和 done。需要原话时调用 `read_memory_proposal_sources`，用 next_offset 续读。
+
+`review_memory_proposals` 接收 review_id 和逐条 accept / reject。accept 保存第三方正文，须提供 App AI 自评的 confidence、significance 和召回 cue。日常 Event 另需原话 focus，可附 entity。reject 结束提议，之后可以用现有写入工具自行写。回执只返回结果 ID、冲突、失败、剩余数和完成状态。待审默认置信度 5，App 审阅后给 5 或以下的正式条目退出自动召回。
+
+按台北日期生成提议需要增量来源在已完成助手消息上提供 created_at，单位为 Unix 毫秒。缺少来源时间的切片保留原有读取和提取资格。Gemini 的原话召回判断按切片内容版本保存，提议审阅状态与该判断分别记录。

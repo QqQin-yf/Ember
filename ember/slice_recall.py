@@ -121,7 +121,13 @@ class SliceRecall:
                             events[eid]=Event.from_dict(document)
                         except (TypeError,ValueError):
                             pass
+                excluded = set()
+                if purpose == 'automatic':
+                    from .proposals import recall_exclusions
+                    excluded = recall_exclusions(self.root,self.instance)
                 for row in rows:
+                    if (row['slice_id'],row['content_hash']) in excluded and not memberships.get(row['slice_id']):
+                        continue
                     if not eligible(row['slice_id']):
                         continue
                     messages = json.loads(row['messages_json'])

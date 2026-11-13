@@ -277,7 +277,7 @@ class Organization:
             if target:
                 order={e.entity_id:i for i,e in enumerate(self.service.entity_store.all())}
                 primary,absorbed=sorted([card,self.service.entity_store.get(target)],key=lambda e:(e.created_at or '',order[e.entity_id]))
-                text=prose('entity_summary','合并确定同一对象的卡片，根据相关事件客观整理；项目保留有效现状，人/动物/地方保留两边全部已知事实。',
+                text=prose('entity_summary','合并确定同一对象的卡片。只综合改写原有内容，逐句有据，保留原意、归属、时间、条件、例外与分歧；禁止增加原文未表达的事实、推断或说法。',
                            [primary.to_dict(),absorbed.to_dict()])
                 primary.summary='根据相关事件客观整理：'+text
                 primary.aliases=list(dict.fromkeys(primary.aliases+absorbed.aliases+[absorbed.name]))
@@ -340,10 +340,18 @@ class Organization:
                     card = self.service.entity_store.get(eid)
                     self.attach({'name':card.name,'event_ids':[event.event_id]},config,entity_id=eid)
                 if state == 'proposed' and not refs:
-                    self.attach({'name':decision['name'],'entity_type':decision.get('type','object'),
-                                 'event_ids':[event.event_id],'evidence':original},config,require_distinct=True)
-                needs_identity = not refs and state not in ('none','proposed')
-                if not needs_identity and not origin:
+                    life = Lifecycle(self.root)
+                    name = decision['name'].strip()
+                    matches = [card for card in self.service.entity_store.all()
+                               if life.eligible(card.entity_id)
+                               and name.casefold() in {value.strip().casefold()
+                                                      for value in [card.name,*card.aliases]}]
+                    if not matches or (len(matches) == 1 and
+                            decision.get('type',matches[0].entity_type) == matches[0].entity_type):
+                        eid = matches[0].entity_id if matches else 'ENT-'+fingerprint([name,[event.event_id]])[:16]
+                        self.attach({'name':name,'entity_type':decision.get('type','object'),
+                                     'event_ids':[event.event_id],'evidence':original},config,entity_id=eid)
+                if not origin:
                     with self.db() as conn:
                         conn.execute('INSERT OR REPLACE INTO processed VALUES (?,?,NULL,0)',(event.event_id,digest))
                     continue
@@ -355,13 +363,12 @@ class Organization:
                             nearby.append(other)
                 nearby=nearby[:lifecycle_config()['grouping']['batch_size']]
                 evidence={e.event_id:fingerprint(document(e)) for e in [event,*nearby]}
-                result=ask('memory_group','用向量候选判断是否同一东西。具体对象归 entity，一类事归 theme；关系事件不提 Entity。主题只选足够数量的同类低分日常或完结约定。可以不归组。'
-                           + ('' if needs_identity else '本事件只允许主题归组。'),
+                result=ask('memory_group','只判断是否属于同一主题。保留事实、说话人、条件、例外和分歧；不得增加材料未表达的内容。',
                            {'subject':original,'entity_hint':decision.get('name'),'nearby':[document(e) for e in nearby],
                             'themes':[{k:v for k,v in t.items() if k not in ('vector','space')} for t in self.themes()]},
                            {'type':'object','required':['groups'],'properties':{'groups':{'type':'array','items':{
                                'type':'object','required':['category','name','event_ids'],'properties':{
-                                   'category':{'enum':['theme','entity']},'name':{'type':'string','minLength':1},
+                                   'category':{'enum':['theme']},'name':{'type':'string','minLength':1},
                                    'event_ids':{'type':'array','minItems':1,'uniqueItems':True,'items':{'type':'string'}},
                                    'aliases':{'type':'array','items':{'type':'string'}},'theme_id':{'type':['string','null']},
                                    'entity_type':{'enum':['project','person','animal','place','object']}}}}}})
@@ -376,16 +383,6 @@ class Organization:
                         for eid in group['event_ids']:
                             self.copy_pool(self.service.store.get_event(eid))
                         self.summarize_theme(group,origin,config)
-                    elif group['category']=='entity' and needs_identity:
-                        # A neighboring event may support a grouping, but its own
-                        # author decision must not be overwritten by this subject.
-                        members = [self.service.store.get_event(mid) for mid in group['event_ids']]
-                        members = [e for e in members if not e.entity_refs
-                                   and (e.entity_decision or {}).get('state') not in ('linked','none','proposed')]
-                        if members:
-                            self.attach(dict(group,event_ids=[e.event_id for e in members],
-                                             evidence=[document(e) for e in members]),config,
-                                        require_distinct=state == 'unresolved')
                 with self.db() as conn:
                     conn.execute('INSERT OR REPLACE INTO processed VALUES (?,?,NULL,0)',(event.event_id,digest))
             except Exception as exc:

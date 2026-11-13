@@ -6,6 +6,7 @@
     "proxy": "environment"
   },
   "providers": {
+    "vertex": {"transport": "vertex"},
     "siliconflow": {
       "base_url": "https://api.siliconflow.cn/v1",
       "key_env": "SILICONFLOW_API_KEY"
@@ -154,8 +155,8 @@
     },
     "slice_groups": {
       "operation": "chat",
-      "provider": "zhipu",
-      "model": "glm-4.7",
+      "provider": "vertex",
+      "model": "google/gemini-3.8-flash",
       "timeout_seconds": 90,
       "temperature": 0,
       "options": {

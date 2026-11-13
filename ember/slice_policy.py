@@ -11,7 +11,12 @@ from .slice_embedding import SliceEmbeddingClient, slice_text
 from .turn_slices import TurnSliceStore
 
 
+from .slice_prefilter import courtesy_turn
+
+
 def informative(source, config=None):
+    if courtesy_turn(source):
+        return False
     cfg=(config or lifecycle_config())['slice']
     texts=[re.sub(r'[\W_]+','',m['content']).casefold() for m in source['messages']]
     fillers={re.sub(r'[\W_]+','',s).casefold() for s in cfg['filler_texts']}
