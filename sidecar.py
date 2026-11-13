@@ -175,7 +175,10 @@ session_manager = StreamableHTTPSessionManager(
 
 async def _handle_mcp(scope, receive, send) -> None:
     names = {b"x-ember-recall-id": "recall_id", b"x-ember-run-id": "run_id",
-             b"x-ember-tool-call-id": "tool_call_id"}
+             b"x-ember-tool-call-id": "tool_call_id",
+             b"x-ember-source-session": "source_session",
+             b"x-ember-source-user": "source_user",
+             b"x-ember-source-assistant": "source_assistant"}
     context = {}
     seen = set()
     for key, value in scope.get("headers") or []:
