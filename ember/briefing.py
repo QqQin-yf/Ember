@@ -69,17 +69,25 @@ def entity_directory(service, cfg):
         card.entity_id,
     ))
     lines = ['【Entity 目录】写 Event 时可引用已有 ID；需要细节可查 read_entity_events。']
-    used = len(lines[0])
+    if not cards:
+        return ''
+    status = f'已展示全部 {len(cards)} 个 Entity。'
+    used = len(lines[0]) + 1 + len(f'展示 {len(cards)}/{len(cards)} 个 Entity，省略 {len(cards)} 个较不活跃的 Entity。')
     for card in cards:
-        summary = ' '.join(card.summary.removeprefix('根据相关事件客观整理：').split())
+        summary = ' '.join(card.summary.split())
         first = summary.partition('。')[0]
         limit = cfg.get('entity_directory_line_chars', 100)
         description = first if len(first) <= limit else first[:limit - 1] + '…'
-        line = f'• {" ".join(card.name.split())} · {description or "暂无概述"} · {card.entity_id}'
-        if used + len(line) + 1 <= cfg.get('entity_directory_chars', 1000):
-            lines.append(line)
-            used += len(line) + 1
-    return '\n'.join(lines) if len(lines) > 1 else ''
+        line = f'• {" ".join(card.name.split())} · {description or "待补概述"} · {card.entity_id}'
+        if used + len(line) + 1 > cfg.get('entity_directory_chars', 1000):
+            break
+        lines.append(line)
+        used += len(line) + 1
+    shown = len(lines) - 1
+    if shown < len(cards):
+        status = f'展示 {shown}/{len(cards)} 个 Entity，省略 {len(cards)-shown} 个较不活跃的 Entity。'
+    lines.insert(1,status)
+    return '\n'.join(lines)
 
 
 def refresh(service,args):
@@ -126,7 +134,20 @@ def _refresh(service,args,sid,mid,ids):
     pinned=[e for e in pins.events() if e.kind!='relationship' and not onstage(e)]
     pin_ids={e.event_id for e in pinned}
     pin_blocks=[pins.event_block(e) for e in pinned]
-    knowledge=KnowledgeStore(service.store.root,service.source_instance).briefing()
+    store=KnowledgeStore(service.store.root,service.source_instance)
+    knowledge=store.briefing()
+    profiles=store.identity_profiles()
+    profile_lines=[]
+    limit=lifecycle_config()['pin']['knowledge_chars']
+    cognition={row['memory_id']:row for row in store.all() if row['kind']=='cognition'}
+    for profile in profiles:
+        profile_lines.append(f"【{profile['label']}】{profile['overview'] or '待 App AI 整理'}")
+        for mid in profile['cognition_ids']:
+            item=cognition.get(mid)
+            if item:
+                content=item['content']
+                profile_lines.append(store.line(dict(item,content=content[:limit]+('…' if len(content)>limit else ''))))
+    profile_text='\n'.join(profile_lines)
     promises=Promises(service)
     due=[e for e in promises.overdue(now) if not onstage(e)]
     due_blocks=[f"约定到期 [{e.event_id}] {e.summary if e.event_id in pin_ids else e.core}（due={e.due}，open）" for e in due]
@@ -147,7 +168,8 @@ def _refresh(service,args,sid,mid,ids):
         promises.enter(event.event_id,'briefing',span)
     pending=len(promises.pending())
     pending_line=f'还有 {pending} 条进过上下文的约定没处理' if pending else ''
-    fixed=[timeline['text'],*pin_blocks,knowledge['text'],*due_blocks,pending_line]
+    directory = entity_directory(service, cfg)
+    fixed=[directory,profile_text,timeline['text'],*pin_blocks,knowledge['text'],*due_blocks,pending_line]
     remaining=max(0,cfg['total_chars']-sum(len(text)+1 for text in fixed if text))
     life=Lifecycle(service.store.root,service.source_instance)
     recent=[]
@@ -171,9 +193,8 @@ def _refresh(service,args,sid,mid,ids):
     while chosen and used>remaining:
         row=chosen.pop();used-=len(row['line'])+1
         dropped['core' if row['core'] else 'summary']+=1
-    text='\n'.join(part for part in [timeline['text'],*pin_blocks,
+    text='\n'.join(part for part in [profile_text,timeline['text'],*pin_blocks,
                      '\n'.join(row['line'] for row in chosen),knowledge['text'],*due_blocks,pending_line] if part)
-    directory = entity_directory(service, cfg)
     text = '\n'.join(part for part in (text, directory) if part)
     with Timeline(service).db() as conn:
         relationship_ids=[r[0] for r in conn.execute('SELECT event_id FROM timeline WHERE published_mode IS NOT NULL')]
@@ -183,7 +204,7 @@ def _refresh(service,args,sid,mid,ids):
         service.recall_ledger.record(sid,0,'briefing',included)
     report={'status':'ok','text':text,'chars':len(text),'session_id':sid,'revision':revision,
             'refreshed_at':now.isoformat(),'source_sync':source_sync,'timeline':timeline['health'],'knowledge':knowledge,
-            'entity_directory':directory,
+            'entity_directory':directory,'identity_profiles':profiles,
             'visible_event_ids':visible_ids,
             'stats':{'relationship':len(relationship_ids),'pinned':len(pinned),'new72':len(recent),'kept_recent':len(chosen),
                      'due_promises':len(due),'pending_promises':pending,'dropped':dropped}}

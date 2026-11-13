@@ -24,16 +24,14 @@ class TimelineWorkerTests(unittest.TestCase):
 
     def test_idle_ticks_do_not_scan_or_synchronize_and_pin_changes_wake(self):
         self.event()
-        with patch('ember.timeline.prose',return_value='short'):
-            self.assertTrue(self.worker.process_one('one'))
+        self.assertTrue(self.worker.process_one('one'))
         with patch.object(self.service.store,'all_events',side_effect=AssertionError('idle scan')), \
                 patch.object(Timeline,'synchronize',side_effect=AssertionError('idle sync')):
             for _ in range(3):
                 self.assertFalse(self.worker.process_one('one'))
         self.service.pin_store.add('r')
-        with patch('ember.timeline.prose',side_effect=AssertionError('no recompression')):
-            self.assertTrue(self.worker.process_one('one'))
-            self.assertFalse(self.worker.process_one('one'))
+        self.assertTrue(self.worker.process_one('one'))
+        self.assertFalse(self.worker.process_one('one'))
         self.service.pin_store.add('r')
         self.assertFalse(self.worker.process_one('one'))
         self.service.pin_store.remove('r')
@@ -42,13 +40,12 @@ class TimelineWorkerTests(unittest.TestCase):
     def test_retry_waits_for_deadline_and_survives_restart(self):
         self.event()
         with patch('ember.timeline.time.time',return_value=1000), \
-                patch('ember.timeline.prose',side_effect=OSError('offline')):
+                patch.object(Timeline,'extract',side_effect=OSError('offline')):
             self.worker.process_one('one')
         self.assertIsNone(ready(self.tmp.name,now=1000))
         self.assertIsNotNone(ready(self.tmp.name,now=100000))
         restarted=TimelineWorker(self.worker.registry)
-        with patch('ember.timeline.prose',return_value='recovered'):
-            self.assertTrue(restarted.process_one('one'))
+        self.assertTrue(restarted.process_one('one'))
         self.assertIsNone(ready(self.tmp.name))
 
     def test_new_write_during_processing_is_not_lost(self):
@@ -64,8 +61,7 @@ class TimelineWorkerTests(unittest.TestCase):
         self.assertIsNone(ready(self.tmp.name))
         event.kind='relationship';self.service.store.write_event(event)
         self.assertIsNotNone(ready(self.tmp.name))
-        with patch('ember.timeline.prose',return_value='short'):
-            self.worker.process_one('one')
+        self.worker.process_one('one')
         event.kind='daily';self.service.store.write_event(event)
         self.assertTrue(self.worker.process_one('one'))
 
@@ -73,14 +69,13 @@ class TimelineWorkerTests(unittest.TestCase):
         self.event()
         from ember.timeline_work import finish
         finish(self.tmp.name,ready(self.tmp.name))
-        with patch('ember.timeline.prose',return_value='recovered') as model:
+        with patch.object(Timeline,'prepare',autospec=True) as prepare:
             self.assertTrue(self.worker.process_one('one'))
-        self.assertEqual(model.call_count,1)
+        prepare.assert_called_once()
 
     def test_refresh_failure_schedules_background_retry_after_worker_is_idle(self):
         self.event()
-        with patch('ember.timeline.prose',return_value='short'):
-            self.worker.process_one('one')
+        self.worker.process_one('one')
         from ember.timeline_work import ready
         self.assertIsNone(ready(self.tmp.name,now=1000))
         # A later cut can make an old compressed batch eligible for points.

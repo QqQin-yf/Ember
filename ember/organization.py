@@ -129,18 +129,14 @@ class Organization:
             raise ValueError('unknown_entity_identity')
         return result['same_id'], result.get('distinct', False) or not require_distinct
 
-    def attach(self,group,config,*,entity_id=None,require_distinct=False):
+    def attach(self,group,config,*,entity_id):
         eid = entity_id
-        if eid is None:
-            cards=self.entity_candidates(group['name'],group.get('aliases',[]),config)
-            eid, distinct=self.identify(group,cards,require_distinct=require_distinct)
-            if not eid and not distinct:
-                return None
-        eid=eid or 'ENT-'+fingerprint([group['name'],sorted(group['event_ids'])])[:16]
         card=next((e for e in self.service.entity_store.all() if e.entity_id==eid),None)
         new_card = card is None
         card=Entity.from_dict(card.to_dict()) if card else Entity(eid,group['name'],entity_type=group.get('entity_type','object'),created_at=datetime.now(timezone.utc).isoformat())
-        events=[e for e in self.service.store.all_events() if eid in e.entity_refs or e.event_id in group['event_ids']]
+        eligible = Lifecycle(self.root,self.service.source_instance).eligibility_checker()
+        events=[e for e in self.service.store.all_events() if eligible(e.event_id)
+                and (eid in e.entity_refs or e.event_id in group['event_ids'])]
         project=card.entity_type=='project' or any(e.kind=='project' for e in events)
         old=card.summary
         evidence={e.event_id:fingerprint(document(e)) for e in events}
@@ -154,19 +150,26 @@ class Organization:
             if project:
                 self.project_supersession(events)
             return eid
-        text=prose('entity_summary',
-                   '根据相关事件客观整理。项目只写当前有效现状，新事实取代旧状态。' if project else
-                   '根据相关事件客观整理，只返回新知道的补充；不要删除、重写或否定已有内容，没有新增则返回空格。',
-                   {'existing':old,'events':[document(e) for e in events]})
-        text=('根据相关事件客观整理：'+text if project or not old else
-              old+'\n'+text.strip() if text.strip() and not old.endswith(text.strip()) else old)
-        card.summary=text;card.summary_at=datetime.now(timezone.utc).isoformat()
+        material = []
+        for event in events:
+            source = self.service.read_source_event(event.event_id, truncate=False)
+            material.append({**document(event), 'original': source.get('transcript') or None})
+        text = prose('entity_summary',
+                     '阅读全部关联 Event，综合全部 Event 的 core 字段写一份第三人称客观概述。'
+                     '原话仅用于核对说话人、条件和上下文，缺原话时依据 core。保留原意、时间、例外和分歧；'
+                     '区分计划、感受、猜测和已发生事实。不得补充材料未表达的事实，也不要只依据最新事件。',
+                     {'entity': card.name, 'events': material})
+        card.summary=text.strip();card.summary_at=datetime.now(timezone.utc).isoformat()
         card.aliases=aliases
         with self.service._generation_lock:
             current=next((e for e in self.service.entity_store.all() if e.entity_id==eid),None)
             if current and current.summary!=old:
                 raise ValueError('entity_changed_during_summary')
-            if any(fingerprint(document(self.service.store.get_event(mid)))!=digest for mid,digest in evidence.items()):
+            eligible = Lifecycle(self.root,self.service.source_instance).eligibility_checker()
+            linked = {e.event_id for e in self.service.store.all_events() if eid in e.entity_refs and eligible(e.event_id)}
+            if linked - evidence.keys() or any(
+                    fingerprint(document(self.service.store.get_event(mid))) != digest
+                    for mid,digest in evidence.items()):
                 raise ValueError('event_changed_during_summary')
             self.service.entity_store.upsert(card);self.service.entity_store.save()
             for event in events:
@@ -310,8 +313,9 @@ class Organization:
                             (event.event_id,fingerprint(document(event)),type(exc).__name__,time.time()+lifecycle_config()['slice']['retry_seconds']))
             return False
         self.merge_changed(config)
+        eligible = Lifecycle(self.root,self.service.source_instance).eligibility_checker()
         for event in self.service.store.all_events():
-            if event.kind=='relationship' or Lifecycle(self.root).canonical(event.event_id)!=event.event_id:
+            if event.kind=='relationship' or not eligible(event.event_id):
                 continue
             original=document(event)
             decision = event.entity_decision or {}
@@ -343,7 +347,7 @@ class Organization:
                     life = Lifecycle(self.root)
                     name = decision['name'].strip()
                     matches = [card for card in self.service.entity_store.all()
-                               if life.eligible(card.entity_id)
+                               if card.status == 'open' and life.eligible(card.entity_id)
                                and name.casefold() in {value.strip().casefold()
                                                       for value in [card.name,*card.aliases]}]
                     if not matches or (len(matches) == 1 and
@@ -357,7 +361,7 @@ class Organization:
                     continue
                 nearby=[]
                 for other in self.service.store.all_events():
-                    if other.kind!='relationship' and other.event_id!=event.event_id:
+                    if other.kind!='relationship' and other.event_id!=event.event_id and eligible(other.event_id):
                         ov=self.vector(other,config)
                         if len(ov)==len(vector) and cosine(vector,ov)>=lifecycle_config()['grouping']['threshold']:
                             nearby.append(other)

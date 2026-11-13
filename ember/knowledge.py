@@ -43,6 +43,10 @@ class KnowledgeStore:
                 CREATE TABLE IF NOT EXISTS memory_groups (
                 group_id TEXT PRIMARY KEY,instance TEXT NOT NULL,kind TEXT NOT NULL,
                 sources_json TEXT NOT NULL,reason TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'pending');''')
+            db.execute('''CREATE TABLE IF NOT EXISTS identity_profiles (
+                instance TEXT NOT NULL, subject TEXT NOT NULL,
+                overview TEXT NOT NULL, cognition_ids TEXT NOT NULL,
+                PRIMARY KEY(instance,subject))''')
             if 'confidence' not in {r[1] for r in db.execute('PRAGMA table_info(knowledge)')}:
                 db.execute('ALTER TABLE knowledge ADD COLUMN confidence INTEGER NOT NULL DEFAULT 8')
             columns = {row[1] for row in db.execute('PRAGMA table_info(knowledge)')}
@@ -146,6 +150,45 @@ class KnowledgeStore:
         return {'text':text,'memory_ids':[r['memory_id'] for r in chosen],
                 'chars':len(text),'limit':cfg['knowledge_limit'],'item_char_limit':cfg['knowledge_chars'],
                 'token_upper_bound':token_bound(text),'count_method':'utf8_bytes_upper_bound'}
+
+    def identity_profiles(self):
+        from .memory_lifecycle import Lifecycle
+        labels = {'user': '关于你（用户）', 'assistant': '关于我（App AI）'}
+        records = {}
+        if self.path.exists():
+            with self.db() as db:
+                records = {r['subject']: r for r in db.execute(
+                    'SELECT * FROM identity_profiles WHERE instance=?', (self.instance,))}
+        life = Lifecycle(self.root, self.instance)
+        cognition = {r['memory_id']: r for r in self.all() if r['kind']=='cognition'}
+        profiles = []
+        for subject, label in labels.items():
+            row = records.get(subject)
+            ids = []
+            if row:
+                for mid in json.loads(row['cognition_ids']):
+                    canonical = life.canonical(mid)
+                    if canonical in cognition and canonical not in ids and life.eligible(canonical):
+                        ids.append(canonical)
+            profiles.append({'subject':subject, 'label':label, 'overview':row['overview'] if row else '',
+                             'cognition_ids':ids})
+        return profiles
+
+    def set_identity_profile(self, subject, overview, cognition_ids):
+        from .memory_lifecycle import Lifecycle
+        if (subject not in ('user','assistant') or not isinstance(overview,str) or len(overview.strip())>600
+                or not isinstance(cognition_ids,list) or len(cognition_ids)>8
+                or any(not isinstance(mid,str) for mid in cognition_ids)
+                or len(set(cognition_ids))!=len(cognition_ids)):
+            raise ValueError('invalid_identity_profile')
+        life = Lifecycle(self.root,self.instance)
+        cognition = {r['memory_id'] for r in self.all() if r['kind']=='cognition'}
+        if any(mid not in cognition or not life.eligible(mid) for mid in cognition_ids):
+            raise ValueError('profile_requires_active_cognition')
+        with self.db() as db:
+            db.execute('INSERT OR REPLACE INTO identity_profiles VALUES (?,?,?,?)',
+                       (self.instance, subject, overview.strip(), json.dumps(cognition_ids)))
+        return {'status':'ok','profile':next(r for r in self.identity_profiles() if r['subject']==subject)}
 
     def event_sources(self, eid):
         if not self.path.exists():

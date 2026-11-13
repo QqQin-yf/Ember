@@ -56,6 +56,14 @@ class FiveLayerBriefingTests(unittest.TestCase):
         self.assertIn('Deliz · 聊天前端 · project', report['entity_directory'])
         self.assertNotIn('详细历史', report['entity_directory'])
 
+    def test_entity_directory_reports_truncation(self):
+        self.cfg['briefing']['entity_directory_chars'] = 150
+        for i in range(8):
+            self.service.entity_store.upsert(Entity(str(i), 'Project '+str(i), summary='Long name '*10))
+        report = self.refresh()
+        self.assertIn('/8', report['entity_directory'])
+        self.assertNotIn('全部', report['entity_directory'])
+
     def test_five_layers_and_score_promise_exclusions(self):
         self.event('relationship','relationship')
         self.event('pin',pin=True)
@@ -69,10 +77,8 @@ class FiveLayerBriefingTests(unittest.TestCase):
         self.event('due','promise',due=(datetime.now(timezone.utc)-timedelta(hours=1)).isoformat())
         self.event('pinned-promise','promise',10,pin=True)
         self.knowledge('KNOWLEDGE-CONTENT')
-        with patch('ember.timeline.prose',return_value='compressed'):
-            Timeline(self.service).prepare()
-        with patch('ember.timeline.prose',side_effect=AssertionError('No new model work at assembly')):
-            report=self.refresh()
+        Timeline(self.service).prepare()
+        report=self.refresh()
         text=report['text']
         for earlier,later in [('CORE-relationship','RAW-pin'),('RAW-pin','CORE-recent-core'),
                               ('CORE-recent-core','KNOWLEDGE-CONTENT'),('KNOWLEDGE-CONTENT','CORE-due')]:
@@ -85,6 +91,21 @@ class FiveLayerBriefingTests(unittest.TestCase):
             self.assertNotIn(excluded,text)
         self.assertTrue(text.endswith('还有 1 条进过上下文的约定没处理'))
         self.assertNotIn('sig10',report['stats']);self.assertNotIn('recalled_top',report['stats'])
+
+    def test_app_identity_profiles_are_pinned_and_hide_retired_cognition(self):
+        from ember.knowledge_tools import dispatch
+        mid = self.knowledge('PROFILE-COGNITION')
+        args = {'subject':'assistant','overview':'APP-OVERVIEW','cognition_ids':[mid]}
+        self.assertEqual(dispatch(self.service,'set_identity_profile',args)['status'],'failed')
+        self.assertEqual(dispatch(self.service,'set_identity_profile',args,{})['status'],'ok')
+        first = self.refresh()
+        self.assertEqual([p['subject'] for p in first['identity_profiles']],['user','assistant'])
+        self.assertIn('APP-OVERVIEW',first['text'])
+        self.assertEqual(first['identity_profiles'][1]['cognition_ids'],[mid])
+        Lifecycle(self.tmp.name).mark(mid,'no_recall','low_confidence',['review'])
+        second = self.refresh()
+        self.assertNotIn('PROFILE-COGNITION',second['text'])
+        self.assertEqual(second['identity_profiles'][1]['cognition_ids'],[])
 
     def test_get_is_frozen_until_next_explicit_refresh(self):
         self.event('pin',pin=True);self.knowledge('OLD-KNOWLEDGE')

@@ -95,8 +95,8 @@
     },
     "memory_group": {
       "operation": "chat",
-      "provider": "zhipu",
-      "model": "glm-4.7",
+      "provider": "vertex",
+      "model": "google/gemini-3.8-flash",
       "timeout_seconds": 90,
       "temperature": 0,
       "options": {
@@ -105,8 +105,8 @@
     },
     "theme_summary": {
       "operation": "chat",
-      "provider": "zhipu",
-      "model": "glm-4.7",
+      "provider": "vertex",
+      "model": "google/gemini-3.8-flash",
       "timeout_seconds": 90,
       "temperature": 0,
       "options": {
@@ -115,8 +115,8 @@
     },
     "entity_identity": {
       "operation": "chat",
-      "provider": "zhipu",
-      "model": "glm-4.7",
+      "provider": "vertex",
+      "model": "google/gemini-3.8-flash",
       "timeout_seconds": 90,
       "temperature": 0,
       "options": {
@@ -125,18 +125,8 @@
     },
     "entity_summary": {
       "operation": "chat",
-      "provider": "zhipu",
-      "model": "glm-4.7",
-      "timeout_seconds": 90,
-      "temperature": 0,
-      "options": {
-        "batch_size": 16
-      }
-    },
-    "relationship_compress": {
-      "operation": "chat",
-      "provider": "zhipu",
-      "model": "glm-4.7",
+      "provider": "vertex",
+      "model": "google/gemini-3.8-flash",
       "timeout_seconds": 90,
       "temperature": 0,
       "options": {
@@ -145,8 +135,8 @@
     },
     "relationship_points": {
       "operation": "chat",
-      "provider": "zhipu",
-      "model": "glm-4.7",
+      "provider": "vertex",
+      "model": "google/gemini-3.8-flash",
       "timeout_seconds": 90,
       "temperature": 0,
       "options": {
@@ -165,8 +155,8 @@
     },
     "relationship_links": {
       "operation": "chat",
-      "provider": "zhipu",
-      "model": "glm-4.7",
+      "provider": "vertex",
+      "model": "google/gemini-3.8-flash",
       "timeout_seconds": 90,
       "temperature": 0,
       "options": {

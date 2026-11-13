@@ -81,7 +81,7 @@ def propose_day(service):
     # Treat the first turns of the following day as context only. Their source
     # versions participate in the receipt so late arrivals can reopen analysis.
     q.recover_outputs()
-    for row in q.candidates(config):
+    for row in q.candidates(config,revisit_legacy=True):
         stamp = times.get(row['slice_id'])
         if not stamp:
             continue
@@ -98,7 +98,7 @@ def propose_day(service):
         key = day + ':' + session
         refs = [{k: row[k] for k in ('slice_id','content_hash','session_id','user_message_id','assistant_message_id')}
                 for row in rows]
-        digest = fingerprint([refs,[(row['slice_id'],row['content_hash']) for row in boundary]])
+        digest = fingerprint([2,refs,[(row['slice_id'],row['content_hash']) for row in boundary]])
         with q.db() as db:
             tables(db)
             prior = db.execute('SELECT digest FROM proposal_days WHERE instance=? AND day=?',
@@ -129,6 +129,10 @@ def _propose(q, day, digest, refs, rows, boundary=()):
         '按日期内原话顺序分析。先为每轮判断原文召回 keep/exclude/unsure。'
         '留下可在类似场景补充的经历、选择、感受或互动。信任、安心、被陪伴等当下感受也可保留。'
         '模型或项目话题中的看法、好奇和感受也可保留。排除纯执行进度和缺关键上下文的原话。'
+        '具体且可独立理解的日常计划，即使只有一轮、尚未决定，也可保留。'
+        '例如「也许明天去看展」标 keep，保留「也许」，不可写成已经去过。'
+        '如果后一轮明确纠正或否认前一轮的猜测，前一轮标 exclude，避免错误猜测被单独召回。'
+        '纠正那一轮只有单独读得懂时才标 keep，否则标 exclude。'
         '再合并同一件事，只提议有至少三轮独立原话支持的日常 Event。'
         '只有助手明确表达新感悟、理解或认知且用户后续有回应、未反驳，才提议 cognition 或 pattern；'
         '必须标出助手表达轮和用户回应轮，分别给出逐字原话，并确认用户没有反驳。跨日未结束的事不要提议。'
@@ -188,6 +192,7 @@ def _propose(q, day, digest, refs, rows, boundary=()):
                     or not any(m['role']=='user' and item['response_quote'] in m['content'] for m in rows[reply]['messages'])):
                 continue
         sources = [refs[i] for i in sorted(ids)]
+        # Persist only the draft fields that App AI is meant to review.
         body = {k:item[k] for k in ('kind','summary','content','significance')}
         body.update(sources=sources, confidence=5, day=day.split(':',1)[0], origin='gemini',
                     excerpt=rows[min(ids)]['messages'][-1]['content'][:180])
@@ -205,10 +210,14 @@ def _invalidate(q, db):
     from .event_slices import EventSliceLinks, sync_from_files
     sync_from_files(q.root,q.instance)
     store = TurnSliceStore(q.root)
+    from .memory_lifecycle import Lifecycle
+    with Lifecycle(q.root,q.instance).db() as life:
+        retired = {row[0] for row in life.execute(
+            "SELECT id FROM eligibility WHERE reason='retired_legacy_gemini_event'")}
     ranges = {}
     for link in EventSliceLinks(q.root).all(q.instance):
         event = q.service.store._events.get(link['event_id'])
-        if not event or 'gemini-proposal' in event.provenance_refs:
+        if not event or event.event_id in retired or 'gemini-proposal' in event.provenance_refs:
             continue
         item = store.get(link['slice_id'])
         if item:

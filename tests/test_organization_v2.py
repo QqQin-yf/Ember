@@ -88,14 +88,19 @@ class OrganizationTests(unittest.TestCase):
         self.assertIn('new',self.service.entity_store.get('old').aliases)
         self.assertEqual(self.service.entity_store.get('new').summary,'new facts')
 
-    def test_nonproject_summary_appends_and_manual_fix_is_queued_for_dedup(self):
+    def test_summary_uses_all_cores_and_originals_and_manual_fix_is_queued(self):
         self.service.entity_store.upsert(Entity('cat','包子',summary='原有事实',entity_type='animal'))
         self.service.entity_store.save();self.event('a')
+        earlier = self.event('b'); earlier.entity_refs = ['cat']; self.service.store.write_event(earlier)
         group={'name':'包子','event_ids':['a'],'entity_type':'animal'}
-        with patch('ember.organization.ask',return_value={'same_id':'cat'}), \
-             patch('ember.organization.prose',return_value='新知道的习惯'):
-            self.org.attach(group,self.cfg)
-        self.assertEqual(self.service.entity_store.get('cat').summary,'原有事实\n新知道的习惯')
+        with patch.object(self.service,'read_source_event',return_value={'transcript':'original'}), \
+             patch('ember.organization.ask',return_value={'relations':[]}), \
+             patch('ember.organization.prose',return_value='新知道的习惯') as model:
+            self.org.attach(group,self.cfg,entity_id='cat')
+        self.assertEqual(self.service.entity_store.get('cat').summary,'新知道的习惯')
+        self.assertEqual({item['core'] for item in model.call_args.args[2]['events']},
+                         {'a concrete experience','b concrete experience'})
+        self.assertTrue(all(item['original']=='original' for item in model.call_args.args[2]['events']))
         result=dispatch(self.service,'revise_entity_summary',{'entity_id':'cat','summary':'修正的事实'})
         self.assertEqual(result['status'],'ok')
         read=dispatch(self.service,'read_entity_events',{'entity_id':'cat'})

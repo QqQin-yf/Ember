@@ -190,7 +190,7 @@ def _run_tests():
                         "list_memory_pins", "merge_memory_events", "get_memory_extraction_batch",
                         "finish_memory_extraction_group", "write_memory_knowledge",
                         "get_memory_proposals", "review_memory_proposals", "read_memory_proposal_sources",
-                        "review_memory_knowledge", "set_knowledge_pin", "list_memory_knowledge"},
+                        "review_memory_knowledge", "set_knowledge_pin", "list_memory_knowledge", "set_identity_profile"},
               str(names))
 
         print("== S11 hooks 与 MCP 共用召回/写入主路 ==")

@@ -96,9 +96,13 @@ class Extraction:
                     result.append(dict(row,state=state,remaining_sources=remaining))
         return result
 
-    def candidates(self,config):
+    def candidates(self,config,*,revisit_legacy=False):
         sync_from_files(self.root,self.instance)
-        owners={r['slice_id'] for r in EventSliceLinks(self.root).all(self.instance)}
+        with Lifecycle(self.root,self.instance).db() as conn:
+            retired = {row[0] for row in conn.execute(
+                "SELECT id FROM eligibility WHERE reason='retired_legacy_gemini_event'")}
+        owners={r['slice_id'] for r in EventSliceLinks(self.root).all(self.instance)
+                if not revisit_legacy or r['event_id'] not in retired}
         slices=TurnSliceStore(self.root)
         if not slices.path.exists():
             return []
@@ -107,9 +111,15 @@ class Extraction:
         eligible=Lifecycle(self.root,self.instance).eligibility_checker()
         with self.db() as conn:
             done=self.completed_sources(conn)
+            if revisit_legacy:
+                done = {(sid, digest) for sid, digest, mid in conn.execute(
+                    'SELECT slice_id,content_hash,result_id FROM source_results WHERE instance=?',
+                    (self.instance,)) if mid not in retired}
         result=[]
         for sid in ids:
             source=slices.get(sid)
+            if source is None:
+                continue
             vector=slices.embedding(sid,config.space)
             if sid not in owners and (sid,source['content_hash']) not in done and informative(source) and eligible(sid) and vector:
                 result.append(dict(source,vector=vector['vector']))

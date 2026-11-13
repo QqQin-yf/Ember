@@ -78,7 +78,7 @@ same_information 表示表达同一信息；pattern 表示可供 App AI 判断�
 labels:{id,state:active|no_recall,basis:meaningless|outdated|contradicted,reason,evidence}。切片按完整人机对判断，不能仅因用户说嗯就丢弃。不可标注认知/规律的置信度或停召回，此事归App。
 relations:{source,target,type:related_to|continues|contrasts|resolves|same_information,reason,evidence}。resolves只用于event，方向旧到新，事件时间必须明确且严格递增。相似不等于同一事件。
 extensions:{group_id,ids,reason,evidence}：与known_groups已有方向相同，直接归入，不产生新待办。
-proposals:{kind:theme|pattern|habit|preference|entity_extract,ids,reason,evidence}：只有新的提炼方向才提出，至少两个材料；单纯重复、关联或同一经历不交App。
+proposals:{kind:theme|pattern|habit|preference,ids,reason,evidence}：只有新的提炼方向才提出，至少两个材料；单纯重复、关联或同一经历不交App。
 每个proposal还要给direction：简短、稳定、可复用的具体提炼方向名，不写批次或日期。先核对known_groups，语义同一方向必须用已有group_id或extensions，不能换措辞反复开组。
 已处理方向只有明显冲突/新变化才重新提交，给group_id和change_evidence:[{id,quote}]，逐字引用比较双方。普通新增例子只extensions，不重开任务。
 发现稳定共同主题、可能规律、习惯、喜恶才提交；Entity提取只从Event组提交。可以全部为空，不强凑组。

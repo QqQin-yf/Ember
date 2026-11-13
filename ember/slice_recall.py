@@ -97,9 +97,12 @@ class SliceRecall:
                 # Exactly one fresh embedding for this whole input; no old Cue/Direction calls.
                 query_vector = SliceEmbeddingClient(config).embed(text)
                 from .event_slices import EventSliceLinks
+                from .memory_lifecycle import Lifecycle
+                eligible=Lifecycle(self.root,self.instance).eligibility_checker()
                 memberships = {}
                 for membership in EventSliceLinks(self.root).all(self.instance):
-                    memberships.setdefault(membership['slice_id'], []).append(membership)
+                    if purpose == 'search' or eligible(membership['event_id']):
+                        memberships.setdefault(membership['slice_id'], []).append(membership)
                 from .slice_maintenance import MaintenanceQueue
                 relations = {}
                 for relation in MaintenanceQueue(self.root).relations(self.instance):
@@ -109,8 +112,6 @@ class SliceRecall:
                 qnorm = math.hypot(*query_vector)
                 if not qnorm or not math.isfinite(qnorm):
                     raise SliceEmbeddingError('embedding_response_invalid')
-                from .memory_lifecycle import Lifecycle
-                eligible=Lifecycle(self.root,self.instance).eligibility_checker()
                 from .models import Event
                 from .maintenance_materials import events as event_rows
                 from .slice_policy import passing_parents, informative

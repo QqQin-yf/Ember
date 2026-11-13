@@ -10,7 +10,7 @@ import time
 
 from .generations import fingerprint
 from .lifecycle_config import lifecycle_config
-from .maintenance_models import ask, prose
+from .maintenance_models import ask
 
 
 class Timeline:
@@ -51,19 +51,22 @@ class Timeline:
 
     @staticmethod
     def digest(event):
-        return fingerprint([event.core,event.summary,event.event_time])
+        return fingerprint([event.core,event.summary,event.event_time,event.significance])
 
     def synchronize(self,conn):
         events={e.event_id:e for e in self.events()}
         for event in events.values():
             row=conn.execute('SELECT * FROM timeline WHERE event_id=?',(event.event_id,)).fetchone()
             digest=self.digest(event)
+            summary = event.summary.strip()
+            compact = summary if event.significance < 10 and 0 < len(summary) < len(event.core) else None
             if row is None:
-                conn.execute('INSERT INTO timeline(event_id,hash) VALUES (?,?)',(event.event_id,digest))
-            elif row['hash']!=digest and row['mode']!='pointed':
-                # Only this not-yet-pointed Event's compression is stale.
-                conn.execute('UPDATE timeline SET hash=?,compressed=NULL,published_mode=NULL,error=NULL,retry_at=0 WHERE event_id=?',
-                             (digest,event.event_id))
+                conn.execute('INSERT INTO timeline(event_id,hash,compressed) VALUES (?,?,?)',
+                             (event.event_id,digest,compact))
+            elif row['mode'] != 'pointed':
+                mode = row['mode'] if compact else 'original'
+                conn.execute('UPDATE timeline SET hash=?,compressed=?,mode=?,error=NULL,retry_at=0 WHERE event_id=?',
+                             (digest,compact,mode,event.event_id))
         for row in conn.execute('SELECT event_id,mode FROM timeline').fetchall():
             if row['event_id'] not in events and row['mode']!='pointed':
                 conn.execute('DELETE FROM timeline WHERE event_id=?',(row['event_id'],))
@@ -93,21 +96,21 @@ class Timeline:
         rows={r['event_id']:dict(r) for r in conn.execute('SELECT * FROM timeline')}
         total=sum(len(p['text']) for p in self.points(conn))+sum(self.cost(e,rows[e.event_id]) for e in events.values() if rows[e.event_id]['mode']!='pointed' or self.service.pin_store.is_pinned(e.event_id))
         if total>cfg['upper_chars']:
-            for eid,event in events.items():
+            for eid,event in sorted(events.items(),key=lambda pair:pair[1].significance):
                 row=rows[eid]
-                if row['mode']!='original' or not row['compressed'] or self.service.pin_store.is_pinned(eid):
+                if row['mode']!='original' or event.significance==10 or not row['compressed'] or self.service.pin_store.is_pinned(eid):
                     continue
                 total+=len(row['compressed'])-len(event.core)
                 row['mode']='compressed'
                 conn.execute("UPDATE timeline SET mode='compressed' WHERE event_id=?",(eid,))
-                if total<cfg['lower_chars']:
+                if total<=cfg['lower_chars']:
                     break
 
     def extract(self,conn,events):
         cfg=lifecycle_config()['timeline']
         pending=[dict(r) for r in conn.execute("SELECT * FROM timeline WHERE mode='compressed' AND compressed IS NOT NULL")]
         from .event_mutation import visible
-        ordered=[r for eid in events for r in pending if r['event_id']==eid and not self.service.pin_store.is_pinned(eid) and not visible(self.service,events[eid])]
+        ordered=[r for eid in events for r in pending if r['event_id']==eid and events[eid].significance<10 and not self.service.pin_store.is_pinned(eid) and not visible(self.service,events[eid])]
         if sum(len(r['compressed']) for r in ordered)<=cfg['compressed_upper_chars']:
             conn.execute("DELETE FROM metadata WHERE key IN ('point_error','point_retry')")
             return
@@ -160,27 +163,11 @@ class Timeline:
             input_hash=fingerprint([[(eid,self.digest(e),visible(self.service,e)) for eid,e in events.items()],self.service.pin_store.all(),cfg])
             previous=conn.execute("SELECT value FROM metadata WHERE key='input_hash'").fetchone()
             cached=conn.execute("SELECT value FROM metadata WHERE key='health'").fetchone()
-            retry=conn.execute('SELECT 1 FROM timeline WHERE compressed IS NULL AND (? OR retry_at<=?) LIMIT 1',(refresh,time.time())).fetchone()
             point_error=conn.execute("SELECT value FROM metadata WHERE key='point_retry'").fetchone()
             retry_point=point_error and (refresh or float(point_error[0])<=time.time())
-            if previous and previous[0]==input_hash and cached and not retry and not retry_point:
+            if previous and previous[0]==input_hash and cached and not retry_point:
                 return json.loads(cached[0])
 
-            for row in conn.execute("SELECT * FROM timeline WHERE compressed IS NULL AND mode!='pointed'").fetchall():
-                if not refresh and row['retry_at']>time.time():
-                    continue
-                event=events[row['event_id']]
-                for _ in range(cfg['retries']+1):
-                    try:
-                        text=prose('relationship_compress','把这一件关系事件压到它自己还能说准的最短，不给目标长度，不为了预算牺牲意思。',
-                                   {'event_id':event.event_id,'summary':event.summary,'core':event.core})
-                        if self.digest(self.service.store.get_event(event.event_id))!=row['hash']:
-                            raise ValueError('relationship_changed_during_compression')
-                        conn.execute('UPDATE timeline SET compressed=?,error=NULL,retry_at=0 WHERE event_id=?',(text,event.event_id))
-                        break
-                    except Exception as exc:
-                        conn.execute('UPDATE timeline SET error=?,retry_at=? WHERE event_id=?',
-                                     (type(exc).__name__,time.time()+lifecycle_config()['slice']['retry_seconds'],event.event_id))
             self.choose(conn,events)
             try:
                 self.extract(conn,events)
@@ -225,9 +212,9 @@ class Timeline:
                     blocks.append((min(order[i] for i in point['event_ids'] if i in order),point['text']))
                     conn.executemany("UPDATE timeline SET published_mode='pointed' WHERE event_id=?",[(i,) for i in point['event_ids']])
                 for eid,event in events.items():
-                    if onstage(event) or (rows[eid]['mode']=='pointed' and not self.service.pin_store.is_pinned(eid)):
+                    if onstage(event) or (rows[eid]['mode']=='pointed' and event.significance<10 and not self.service.pin_store.is_pinned(eid)):
                         continue
-                    mode='original' if self.service.pin_store.is_pinned(eid) or not rows[eid]['compressed'] else rows[eid]['mode']
+                    mode='original' if event.significance==10 or self.service.pin_store.is_pinned(eid) or not rows[eid]['compressed'] else rows[eid]['mode']
                     text=(self.service._briefing_source_block(event) if self.service.pin_store.is_pinned(eid) else
                           rows[eid]['compressed'] if mode=='compressed' else event.core)
                     blocks.append((order[eid],text))

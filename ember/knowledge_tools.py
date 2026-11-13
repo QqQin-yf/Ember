@@ -23,6 +23,9 @@ def tool_specs():
              {'memory_id':{'type':'string'},'pinned':{'type':'boolean'}},['memory_id','pinned']),
         spec('list_memory_knowledge','读取现有认知/规律与 pin 预算，供平时自主取舍。',{})]
     specs += [
+        spec('set_identity_profile','由 App AI 更新 briefing 顶部的两张常驻认知卡之一。user 是用户，assistant 是你自己。overview 用你自己的话表达当前理解。cognition_ids 只填已有的认知 ID。本次提交替换该卡全部内容。',
+            {'subject':{'enum':['user','assistant']},'overview':{'type':'string','maxLength':600},
+             'cognition_ids':dict(strings,minItems=0,maxItems=8)}, ['subject','overview','cognition_ids']),
         spec('review_memory_knowledge','审阅相似认知/规律：维持、改写补写或合并。每条必须列为keep/rewrite/merge目标或merge_ids成员，不能遗漏；每条最终保留项必须评分。只有近期经历明确打破或过时才能<=5，须提供逐字来源证据。改写/合并带 source_slice_ids 时，这些切片自动结掉；keep 不结新材料。',
             {'group_id':{'type':'string'},'items':{'type':'array','minItems':1,'items':{'type':'object',
               'additionalProperties':False,'required':['memory_id','action','confidence'],'properties':{
@@ -34,7 +37,7 @@ def tool_specs():
     return specs
 
 
-TOOL_NAMES={'list_memory_knowledge', 'set_knowledge_pin', 'search_memory_slices', 'read_memory_slices', 'write_memory_knowledge', 'review_memory_knowledge'}
+TOOL_NAMES={'set_identity_profile', 'list_memory_knowledge', 'set_knowledge_pin', 'search_memory_slices', 'read_memory_slices', 'write_memory_knowledge', 'review_memory_knowledge'}
 VOLATILE_TOOLS={'read_memory_slices','search_memory_slices','list_pending_promises','get_memory_extraction_batch'}
 
 
@@ -117,6 +120,10 @@ def write_event(service, args, context):
 def dispatch(service,name,args,context=None):
     store=KnowledgeStore(service.store.root,service.source_instance)
     try:
+        if name=='set_identity_profile':
+            if context is None and service._live_turn is None:
+                raise ValueError('A live App generation is required to edit identity profiles')
+            return store.set_identity_profile(args.get('subject'),args.get('overview'),args.get('cognition_ids'))
         if name=='write_memory_knowledge':
             if context is None and service._live_turn is None:
                 raise ValueError('A live App generation is required to author knowledge')
@@ -138,7 +145,7 @@ def dispatch(service,name,args,context=None):
             from .knowledge_review import review_knowledge
             return review_knowledge(service,args,context)
         if name=='list_memory_knowledge':
-            return {'status':'ok','briefing':store.briefing(),'items':[
+            return {'status':'ok','briefing':store.briefing(),'identity_profiles':store.identity_profiles(),'items':[
                 {key:row[key] for key in ('memory_id','kind','content','cues','pinned','sources','confidence')}
                 for row in store.all()]}
         if name=='set_knowledge_pin':
