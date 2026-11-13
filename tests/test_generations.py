@@ -188,6 +188,24 @@ class GenerationTests(unittest.TestCase):
         self.assertEqual(out, first)
         self.assertEqual(len(again.store.all_events()), 1)
 
+    def test_source_bound_write_retry_survives_restart(self):
+        binding = {"source_session": "s1", "source_user": "71",
+                   "source_assistant": "72", "tool_call_id": "source-tool"}
+        rows = [
+            {"message_id": 71, "role": "user", "id": "u1", "content": TEXT},
+            {"message_id": 72, "role": "assistant", "parent_id": "u1", "content": ""},
+        ]
+        with patch("ember.source_client.fetch_source_path", return_value=rows):
+            first = self.svc.sidecar_call_tool("write_event", write_args(), **binding)
+        self.assertEqual(first["status"], "created", first)
+        again = EmberService(EmberStore(self.tmp.name), MockLLMClient())
+        with patch("ember.source_client.fetch_source_path", side_effect=AssertionError("receipt must replay")):
+            replayed = again.sidecar_call_tool("write_event", write_args(), **binding)
+            conflict = again.sidecar_call_tool("write_event", write_args(cues=("changed",)), **binding)
+        self.assertEqual(replayed, first)
+        self.assertEqual(conflict["code"], "id_conflict")
+        self.assertEqual(len(again.store.all_events()), 1)
+
     def test_tool_conflicts_are_scoped_to_generation_and_do_not_block_new_calls(self):
         self.start()
         self.call()
@@ -389,13 +407,13 @@ class GenerationHTTPTests(unittest.IsolatedAsyncioTestCase):
             headers={"Accept": "application/json, text/event-stream"})
         self.addAsyncCleanup(self.client.aclose)
 
-    async def start(self, instance="default", sid="s1", rid="r-1"):
+    async def start(self, instance="default", sid="s1", rid="r-1", seq="71"):
         return await self.client.post("/ember/hooks/turn_start", headers={"X-Heart-Instance": instance},
-            json={"session_id": sid, "message": TEXT, "user_message_id": "71", "recall_id": rid})
+            json={"session_id": sid, "message": TEXT, "user_message_id": seq, "recall_id": rid})
 
-    async def tool(self, headers=None, args=None):
+    async def tool(self, headers=None, args=None, name="write_event"):
         response = await self.client.post("/mcp/", headers=headers or {}, json={"jsonrpc": "2.0", "id": 7,
-            "method": "tools/call", "params": {"name": "write_event", "arguments": args or write_args()}})
+            "method": "tools/call", "params": {"name": name, "arguments": args or write_args()}})
         if response.status_code != 200:
             return response, response.json()
         data = response.json()
@@ -422,6 +440,58 @@ class GenerationHTTPTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.client.post("/ember/hooks/cc/end", json=body)).json(), {"ok": True})
         _, app = await self.tool({"X-Ember-Recall-Id": "r-1", "X-Ember-Tool-Call-Id": "app-tool"})
         self.assertEqual(app["status"], "created", app)
+
+    async def test_unbound_search_after_recall_failure_with_another_live_turn(self):
+        svc = self.registry.service("default")
+        with patch.object(svc, "run_recall_pipeline", side_effect=RuntimeError("recall failed")):
+            failed = await self.start(sid="failed", rid="failed")
+        self.assertEqual(failed.json()["code"], "recall_outcome_unknown")
+        self.assertEqual((await self.start()).status_code, 200)
+        _, result = await self.tool(args={"query": "Ember"}, name="search_memory")
+        self.assertEqual(result["status"], "ok", result)
+
+    async def test_fallback_writes_bind_exact_messages_and_replay_in_parallel(self):
+        import asyncio
+
+        svc = self.registry.service("default")
+        with patch.object(svc, "run_recall_pipeline", side_effect=RuntimeError("recall failed")):
+            for rid, seq in (("failed-1", "71"), ("failed-2", "81")):
+                failed = await self.start(sid="s1", rid=rid, seq=seq)
+                self.assertEqual(failed.json()["code"], "recall_outcome_unknown")
+        rows = {
+            71: {"role": "user", "id": "u1", "content": TEXT},
+            72: {"role": "assistant", "id": "a1", "parent_id": "u1", "content": ""},
+            81: {"role": "user", "id": "u2", "content": TEXT},
+            82: {"role": "assistant", "id": "a2", "parent_id": "u2", "content": ""},
+        }
+
+        def source(sid, ids, *, instance, write_turn):
+            self.assertEqual((sid, instance, write_turn), ("s1", "default", True))
+            return [dict(rows[int(seq)], message_id=int(seq)) for seq in ids]
+
+        def headers(user, reply):
+            return {"X-Ember-Source-Session": "s1", "X-Ember-Source-User": str(user),
+                    "X-Ember-Source-Assistant": str(reply), "X-Ember-Tool-Call-Id": "same-tool"}
+
+        promise = write_args()
+        promise["event"]["kind"] = "promise"
+        with patch("ember.source_client.fetch_source_path", side_effect=source):
+            _, crossed = await self.tool(headers(71, 82))
+            self.assertEqual(crossed["code"], "source_path_unknown")
+            results = await asyncio.gather(self.tool(headers(71, 72)),
+                                           self.tool(headers(81, 82), promise, name="write_promise"),
+                                           self.tool(headers(71, 72)))
+        self.assertEqual(results[0][1], results[2][1])
+        for (_, result), user, reply in zip(results[:2], (71, 81), (72, 82), strict=True):
+            self.assertEqual(result["status"], "created", result)
+            frozen = svc.event_sources.get(result["event_id"])
+            self.assertEqual(frozen["source_session_id"], "s1")
+            self.assertNotIn("writer_recall_id", frozen)
+            [messages] = frozen["turn_messages"]
+            self.assertEqual((messages["user_message_id"], messages["assistant_message_id"]),
+                             (str(user), str(reply)))
+        self.assertEqual(len(svc.store.all_events()), 2)
+        self.assertFalse(svc.recall_ledger.by_turn)
 
     async def test_real_mcp_headers_select_bound_context_and_replay_receipt(self):
         self.assertEqual((await self.start()).status_code, 200)

@@ -31,7 +31,7 @@ def generation_messages(generations, sid: str, *, completed_only=False) -> list[
     return messages
 
 
-def read_messages(sid: str, identities: list[dict], instance: str) -> list[dict]:
+def read_messages(sid: str, identities: list[dict], instance: str, *, write_turn: bool = False) -> list[dict]:
     if not identities:
         raise source_client.SourceUnavailable("Source identity evidence missing")
     by_seq = {}
@@ -40,7 +40,8 @@ def read_messages(sid: str, identities: list[dict], instance: str) -> list[dict]
         if seq is None or seq in by_seq:
             raise source_client.SourceUnavailable("Source identity ambiguous")
         by_seq[seq] = item
-    rows = source_client.fetch_source_path(sid, list(by_seq), instance=instance)
+    options = {"write_turn": True} if write_turn else {}
+    rows = source_client.fetch_source_path(sid, list(by_seq), instance=instance, **options)
     out = []
     # Check even injected/mock clients: no partial response or unexpected rows.
     if len(rows) != len(by_seq):

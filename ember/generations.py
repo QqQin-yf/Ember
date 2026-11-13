@@ -25,7 +25,7 @@ def fingerprint(value: Any) -> str:
 
 
 def identity(value: Any) -> str | None:
-    if isinstance(value, str) and value.strip() and len(value) <= 512:
+    if isinstance(value, str) and value.strip() and "\x00" not in value and len(value) <= 512:
         return value.strip()
     return None
 

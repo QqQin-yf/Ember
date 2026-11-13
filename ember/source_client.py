@@ -75,14 +75,17 @@ def _open_source(request):
 
 
 def fetch_source_path(session_id: str, message_ids: list, *,
-                      instance: str = "default") -> list[dict]:
+                      instance: str = "default", write_turn: bool = False) -> list[dict]:
     ids = [message_seq(value) for value in message_ids]
     if not session_id or not ids or None in ids or len(set(ids)) != len(ids):
         raise SourceUnavailable("Exact source identities required")
     if not SOURCE_URL:
         raise SourceUnavailable("EMBER_SOURCE_URL not configured", "source_unconfigured")
     ids.sort(key=int)
-    query = urllib.parse.urlencode({"session_id": session_id, "message_ids": ",".join(ids)})
+    params = {"session_id": session_id, "message_ids": ",".join(ids)}
+    if write_turn:
+        params["write_turn"] = "1"
+    query = urllib.parse.urlencode(params)
     req = urllib.request.Request(SOURCE_URL.rstrip("/") + "/api/source/path?" + query)
     req.add_header("X-Heart-Instance", instance)
     if SOURCE_TOKEN:

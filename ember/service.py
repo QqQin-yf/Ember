@@ -204,7 +204,8 @@ class EmberService:
                               validated: dict[str, Any],
                               writer_recall_id: str | None = None,
                               writer_tool_call_id: str | None = None, *,
-                              cc_context: dict | None = None) -> dict[str, Any]:
+                              cc_context: dict | None = None,
+                              quote_corpus: list[dict] | None = None) -> dict[str, Any]:
         """validated 参数 → Event 落库全流程（quotes 核对 / turn_span / Routes）。
 
         显式记忆工具共用的写入主路。
@@ -228,7 +229,7 @@ class EmberService:
         # 作为旧事件的查询时降级存在，新事件一律带真实时间坐标。
         quote_spans = validated["quote_spans"]
         if cc_context is None:
-            corpus = self._quote_corpus(session)
+            corpus = self._quote_corpus(session) if quote_corpus is None else quote_corpus
             span_pairs = spans_from_quotes(quote_spans, corpus)
         else:
             corpus, span_pairs = self._cc_quote_evidence(cc_context["anchor"], quote_spans)
@@ -840,7 +841,7 @@ class EmberService:
             except Exception:
                 return self._generation_error("ledger_recovery_pending", "Earlier recall effects need recovery")
             session = self.get_or_create_session(sid)
-            turn = max(session.turn_counter, self.generations.max_turn(sid)) + 1
+            turn = max(session.turn_counter, self.turn_ledger.max_turn(sid), self.generations.max_turn(sid)) + 1
             self.generations.reserve(rid, sid, request_hash, turn, {"request_context": request_context},
                                      domain="cc" if historical else "app", historical=historical)
             if historical:
@@ -1045,10 +1046,14 @@ class EmberService:
     def sidecar_call_tool(self, name: str, arguments: dict,
                           recall_id: str | None = None,
                           tool_call_id: str | None = None,
-                          run_id: str | None = None, domain: str = "app") -> dict:
+                          run_id: str | None = None, domain: str = "app", *,
+                          source_session: str | None = None,
+                          source_user: str | None = None,
+                          source_assistant: str | None = None) -> dict:
         """HTTP-provided identity only. No identified request falls back to live."""
         if domain == "cc":
-            if any(value is not None for value in (recall_id, tool_call_id, run_id)):
+            if any(value is not None for value in (recall_id, tool_call_id, run_id,
+                                                   source_session, source_user, source_assistant)):
                 return self._generation_error("invalid_identity", "CC tools use the CC slot")
             with self._generation_lock:
                 context = self._generation_contexts.get(self._cc_recall_id)
@@ -1058,6 +1063,11 @@ class EmberService:
                     # Non-authoring tools continue to work between prompts.
                     return self._dispatch_memory_tool(name, arguments, context={})
                 return self._dispatch_memory_tool(name, arguments, context=context)
+        if any(value is not None for value in (source_session, source_user, source_assistant)):
+            if recall_id is not None or run_id is not None:
+                return self._generation_error("context_mismatch", "Source and generation identities cannot be mixed")
+            return self._call_source_write(name, arguments, source_session, source_user,
+                                           source_assistant, tool_call_id)
         if run_id is not None:
             if recall_id is not None:
                 return run_failure("context_mismatch", "Ordinary recall and active run identities cannot be mixed")
@@ -1065,6 +1075,10 @@ class EmberService:
                 return run_failure("invalid_arguments", "Tool arguments must be an object")
             return self.runs.call(run_id, tool_call_id, name, arguments, self._dispatch_memory_tool)
         if recall_id is None and tool_call_id is None:
+            if name == SEARCH_TOOL_NAME:
+                if not isinstance(arguments, dict):
+                    return self._generation_error("invalid_arguments", "Tool arguments must be an object")
+                return self.sidecar_search_memory(arguments)
             with self._generation_lock:
                 if self._live_turn and self._live_turn.get("recall_id"):
                     return self._generation_error("identity_required", "Generation tool identity headers are required")
@@ -1117,6 +1131,66 @@ class EmberService:
                     pass
                 return self._generation_error("tool_outcome_unknown", "Tool outcome could not be committed; reconcile before retrying")
 
+    def _call_source_write(self, name: str, arguments: dict, source_session: str | None,
+                           source_user: str | None, source_assistant: str | None,
+                           tool_call_id: str | None) -> dict:
+        from urllib.parse import unquote
+
+        encoded_session = identity(source_session)
+        sid = identity(unquote(encoded_session)) if encoded_session else None
+        user_seq = message_seq(identity(source_user))
+        assistant_seq = message_seq(identity(source_assistant))
+        cid = identity(tool_call_id)
+        if not all((sid, user_seq, assistant_seq, cid)) or int(user_seq) >= int(assistant_seq):
+            return self._generation_error("invalid_identity", "A session, user, reply and tool-call identity are required")
+        if name not in (TOOL_NAME, PROMISE_TOOL_NAME):
+            return self._generation_error("invalid_identity", "Source binding is only supported for Event and Promise writes")
+        try:
+            request_hash = fingerprint({"name": name, "arguments": arguments})
+        except (ValueError, TypeError):
+            return self._generation_error("invalid_arguments", "Tool arguments must be finite JSON")
+
+        # Internal receipt namespace. External generation identities reject NUL.
+        receipt_scope = "\x00source-write:" + fingerprint([sid, user_seq, assistant_seq])
+        with self._generation_lock:
+            old = self.generations.call(receipt_scope, cid)
+            if old is not None:
+                if old["request_hash"] != request_hash:
+                    return self._generation_error("id_conflict", "Tool identity content conflict")
+                return self._tool_receipt(old)
+            try:
+                user, reply = read_messages(sid, [
+                    {"role": "user", "turn": 0, "message_id": user_seq},
+                    {"role": "assistant", "turn": 0, "message_id": assistant_seq},
+                ], self.source_instance, write_turn=True)
+            except source_client.SourceUnavailable as exc:
+                return self._generation_error(exc.code, "Could not verify the original dialogue turn")
+            if not user.get("id") or reply.get("parent_id") != user["id"]:
+                return self._generation_error("source_path_unknown", "The reply does not directly answer the supplied user message")
+
+            session = Session(sid)
+            turn = next((turn for (session_id, turn), seq in self.turn_ledger.user_msg.items()
+                         if session_id == sid and seq == int(user_seq)), None)
+            if turn is None:
+                live_session = self.sessions.get(sid)
+                turn = max(live_session.turn_counter if live_session else 0,
+                           self.turn_ledger.max_turn(sid), self.generations.max_turn(sid)) + 1
+                self.turn_ledger.record(sid, turn, user_message_id=int(user_seq))
+            # The reply identity proves the branch. Its in-flight text is not quote evidence.
+            corpus = [dict(user, turn=turn), dict(reply, turn=turn, content="")]
+            self.generations.begin_call(receipt_scope, cid, request_hash, name)
+            try:
+                result = self._dispatch_memory_tool(name, arguments,
+                    context={"session": session, "turn": turn, "quote_corpus": corpus})
+                self.generations.complete_call(receipt_scope, cid, result)
+                return result
+            except Exception:
+                try:
+                    self.generations.unknown_call(receipt_scope, cid)
+                except Exception:
+                    pass
+                return self._generation_error("tool_outcome_unknown", "Tool outcome could not be committed; reconcile before retrying")
+
     def _dispatch_memory_tool(self, name: str, arguments: dict,
                               context: dict | None = None,
                               recall_id: str | None = None,
@@ -1159,7 +1233,9 @@ class EmberService:
                     return {'status':'failed','code':'invalid_memory_material','error':str(exc)}
             if context is not None:
                 return self._create_memory_in_context(context["session"], context["turn"],
-                    arguments, recall_id, tool_call_id, cc_context=context if "cc_session" in context else None)
+                    arguments, recall_id, tool_call_id,
+                    quote_corpus=context.get("quote_corpus"),
+                    cc_context=context if "cc_session" in context else None)
             return self.sidecar_create_memory_event(arguments)
         if name == REVISE_TOOL_NAME:
             return self.sidecar_revise_memory_event(arguments,context)
@@ -1192,7 +1268,9 @@ class EmberService:
         召回起点过滤（来源全在窗口内的候选滤掉）。
         """
         session = self.get_or_create_session(session_id)
-        session.turn_counter = max(session.turn_counter, self.generations.max_turn(session.session_id))
+        session.turn_counter = max(session.turn_counter,
+                                   self.generations.max_turn(session.session_id),
+                                   self.turn_ledger.max_turn(session.session_id))
         turn = session.next_turn()
         self.turn_ledger.record(session.session_id, turn, heart_turn_id,
                                 user_message_id=user_message_id)
@@ -1298,13 +1376,16 @@ class EmberService:
 
     def _create_memory_in_context(self, session: Session, turn: int, arguments: dict,
                                   recall_id: str | None = None,
-                                  tool_call_id: str | None = None, *, cc_context: dict | None = None) -> dict:
+                                  tool_call_id: str | None = None, *,
+                                  cc_context: dict | None = None,
+                                  quote_corpus: list[dict] | None = None) -> dict:
         validated, err = validate_writer_arguments(arguments)
         if err:
             return writer_error_result(err)
         try:
             return self.write_validated_event(session, turn, validated,
-                writer_recall_id=recall_id, writer_tool_call_id=tool_call_id, cc_context=cc_context)
+                writer_recall_id=recall_id, writer_tool_call_id=tool_call_id,
+                cc_context=cc_context, quote_corpus=quote_corpus)
         except QuoteSourceError as ex:
             return ex.as_result()
         except SupersessionError as ex:
