@@ -125,6 +125,17 @@ class GenerationTests(unittest.TestCase):
         self.assertEqual(self.svc.sidecar_call_tool("write_event", args, domain="cc")["code"], "cc_turn_missing")
         self.assertEqual(self.svc.generations.generation("app-two")["state"], "running")
 
+    def test_cc_history_recovers_its_ledger_receipt_without_projecting_all_sources(self):
+        kwargs = dict(user_message_id=41, recall_id="history-only", historical=True)
+        with patch.object(self.svc.source_completions, "reconcile", side_effect=AssertionError("global projection")):
+            with patch.object(self.svc.turn_ledger, "record_start_once", side_effect=OSError("write unavailable")):
+                pending = self.svc.hook_turn_start("main", "Original message", **kwargs)
+                self.assertEqual(pending["code"], "recall_recovery_pending")
+            receipt = self.svc.hook_turn_start("main", "Original message", **kwargs)
+            self.assertEqual(self.svc.turn_ledger.user_msg["main", receipt["turn"]], 41)
+            self.assertEqual(self.svc.hook_turn_start("main", "Original message", **kwargs), receipt)
+            self.assertFalse(self.svc.generations.pending_effects("history-only"))
+
     def test_cc_quote_reports_unregistered_and_incomplete_turns(self):
         user = {"message_id": 41, "role": "user", "content": "Original user message"}
         reply = {"message_id": 42, "role": "assistant", "content": "Original assistant reply"}

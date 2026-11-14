@@ -586,7 +586,7 @@ class EmberService:
     def _generation_error(code: str, error: str) -> dict:
         return {"ok": False, "status": "failed", "code": code, "error": error}
 
-    def _reconcile_recall_effects(self, recall_id: str | None = None) -> None:
+    def _reconcile_recall_effects(self, recall_id: str | None = None, *, reconcile_sources=True) -> None:
         for effect in self.generations.pending_effects(recall_id):
             entry = json.loads(effect["entry_json"])
             if effect["kind"] == "turn_start":
@@ -602,7 +602,8 @@ class EmberService:
             else:
                 raise ValueError("Unknown recall effect kind")
             self.generations.acknowledge_effect(effect["operation_id"])
-        self.source_completions.reconcile()
+        if reconcile_sources:
+            self.source_completions.reconcile()
 
     @staticmethod
     def _recall_pending(recall_id: str, code: str = "recall_in_progress") -> dict:
@@ -640,7 +641,18 @@ class EmberService:
                 result["response"] = json.loads(row["response_json"])
             return result
 
-    def _replay_recall(self, recall_id: str) -> dict:
+    def _replay_recall(self, recall_id: str, *, historical=False) -> dict:
+        if historical:
+            with self._generation_lock:
+                row = self.generations.snapshot(recall_id)
+                if row is not None and row["state"] == "ready":
+                    try:
+                        self._reconcile_recall_effects(recall_id, reconcile_sources=False)
+                    except Exception:
+                        return self._recall_pending(recall_id, "recall_recovery_pending")
+                    if row["response_json"] is None:
+                        return self._generation_error("response_expired", "Recall response expired; identity and refs remain")
+                    return json.loads(row["response_json"])
         result = self.sidecar_recall_snapshot(recall_id, "response")
         return result["response"] if "response" in result else result
 
@@ -836,17 +848,18 @@ class EmberService:
         if old is not None:
             if old["request_hash"] not in valid_hashes:
                 return self._generation_error("id_conflict", "recall_id content conflict")
-            return self._replay_recall(rid)
+            return self._replay_recall(rid, historical=historical and old["request_hash"] == request_hash)
         with self._generation_lock:
             old = self.generations.generation(rid)
             if old is not None:
                 if old["request_hash"] not in valid_hashes:
                     return self._generation_error("id_conflict", "recall_id content conflict")
-                return self._replay_recall(rid)
-            try:
-                self._reconcile_recall_effects()
-            except Exception:
-                return self._generation_error("ledger_recovery_pending", "Earlier recall effects need recovery")
+                return self._replay_recall(rid, historical=historical and old["request_hash"] == request_hash)
+            if not historical:
+                try:
+                    self._reconcile_recall_effects()
+                except Exception:
+                    return self._generation_error("ledger_recovery_pending", "Earlier recall effects need recovery")
             session = self.get_or_create_session(sid)
             turn = max(session.turn_counter, self.turn_ledger.max_turn(sid), self.generations.max_turn(sid)) + 1
             self.generations.reserve(rid, sid, request_hash, turn, {"request_context": request_context},
@@ -863,7 +876,7 @@ class EmberService:
                 except Exception:
                     self.generations.interrupt(rid)
                     return self._generation_error("recall_outcome_unknown", "Historical registration failed before commit")
-                return self._replay_recall(rid)
+                return self._replay_recall(rid, historical=True)
             session.turn_counter = turn
             self._clear_app_contexts()
             self._live_turn = None
