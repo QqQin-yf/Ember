@@ -125,6 +125,12 @@ class GenerationTests(unittest.TestCase):
         self.assertEqual(self.svc.sidecar_call_tool("write_event", args, domain="cc")["code"], "cc_turn_missing")
         self.assertEqual(self.svc.generations.generation("app-two")["state"], "running")
 
+    def test_hook_timing_separates_lock_wait_and_execution(self):
+        with patch("ember.service.time.monotonic", side_effect=[0, 1.25, 1.5]):
+            with self.assertLogs("ember.service", level="WARNING") as logs:
+                self.svc.cc_turn_start("window", "live-timing", "anchor")
+        self.assertIn("operation=cc/start lock_wait_ms=1250 execution_ms=250", logs.output[0])
+
     def test_cc_history_recovers_its_ledger_receipt_without_projecting_all_sources(self):
         kwargs = dict(user_message_id=41, recall_id="history-only", historical=True)
         with patch.object(self.svc.source_completions, "reconcile", side_effect=AssertionError("global projection")):
