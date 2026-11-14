@@ -7,10 +7,13 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import os
 import threading
+import time
 import re
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -586,7 +589,7 @@ class EmberService:
     def _generation_error(code: str, error: str) -> dict:
         return {"ok": False, "status": "failed", "code": code, "error": error}
 
-    def _reconcile_recall_effects(self, recall_id: str | None = None) -> None:
+    def _reconcile_recall_effects(self, recall_id: str | None = None, *, reconcile_sources=True) -> None:
         for effect in self.generations.pending_effects(recall_id):
             entry = json.loads(effect["entry_json"])
             if effect["kind"] == "turn_start":
@@ -602,7 +605,8 @@ class EmberService:
             else:
                 raise ValueError("Unknown recall effect kind")
             self.generations.acknowledge_effect(effect["operation_id"])
-        self.source_completions.reconcile()
+        if reconcile_sources:
+            self.source_completions.reconcile()
 
     @staticmethod
     def _recall_pending(recall_id: str, code: str = "recall_in_progress") -> dict:
@@ -640,7 +644,18 @@ class EmberService:
                 result["response"] = json.loads(row["response_json"])
             return result
 
-    def _replay_recall(self, recall_id: str) -> dict:
+    def _replay_recall(self, recall_id: str, *, historical=False) -> dict:
+        if historical:
+            with self._hook_lock("cc/history/replay"):
+                row = self.generations.snapshot(recall_id)
+                if row is not None and row["state"] == "ready":
+                    try:
+                        self._reconcile_recall_effects(recall_id, reconcile_sources=False)
+                    except Exception:
+                        return self._recall_pending(recall_id, "recall_recovery_pending")
+                    if row["response_json"] is None:
+                        return self._generation_error("response_expired", "Recall response expired; identity and refs remain")
+                    return json.loads(row["response_json"])
         result = self.sidecar_recall_snapshot(recall_id, "response")
         return result["response"] if "response" in result else result
 
@@ -649,11 +664,26 @@ class EmberService:
             if rid != self._cc_recall_id:
                 del self._generation_contexts[rid]
 
+    @contextmanager
+    def _hook_lock(self, operation):
+        queued = time.monotonic()
+        with self._generation_lock:
+            acquired = time.monotonic()
+            try:
+                yield
+            finally:
+                elapsed = time.monotonic() - acquired
+                waited = acquired - queued
+                if waited + elapsed >= 1:
+                    logging.getLogger(__name__).warning(
+                        "hook timing operation=%s lock_wait_ms=%.0f execution_ms=%.0f",
+                        operation, waited * 1000, elapsed * 1000)
+
     def cc_turn_start(self, cc_session, recall_id, anchor):
         if (not identity(cc_session) or not identity(recall_id)
                 or (anchor is not None and not identity(anchor))):
             return self._generation_error("invalid_identity", "Invalid CC turn identity or anchor")
-        with self._generation_lock:
+        with self._hook_lock("cc/start"):
             request_hash = fingerprint([cc_session, anchor])
             old = self.generations.generation(recall_id)
             if old is not None:
@@ -674,7 +704,7 @@ class EmberService:
     def cc_turn_end(self, cc_session, recall_id):
         if not identity(cc_session) or not identity(recall_id):
             return self._generation_error("invalid_identity", "Invalid CC turn identity")
-        with self._generation_lock:
+        with self._hook_lock("cc/end"):
             ctx = self._generation_contexts.get(self._cc_recall_id)
             if recall_id == self._cc_recall_id and ctx and ctx["cc_session"] == cc_session:
                 self.generations.finish(recall_id, "closed", fingerprint([cc_session, recall_id]),
@@ -738,7 +768,14 @@ class EmberService:
                     raise QuoteSourceError("cc_quote_not_in_history", field=field)
                 position = positions.get(message_seq(match["message_id"]))
                 if position is None:
-                    raise QuoteSourceError("source_identity_missing", field=field)
+                    known = identities.get((match["role"], message_seq(match["message_id"])))
+                    if match.get("cc_turn_complete") is False:
+                        code = "cc_quote_incomplete_turn"
+                    elif not known or match.get("cc_turn_complete") is True:
+                        code = "cc_quote_unregistered"
+                    else:
+                        code = "source_identity_missing"
+                    raise QuoteSourceError(code, field=field)
                 endpoints.append(position)
             lo, hi = sorted(endpoints)
             matched_turns.update(row["turn"] for row in corpus[lo:hi + 1])
@@ -776,7 +813,7 @@ class EmberService:
             from .turn_slices import TurnSliceStore
             TurnSliceStore(self.store.root).revoke(self.source_instance, session_id, revoked_message_ids)
         if recall_id is None:
-            with self._generation_lock:
+            with self._hook_lock("turn_start"):
                 try:
                     self._reconcile_recall_effects()
                 except Exception:
@@ -829,17 +866,18 @@ class EmberService:
         if old is not None:
             if old["request_hash"] not in valid_hashes:
                 return self._generation_error("id_conflict", "recall_id content conflict")
-            return self._replay_recall(rid)
-        with self._generation_lock:
+            return self._replay_recall(rid, historical=historical and old["request_hash"] == request_hash)
+        with self._hook_lock("cc/history" if historical else "turn_start"):
             old = self.generations.generation(rid)
             if old is not None:
                 if old["request_hash"] not in valid_hashes:
                     return self._generation_error("id_conflict", "recall_id content conflict")
-                return self._replay_recall(rid)
-            try:
-                self._reconcile_recall_effects()
-            except Exception:
-                return self._generation_error("ledger_recovery_pending", "Earlier recall effects need recovery")
+                return self._replay_recall(rid, historical=historical and old["request_hash"] == request_hash)
+            if not historical:
+                try:
+                    self._reconcile_recall_effects()
+                except Exception:
+                    return self._generation_error("ledger_recovery_pending", "Earlier recall effects need recovery")
             session = self.get_or_create_session(sid)
             turn = max(session.turn_counter, self.turn_ledger.max_turn(sid), self.generations.max_turn(sid)) + 1
             self.generations.reserve(rid, sid, request_hash, turn, {"request_context": request_context},
@@ -856,7 +894,7 @@ class EmberService:
                 except Exception:
                     self.generations.interrupt(rid)
                     return self._generation_error("recall_outcome_unknown", "Historical registration failed before commit")
-                return self._replay_recall(rid)
+                return self._replay_recall(rid, historical=True)
             session.turn_counter = turn
             self._clear_app_contexts()
             self._live_turn = None

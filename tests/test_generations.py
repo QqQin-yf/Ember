@@ -125,6 +125,50 @@ class GenerationTests(unittest.TestCase):
         self.assertEqual(self.svc.sidecar_call_tool("write_event", args, domain="cc")["code"], "cc_turn_missing")
         self.assertEqual(self.svc.generations.generation("app-two")["state"], "running")
 
+    def test_hook_timing_separates_lock_wait_and_execution(self):
+        with patch("ember.service.time.monotonic", side_effect=[0, 1.25, 1.5]):
+            with self.assertLogs("ember.service", level="WARNING") as logs:
+                self.svc.cc_turn_start("window", "live-timing", "anchor")
+        self.assertIn("operation=cc/start lock_wait_ms=1250 execution_ms=250", logs.output[0])
+
+    def test_cc_history_recovers_its_ledger_receipt_without_projecting_all_sources(self):
+        kwargs = dict(user_message_id=41, recall_id="history-only", historical=True)
+        with patch.object(self.svc.source_completions, "reconcile", side_effect=AssertionError("global projection")):
+            with patch.object(self.svc.turn_ledger, "record_start_once", side_effect=OSError("write unavailable")):
+                pending = self.svc.hook_turn_start("main", "Original message", **kwargs)
+                self.assertEqual(pending["code"], "recall_recovery_pending")
+            receipt = self.svc.hook_turn_start("main", "Original message", **kwargs)
+            self.assertEqual(self.svc.turn_ledger.user_msg["main", receipt["turn"]], 41)
+            self.assertEqual(self.svc.hook_turn_start("main", "Original message", **kwargs), receipt)
+            self.assertFalse(self.svc.generations.pending_effects("history-only"))
+
+    def test_cc_quote_reports_unregistered_and_incomplete_turns(self):
+        user = {"message_id": 41, "role": "user", "content": "Original user message"}
+        reply = {"message_id": 42, "role": "assistant", "content": "Original assistant reply"}
+        self.svc.cc_turn_start("window", "cc-window", "main-leaf")
+        args = write_args(quote_spans=[{"start_quote": user["content"], "end_quote": user["content"]}])
+        args["event"]["focus"] = user["content"]
+        with patch("ember.source_client.iter_source_branch") as fetch:
+            fetch.return_value = [[reply, dict(user, cc_turn_complete=True)]]
+            missing = self.svc.sidecar_call_tool("write_event", args, domain="cc")
+            self.assertEqual(missing["code"], "cc_quote_unregistered")
+            self.assertEqual(missing["field"], "quote_spans[0].start_quote")
+            self.assertIn("补登记", missing["hint"])
+
+            fetch.return_value = [[dict(user, cc_turn_complete=False)]]
+            partial = self.svc.sidecar_call_tool("write_event", args, domain="cc")
+            self.assertEqual(partial["code"], "cc_quote_incomplete_turn")
+            self.assertIn("换用", partial["hint"])
+
+            started = self.svc.hook_turn_start("main", user["content"], user_message_id=41,
+                                               recall_id="historical", historical=True)
+            fetch.return_value = [[reply, dict(user, cc_turn_complete=True)]]
+            self.assertEqual(self.svc.sidecar_call_tool("write_event", args, domain="cc")["code"],
+                             "cc_quote_unregistered")
+            self.svc.hook_turn_end("main", reply["content"], started["turn"],
+                                   assistant_message_id=42, recall_id="historical")
+            self.assertEqual(self.svc.sidecar_call_tool("write_event", args, domain="cc")["status"], "created")
+
     def test_cc_source_page_budget_and_cursor(self):
         from ember import source_client
 

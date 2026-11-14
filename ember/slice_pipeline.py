@@ -163,7 +163,7 @@ class SlicePipeline:
 def complete_turn(service, pipeline, session_id, assistant_reply, turn=None,
                   assistant_message_id=None, recall_id=None, status='done', user_is_system=False):
     """Capture exact start identity under the same lock as accepted completion."""
-    with service._generation_lock:
+    with service._hook_lock("turn_end"):
         user_id = None
         if recall_id:
             snapshot = service.generations.snapshot(recall_id)
