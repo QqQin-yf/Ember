@@ -72,6 +72,8 @@ class QuoteSourceError(ValueError):
         self.field = field
         self.candidate_count = candidate_count
         messages = {
+            "cc_quote_unregistered": "已找到引文，但 Ember 尚未完成该回合的来源登记。",
+            "cc_quote_incomplete_turn": "引文所在回合没有完整的助手回复。",
             "cc_history_limit": "引文太久远，在本分支最近的 5000 条已入库消息里找不到。",
             "cc_quote_not_in_history": "在已入库的 main 历史中找不到引文。如果引用的是本轮原话，请在下一轮写入。",
             "source_unconfigured": "原文服务未配置，历史原文不可用，请检查原文连接配置，不必反复重摘。",
@@ -88,6 +90,9 @@ class QuoteSourceError(ValueError):
 
     def as_result(self):
         hints = {
+            "cc_quote_not_in_history": "如果是本轮原话，等下一轮重试；如果是历史原话，请换用当前分支里可见的引文。",
+            "cc_quote_unregistered": "刚结束的回合请等下一轮重试。历史回合持续报错时，请联系维护者核查并补登记。",
+            "cc_quote_incomplete_turn": "请换用已有完整用户消息和助手回复的回合中的引文。",
             "source_unconfigured": "请检查原文连接配置；恢复前不要反复重摘或重试写入。",
             "source_unreachable": "请检查原文服务连通性；恢复后再重新调用，不必改写摘录。",
             "source_auth_failed": "请检查原文服务令牌配置，不要修改摘录来重试。",

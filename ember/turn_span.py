@@ -142,6 +142,9 @@ def spans_from_quotes(quote_spans: list[dict],
         return []
     turns = [m["turn"] for m in corpus]
     lo_turn, hi_turn = min(turns), max(turns)
+    # Historical registration appends IDs even when the originals precede
+    # already registered turns. In that case use the verified message path.
+    out_of_order = any(left > right for left, right in zip(turns, turns[1:]))
 
     pairs: list[tuple[int, int]] = []
     for i, qs in enumerate(quote_spans or []):
@@ -157,7 +160,17 @@ def spans_from_quotes(quote_spans: list[dict],
         elif e_idx is None:
             # 只有首句：往后数 10 条消息（不足到语料末尾）
             e_idx = min(len(corpus) - 1, s_idx + FALLBACK_SPAN_MESSAGES)
-        if s_idx == e_idx:
+        if out_of_order:
+            if s_idx == e_idx:
+                path_turns = list(dict.fromkeys(turns))
+                index = path_turns.index(turns[s_idx])
+                selected = path_turns[max(0, index - SAME_QUOTE_CONTEXT_TURNS):
+                                      index + SAME_QUOTE_CONTEXT_TURNS + 1]
+            else:
+                first, last = sorted((s_idx, e_idx))
+                selected = turns[first:last + 1]
+            pairs.extend((turn, turn) for turn in set(selected))
+        elif s_idx == e_idx:
             # 首尾同一句 → ±3 轮就近上下文（不足有多少取多少）
             t = turns[s_idx]
             pairs.append((max(lo_turn, t - SAME_QUOTE_CONTEXT_TURNS),

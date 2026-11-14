@@ -67,6 +67,17 @@ class QuoteMatchingTests(unittest.TestCase):
         corpus = rows("开头", "**我**想**去**", "中间", "结尾🥰")
         self.assertEqual(spans_from_quotes([dict(start_quote="我想去", end_quote="结尾🥰🥰")], corpus), [(2, 4)])
 
+    def test_late_registration_uses_quote_path_not_numeric_range(self):
+        corpus = [
+            dict(role="user", turn=1018, content="First endpoint"),
+            dict(role="assistant", turn=1018, content="First reply"),
+            dict(role="user", turn=1041, content="Backfilled prompt"),
+            dict(role="assistant", turn=1041, content="Last endpoint"),
+            dict(role="user", turn=1020, content="Next morning prompt"),
+        ]
+        pairs = spans_from_quotes([dict(start_quote="First endpoint", end_quote="Last endpoint")], corpus)
+        self.assertEqual(pairs, [(1018, 1018), (1041, 1041)])
+
     def test_ambiguous_write_rejected_before_any_event_or_source_capture(self):
         with tempfile.TemporaryDirectory() as root:
             service = EmberService(EmberStore(root), MockLLMClient())

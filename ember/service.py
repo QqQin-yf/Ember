@@ -738,7 +738,14 @@ class EmberService:
                     raise QuoteSourceError("cc_quote_not_in_history", field=field)
                 position = positions.get(message_seq(match["message_id"]))
                 if position is None:
-                    raise QuoteSourceError("source_identity_missing", field=field)
+                    known = identities.get((match["role"], message_seq(match["message_id"])))
+                    if match.get("cc_turn_complete") is False:
+                        code = "cc_quote_incomplete_turn"
+                    elif not known or match.get("cc_turn_complete") is True:
+                        code = "cc_quote_unregistered"
+                    else:
+                        code = "source_identity_missing"
+                    raise QuoteSourceError(code, field=field)
                 endpoints.append(position)
             lo, hi = sorted(endpoints)
             matched_turns.update(row["turn"] for row in corpus[lo:hi + 1])
