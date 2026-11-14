@@ -290,7 +290,7 @@ class EmberService:
             "recall_cues": [r["cue"] for r in routes],
         }
         from .briefing_edits import write_hint
-        result.update(write_hint(self,event))
+        result.update(write_hint(self,event,created=True))
         apply_replacement(self,event,targets)
         from .promises import Promises
         Promises(self).written(event)

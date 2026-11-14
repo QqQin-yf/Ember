@@ -234,12 +234,12 @@ def _refresh(service,args,sid,mid,ids):
     while not budget and chosen and used>remaining:
         row=chosen.pop();used-=len(row['line'])+1
         dropped['core' if row['core'] else 'summary']+=1
-    slide_ids=timeline['slid_event_ids']
+    slide=timeline['slide_notice']
     slide_notice=''
-    if slide_ids:
-        start=service.store.get_event(slide_ids[0]).event_time
-        end=service.store.get_event(slide_ids[-1]).event_time
-        slide_notice=f'关系时间线已滑出 {len(slide_ids)} 条旧事件（{start[:10]} 至 {end[:10]}），仍可查询。'
+    if slide:
+        start=(slide['start'] or '?')[:10]
+        end=(slide['end'] or '?')[:10]
+        slide_notice=f"关系时间线已滑出 {slide['count']} 条旧事件（{start} 至 {end}），仍可查询。"
     task=timeline['summary_task']
     task_notice=(f"有关系时间线总结待办 {task['task_id']}，可调用 read_briefing_summary_task 读取。"
                  if task else '')
@@ -272,7 +272,7 @@ def _refresh(service,args,sid,mid,ids):
     report={'status':'ok','text':text,'chars':len(text),'session_id':sid,'revision':revision,
             'refreshed_at':now.isoformat(),'source_sync':source_sync,'timeline':timeline['health'],'knowledge':knowledge,
             'entity_directory':directory,'identity_profiles':profiles,'summary_task':timeline['summary_task'],
-            'slid_event_ids':timeline['slid_event_ids'],'timeline_summary_updates':timeline['summary_updates'],
+            'slid_event_ids':timeline['slid_event_ids'],'timeline_slide':slide,'timeline_summary_updates':timeline['summary_updates'],
             'visible_event_ids':visible_ids,
             **({'body_tokens':tokens(body),'token_budget':budget,'tokenizer':'o200k_base',
                 'profile_text':profile_text,'relationship_token_budget':relationship_budget} if budget else {}),

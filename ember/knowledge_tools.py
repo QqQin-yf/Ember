@@ -117,7 +117,7 @@ def write_event(service, args, context):
     from .extraction import Extraction
     Extraction(service).record_sources(sources,event.event_id,'written')
     from .briefing_edits import write_hint
-    return {'status':'created','event_id':event.event_id,'summary':event.summary,**write_hint(service,event),
+    return {'status':'created','event_id':event.event_id,'summary':event.summary,**write_hint(service,event,created=True),
             'source_slice_ids':args['source_slice_ids']}
 
 

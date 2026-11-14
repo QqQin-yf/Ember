@@ -92,6 +92,14 @@ class TimelineTests(unittest.TestCase):
         self.cfg['timeline']['upper_chars']=80
         report=self.timeline.render()
         self.assertEqual(report['slid_event_ids'],['1','3'])
+        notice={'start':oldest.event_time,'end':next_old.event_time,
+                'count':2,'event_ids':['1','3']}
+        self.assertEqual(report['slide_notice'],notice)
+        self.timeline.render()
+        from ember.briefing_edits import write_hint
+        self.assertNotIn('timeline_slide',write_hint(self.service,oldest))
+        self.assertEqual(write_hint(self.service,self.event(6),created=True)['timeline_slide'],notice)
+        self.assertNotIn('timeline_slide',write_hint(self.service,self.event(7),created=True))
         self.assertIn(pinned.core,report['text'])
         self.assertIn(full.core,report['text'])
         self.assertIn(remaining.summary,report['text'])

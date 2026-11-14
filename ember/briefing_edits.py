@@ -167,7 +167,7 @@ def task_hint(service):
         return {k:v for k,v in task.items() if k!='sources'}
 
 
-def write_hint(service,event):
+def write_hint(service,event,*,created=False):
     receipt=briefing_edit_receipt()
     if event.kind=='relationship':
         try:
@@ -176,6 +176,14 @@ def write_hint(service,event):
             task=None
         if task:
             receipt['briefing_summary_task']=task
+        if created:
+            from .timeline import Timeline
+            try:
+                slide=Timeline(service).take_slide_notice()
+            except (OSError,sqlite3.Error):
+                slide=None
+            if slide:
+                receipt['timeline_slide']=slide
     return receipt
 
 

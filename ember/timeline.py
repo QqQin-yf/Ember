@@ -146,6 +146,13 @@ class Timeline:
         row=conn.execute("SELECT value FROM metadata WHERE key='slid_event_ids'").fetchone()
         return json.loads(row[0]) if row else []
 
+    def take_slide_notice(self):
+        if not self.path.exists():
+            return None
+        with self.db() as conn:
+            row=conn.execute("DELETE FROM metadata WHERE key='pending_slide_notice' RETURNING value").fetchone()
+            return json.loads(row[0]) if row else None
+
     def render(self,onstage=lambda event:False,edits=None,*,budget=None):
         from .briefing_edits import plan, state, summary_updates
         from .briefing_budget import tokens
@@ -160,7 +167,22 @@ class Timeline:
                                    limit,cfg['briefing']['recent_hours'],onstage,count=count,slid=slid,
                                    slide_threshold=cfg['timeline']['health_ratio'],
                                    slide_target=cfg['timeline'].get('slide_target_ratio',0.3))
+            slide_notice=None
             if slid_now:
+                times=sorted(events[eid].event_time for eid in slid_now if events[eid].event_time)
+                slide_notice={'start':times[0] if times else None,'end':times[-1] if times else None,
+                              'count':len(slid_now),'event_ids':slid_now}
+                row=conn.execute("SELECT value FROM metadata WHERE key='pending_slide_notice'").fetchone()
+                pending=slide_notice
+                if row:
+                    previous=json.loads(row[0])
+                    bounds=sorted(value for notice in (previous,slide_notice)
+                                  for value in (notice['start'],notice['end']) if value)
+                    ids=list(dict.fromkeys(previous['event_ids']+slid_now))
+                    pending={'start':bounds[0] if bounds else None,'end':bounds[-1] if bounds else None,
+                             'count':len(ids),'event_ids':ids}
+                conn.execute("INSERT OR REPLACE INTO metadata VALUES ('pending_slide_notice',?)",
+                             (json.dumps(pending),))
                 conn.execute("INSERT OR REPLACE INTO metadata VALUES ('slid_event_ids',?)",
                              (json.dumps(list(dict.fromkeys(slid+slid_now))),))
             conn.execute('UPDATE timeline SET published_mode=NULL')
@@ -179,7 +201,7 @@ class Timeline:
                 codes.append('relationship_timeline_over_budget')
             health={'codes':codes,'compressed_and_points_chars':old,'original_chars':sum(len(row[1]) for row in rows)-old}
             conn.execute("INSERT OR REPLACE INTO metadata VALUES ('health',?)",(json.dumps(health),))
-            return {'text':text,'rows':rows,'original_event_ids':original,'dropped_event_ids':dropped+slid_now,'slid_event_ids':slid_now,
+            return {'text':text,'rows':rows,'original_event_ids':original,'dropped_event_ids':dropped+slid_now,'slid_event_ids':slid_now,'slide_notice':slide_notice,
                     'summary_task':{k:v for k,v in task.items() if k!='sources'} if task else None,
                     'summary_updates':summary_updates(self.service,edits),'health':health}
 
