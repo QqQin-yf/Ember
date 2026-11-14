@@ -66,6 +66,9 @@ class PipelineHTTPTests(unittest.TestCase):
         self.config = SliceEmbeddingConfig('synthetic-secret', base_url=base + '/v1', timeout_seconds=5)
         self.provider.model = self.config.model
         import sidecar
+        from ember.source_sync import SourceSyncWorker
+        patcher=patch.object(SourceSyncWorker,'process_one',return_value=False)
+        patcher.start(); self.addCleanup(patcher.stop)
         from ember.slice_reranker import RerankerConfig
         self.sidecar = sidecar
         for patcher in (patch.object(sidecar, 'REGISTRY', self.registry), patch.object(sidecar, 'TOKEN', ''),
@@ -109,12 +112,18 @@ class PipelineHTTPTests(unittest.TestCase):
             ids=[r[0] for r in db.execute('SELECT slice_id FROM turn_slices')]
         return store,[store.get(i) for i in ids]
 
-    def test_turn_end_does_not_slice_and_briefing_pulls_original_increment(self):
+    def sync(self):
+        from ember.source_sync import sync_increment
+        self.assertEqual(sync_increment(self.registry.service('default'))['status'],'ok')
+
+    def test_briefing_does_not_pull_increment_background_sync_saves_original(self):
         self.provider.allow_embedding.set()
         with TestClient(self.sidecar.app) as client:
             self.finish_turn(client)
             self.assertFalse(self.provider.reads)
             self.refresh(client)
+            self.assertFalse(self.provider.reads)
+            self.sync()
             store,rows=self.slices()
             self.assertEqual(len(rows),1)
             self.assertEqual(rows[0]['messages'][0]['content'],'original user')
@@ -128,7 +137,7 @@ class PipelineHTTPTests(unittest.TestCase):
         self.provider.allow_embedding.set()
         with TestClient(self.sidecar.app) as client:
             self.finish_turn(client,system=True)
-            self.refresh(client)
+            self.sync()
         store,rows=self.slices()
         self.assertEqual([m['role'] for m in rows[0]['messages']],['assistant'])
         self.assertIn('assistant:\noriginal assistant',[r['input'] for r in self.provider.inputs])
@@ -143,7 +152,7 @@ class PipelineHTTPTests(unittest.TestCase):
         self.provider.allow_embedding.set()
         with TestClient(self.sidecar.app) as client:
             self.finish_turn(client)
-            self.refresh(client)
+            self.sync()
             preview = client.post('/ember/recall/slices/preview', json={'input': 'fresh preview query'})
             self.assertEqual(preview.status_code, 200, preview.text)
             metadata = preview.json()

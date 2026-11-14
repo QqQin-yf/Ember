@@ -64,16 +64,16 @@ class Pins:
         ids=list(dict.fromkeys(life.canonical(eid) for eid in self.service.pin_store.all()))
         return [self.service.store.get_event(eid) for eid in ids if eid in self.service.store._events]
 
-    def event_block(self,event):
+    def event_block(self,event,*,local_only=False):
         members=self.sources(event.event_id) or [event.event_id]
         refs=self.service._presented_event_refs([{'event_id':eid,'presentation':'event_text'} for eid in members])
         digest=fingerprint([event.core,event.event_time,event.focus,refs,lifecycle_config()['pin']['event_chars']])
         with self.db() as conn:
             row=conn.execute('SELECT * FROM blocks WHERE event_id=?',(event.event_id,)).fetchone()
-        if row and row['hash']==digest and (row['source_status']=='ok' or row['retry_at']>time.time()):
+        if row and row['hash']==digest and (row['source_status']=='ok' or (not local_only and row['retry_at']>time.time())):
             return row['body']
         try:
-            source=self.service.read_source_event(event.event_id,truncate=False)
+            source=self.service.read_source_event(event.event_id,truncate=False,local_only=local_only)
         except Exception:
             source={'status':'unavailable'}
         header=f'◆ [{self.service._briefing_when(event)}] {event.core.strip()}'
@@ -82,6 +82,8 @@ class Pins:
             messages=source.get('messages') or [m for s in source.get('slices',[]) for m in s['messages']]
             text=centred(messages,event.focus,lifecycle_config()['pin']['event_chars'],source['transcript'])
             body+='\n  【原文】\n'+text
+        if local_only and not source.get('transcript'):
+            return body
         with self.db() as conn:
             conn.execute('INSERT OR REPLACE INTO blocks VALUES (?,?,?,?,?)',
                          (event.event_id,digest,body,source.get('status','unavailable'),time.time()+lifecycle_config()['slice']['retry_seconds']))
@@ -116,7 +118,9 @@ class Pins:
                         'hint':'这类满了，先 unpin 一条。','items':[{'event_id':e.event_id,'summary':e.summary} for e in items]}
         added=self.service.pin_store.add(eid)
         self.budget()
-        return {'status':'ok','event_id':eid,'pinned':True,'class':name,'already':not added}
+        from .knowledge import briefing_edit_receipt
+        return {'status':'ok','event_id':eid,'pinned':True,'class':name,'already':not added,
+                **(briefing_edit_receipt() if added else {})}
 
     def unpin(self,eid):
         eid=Lifecycle(self.service.store.root).canonical(eid)
@@ -127,7 +131,9 @@ class Pins:
             if Lifecycle(self.service.store.root).canonical(raw)==eid:
                 removed=self.service.pin_store.remove(raw) or removed
         self.budget()
-        return {'status':'ok','event_id':eid,'pinned':False,'was_pinned':removed}
+        from .knowledge import briefing_edit_receipt
+        return {'status':'ok','event_id':eid,'pinned':False,'was_pinned':removed,
+                **(briefing_edit_receipt() if removed else {})}
 
     def budget(self):
         used=sum(len(self.event_block(e)) for e in self.events() if category(e)=='promise')
@@ -166,6 +172,11 @@ class Pins:
             for entry in event.log:
                 if fingerprint(entry) not in seen:
                     seen.add(fingerprint(entry));log.append(entry)
+        from .privacy import Privacy
+        policy = Privacy(self.service.store.root)
+        main.private = any(policy.event_blocked(event.to_dict(), self.service.source_instance) for event in events)
+        main.material_updated_at = datetime.now(timezone.utc).isoformat()
+        main.material_sources_unverified = True
         main.summary=args['summary'].strip();main.core=args['core'].strip();main.log=log
         main.entity_refs=list(dict.fromkeys(eid for e in events for eid in e.entity_refs))
         self.service.store.write_event(main)

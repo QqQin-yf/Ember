@@ -14,7 +14,7 @@ from .event_slices import EventSliceLinks, sync_from_files
 ALLOWED_TOOLS = frozenset({
     'get_memory_extraction_batch', 'finish_memory_extraction_group',
     'write_event', 'write_promise', 'write_memory_knowledge', 'review_memory_knowledge',
-    'list_memory_knowledge', 'read_memory_source', 'search_memory_slices', 'read_memory_slices',
+    'read_briefing_summary_task', 'edit_briefing', 'list_memory_knowledge', 'read_memory_source', 'search_memory_slices', 'read_memory_slices',
 })
 
 
@@ -93,18 +93,23 @@ def registered_runs(service):
 def start(service, body):
     from .source_sync import sync_increment
     session_id, ids = scope(body)
-    proposal_mode = body.get('mode') == 'proposals'
-    if body.get('mode', 'raw') not in ('raw', 'proposals') or (proposal_mode and ids is not None):
+    mode = body.get('mode','raw')
+    proposal_mode = mode == 'proposals'
+    briefing_mode = mode == 'briefing'
+    if mode not in ('raw','proposals','briefing') or (mode!='raw' and ids is not None):
         raise ValueError('invalid_extraction_mode')
     if proposal_mode:
         from .proposals import TOOLS
         allowed_tools = TOOLS
+    elif briefing_mode:
+        from .briefing_edits import TOOL_NAMES
+        allowed_tools = TOOL_NAMES
     else:
         allowed_tools = ALLOWED_TOOLS
     rid = body.get('maintenance_id')
     if not isinstance(rid, str) or not rid.startswith('extraction-') or len(rid) > 200:
         raise ValueError('extraction maintenance_id required')
-    request_hash = fingerprint({'kind': 'proposals' if proposal_mode else 'extraction', 'session_id': session_id,
+    request_hash = fingerprint({'kind': mode if mode!='raw' else 'extraction', 'session_id': session_id,
                                 'assistant_message_ids': None if ids is None else sorted(ids, key=int)})
     with service._generation_lock:
         registered = registered_runs(service)
@@ -131,13 +136,13 @@ def start(service, body):
         with service.runs.db() as conn:
             if conn.execute("SELECT 1 FROM runs WHERE state IN ('running','finishing')").fetchone():
                 return {'status': 'failed', 'code': 'generation_busy'}
-        result = {'status':'ok'} if proposal_mode else sync_increment(service)
+        result = {'status':'ok'} if mode!='raw' else sync_increment(service)
         if result.get('status') != 'ok':
             return result
         queue = Extraction(service)
-        if not proposal_mode:
+        if mode=='raw':
             queue.discover()
-        selected = [] if proposal_mode else sources(service, session_id, ids)
+        selected = [] if mode!='raw' else sources(service, session_id, ids)
         if ids is not None and ids - {str(row['assistant_message_id']) for row in selected}:
             return {'status': 'failed', 'code': 'extraction_sources_pending'}
         session = service.get_or_create_session(session_id)
@@ -145,8 +150,8 @@ def start(service, body):
         selected_scope = {'session_id': session_id,
                           'assistant_message_ids': [int(row['assistant_message_id']) for row in selected],
                           'slice_ids': [row['slice_id'] for row in selected]}
-        if proposal_mode:
-            selected_scope['mode'] = 'proposals'
+        if mode!='raw':
+            selected_scope['mode'] = mode
         with service.generations._db() as conn:
             conn.execute("INSERT INTO generations(recall_id,session_id,request_hash,turn,state) VALUES (?,?,?,?,'running')",
                          (rid, session_id, request_hash, turn))
@@ -185,6 +190,10 @@ def finish(service, body):
 
 
 def _view(service, selected):
+    if selected.get('mode')=='briefing':
+        from .briefing_edits import task_hint
+        task=task_hint(service)
+        return {'status':'ok','complete':task is None,'pending_count':int(task is not None),'briefing_summary_task':task}
     if selected.get('mode') != 'proposals':
         return status(service, selected)
     from .proposals import pending_count
@@ -195,6 +204,13 @@ def _view(service, selected):
 def scoped_arguments(service, context, name, arguments):
     """Enforce the page scope at the tool boundary, including skip operations."""
     selected = context['extraction_scope']
+    if selected.get('mode')=='briefing':
+        if name=='read_briefing_summary_task' and not arguments:
+            return {}
+        if name=='edit_briefing' and not arguments.get('undo') and all(
+                op.get('action')=='group' and op.get('task_id') for op in arguments.get('operations',[])):
+            return dict(arguments)
+        raise ValueError('extraction_tool_not_allowed')
     if selected.get('mode') == 'proposals':
         from .proposals import TOOLS
         if name not in TOOLS:

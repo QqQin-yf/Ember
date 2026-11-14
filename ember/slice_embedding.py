@@ -58,9 +58,9 @@ class SliceEmbeddingClient:
     def __init__(self, config: SliceEmbeddingConfig):
         self.config = config
 
-    def embed(self, text: str) -> list[float]:
+    def embed(self, text: str, **privacy) -> list[float]:
         try:
-            data=call_model('embed',{'input':text,'encoding_format':'float'},config=self.config.request_config())
+            data=call_model('embed',{'input':text,'encoding_format':'float'},config=self.config.request_config(), **privacy)
         except ModelCallError as exc:
             raise SliceEmbeddingError('embedding_http_'+str(exc.status) if exc.status else
                 'embedding_'+('response_invalid' if exc.kind=='response_invalid' else 'unreachable')) from None
@@ -83,11 +83,14 @@ class SliceEmbeddingClient:
 def embed_pending_slices(store: TurnSliceStore, client: SliceEmbeddingClient,
                          limit: int = 100) -> dict:
     space = client.config.space
-    pending = store.pending_embeddings(space, limit)
+    pending = store.pending_embeddings(space, limit, eligible_only=True)
     counts = {"selected": len(pending), "ready": 0, "failed": 0, "changed": 0}
+    from .privacy import PrivateMaterial
     for source in pending:
         try:
-            vector = client.embed(slice_text(source))
+            vector = client.embed(slice_text(source), source_root=store.path.parent, sources=[source], delayed=True)
+        except PrivateMaterial:
+            continue
         except SliceEmbeddingError as exc:
             stored = store.save_embedding(source, space, None, error_code=str(exc))
             counts["failed" if stored else "changed"] += 1

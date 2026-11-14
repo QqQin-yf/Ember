@@ -65,7 +65,19 @@ class SliceRecall:
         metadata['candidate_threshold']=threshold
         query_vector = None
         ranked = []
+        from .privacy import Privacy
+        privacy = Privacy(self.root)
+        query_source = dict(instance=self.instance, session_id=session_id, user_message_id=anchor_message_id)
+        local = privacy.active(self.instance, session_id) or privacy.blocked(dict(query_source, query=True))
         try:
+            if local:
+                if purpose != 'automatic':
+                    ranked = self.keyword_rank(text)
+                    metadata.update(status='local_keyword', ranked_count=len(ranked), candidate_count=len(ranked),
+                                    candidate_pool=ranked)
+                else:
+                    metadata.update(status='local_keyword')
+                raise SliceEmbeddingError('private_query')
             config = SliceEmbeddingConfig.load(self.config_path)
             metadata.update(model=config.model, space=config.space, query_format='raw-input-v1')
             store = TurnSliceStore(str(self.root))
@@ -79,8 +91,10 @@ class SliceRecall:
                         WHERE s.instance=? AND e.space=? AND e.state='ready'
                         ORDER BY s.slice_id''', (self.instance, config.space)).fetchall()
             from .knowledge import KnowledgeStore, knowledge_space
-            knowledge_ready = any(not r['pinned'] and r['vector'] and r['space']==knowledge_space(config)
-                                  for r in KnowledgeStore(self.root,self.instance).all())
+            knowledge=KnowledgeStore(self.root,self.instance)
+            hidden=knowledge.briefing_hidden()
+            knowledge_ready = any((not r['pinned'] or r['memory_id'] in hidden) and
+                                  r['vector'] and r['space']==knowledge_space(config) for r in knowledge.all())
             from .core_semantic import CoreVectorStore
             event_ready=any(r['model']==config.space for r in CoreVectorStore(str(self.root)).all())
             if not event_ready:
@@ -95,7 +109,11 @@ class SliceRecall:
                 metadata['status'] = 'no_vectors'
             else:
                 # Exactly one fresh embedding for this whole input; no old Cue/Direction calls.
-                query_vector = SliceEmbeddingClient(config).embed(text)
+                from .privacy import PrivateMaterial
+                try:
+                    query_vector=SliceEmbeddingClient(config).embed(text,source_root=self.root,query_source=query_source)
+                except PrivateMaterial:
+                    raise SliceEmbeddingError('private_query') from None
                 from .event_slices import EventSliceLinks
                 from .memory_lifecycle import Lifecycle
                 eligible=Lifecycle(self.root,self.instance).eligibility_checker()
@@ -127,6 +145,8 @@ class SliceRecall:
                     from .proposals import recall_exclusions
                     excluded = recall_exclusions(self.root,self.instance)
                 for row in rows:
+                    if privacy.blocked(dict(row, instance=self.instance)):
+                        continue
                     if (row['slice_id'],row['content_hash']) in excluded and not memberships.get(row['slice_id']):
                         continue
                     if not eligible(row['slice_id']):
@@ -166,7 +186,7 @@ class SliceRecall:
                     for item in ranked:
                         parents=passing_parents(self.root,item,query_vector,config,events)
                         item['parent_event_ids']=parents
-                        source=store.get(item['slice_id'])
+                        source=store.get(item['slice_id'], policy=privacy)
                         item['parent_gate_passed']=bool(parents) or (parents is None and informative(source))
                 ranked.sort(key=lambda r: (-r['score'], r['slice_id']))
                 for index, item in enumerate(ranked, 1):
@@ -177,7 +197,13 @@ class SliceRecall:
                 metadata['candidate_pool'] = [dict(item) for item in ranked if item['in_candidate_pool']]
                 metadata['candidate_count'] = len(metadata['candidate_pool'])
         except SliceEmbeddingError as exc:
-            metadata.update(status='unavailable', error_code=str(exc))
+            if str(exc) == 'private_query':
+                if purpose != 'automatic' and not local:
+                    ranked = self.keyword_rank(text)
+                    metadata.update(ranked_count=len(ranked), candidate_count=len(ranked), candidate_pool=ranked)
+                metadata.update(status='local_keyword')
+            else:
+                metadata.update(status='unavailable', error_code=str(exc))
         with self.db() as db:
             db.execute('INSERT INTO queries VALUES (?,?,?,?,?,?)',
                 (trace_id, self.instance, json.dumps(metadata, ensure_ascii=False),
@@ -185,6 +211,32 @@ class SliceRecall:
                  json.dumps(ranked, allow_nan=False), datetime.now(timezone.utc).isoformat()))
         # Hook responses stay compact; full candidate identities are available in the trace.
         return {key: value for key, value in metadata.items() if key != 'candidate_pool'}
+
+    def keyword_rank(self, text):
+        from .memory_lifecycle import Lifecycle
+        from .privacy import Privacy, seconds_until_eligible
+
+        from .privacy import keywords
+        terms = keywords(text)
+        store = TurnSliceStore(self.root)
+        if not terms or not store.path.exists():
+            return []
+        eligible = Lifecycle(self.root, self.instance).eligibility_checker()
+        policy = Privacy(self.root)
+        ranked = []
+        for source in store.for_instance(self.instance, policy):
+            if not eligible(source['slice_id']) or seconds_until_eligible(source):
+                continue
+            body = '\n'.join(message['content'].casefold() for message in source['messages'])
+            count = sum(term in body for term in terms)
+            if count:
+                ranked.append({key: source[key] for key in (
+                    'slice_id', 'instance', 'session_id', 'user_message_id', 'assistant_message_id', 'content_hash'
+                )} | {'score': count / len(terms), 'hit_entry': 'local_keyword', 'in_candidate_pool': True})
+        ranked.sort(key=lambda item: -item['score'])
+        for rank, item in enumerate(ranked, 1):
+            item['rank'] = rank
+        return ranked
 
     def trace(self, trace_id, include_sources=False):
         if not self.path.exists():
@@ -199,8 +251,10 @@ class SliceRecall:
         result['rankings'] = json.loads(row['rankings_json'])
         if include_sources:
             store = TurnSliceStore(str(self.root))
+            from .privacy import Privacy
+            policy = Privacy(self.root)
             for item in result['rankings']:
-                source = store.get(item['slice_id'])
+                source = store.get(item['slice_id'], policy=policy)
                 if source and source['instance'] == self.instance and source['content_hash'] == item['content_hash']:
                     item['messages'] = source['messages']
                 else:

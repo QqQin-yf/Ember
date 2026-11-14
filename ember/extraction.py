@@ -1,6 +1,7 @@
 """Orphan-only source grouping and a durable, acknowledged extraction queue."""
 import asyncio
 from contextlib import contextmanager
+from .privacy import PrivateMaterial
 import json
 from pathlib import Path
 import sqlite3
@@ -115,12 +116,14 @@ class Extraction:
                 done = {(sid, digest) for sid, digest, mid in conn.execute(
                     'SELECT slice_id,content_hash,result_id FROM source_results WHERE instance=?',
                     (self.instance,)) if mid not in retired}
+        from .privacy import Privacy, seconds_until_eligible
+        policy=Privacy(self.root)
         result=[]
         for sid in ids:
             source=slices.get(sid)
-            if source is None:
+            if source is None or seconds_until_eligible(source):
                 continue
-            vector=slices.embedding(sid,config.space)
+            vector=slices.embedding(sid,config.space,policy=policy)
             if sid not in owners and (sid,source['content_hash']) not in done and informative(source) and eligible(sid) and vector:
                 result.append(dict(source,vector=vector['vector']))
         return result
@@ -154,7 +157,8 @@ class Extraction:
                 {'slices':[{'slice_id':s['slice_id'],'messages':s['messages']} for s in selected]},
                 {'type':'object','required':['groups'],'properties':{'groups':{'type':'array','minItems':1,'items':{
                     'type':'object','required':['description','slice_ids'],'properties':{'description':{'type':'string','minLength':1},
-                    'slice_ids':{'type':'array','minItems':1,'uniqueItems':True,'items':{'type':'string'}}}}}}})
+                    'slice_ids':{'type':'array','minItems':1,'uniqueItems':True,'items':{'type':'string'}}}}}}},
+                source_root=self.root, sources=selected, delayed=True)
             covered=[sid for g in result['groups'] for sid in g['slice_ids']]
             if len(covered)!=len(set(covered)) or set(covered)!={s['slice_id'] for s in selected}:
                 raise ValueError('extraction_group_coverage_invalid')
@@ -171,6 +175,8 @@ class Extraction:
                 conn.executemany('DELETE FROM grouping_retries WHERE instance=? AND slice_id=? AND content_hash=? AND space=?',
                                  [(self.instance,s['slice_id'],s['content_hash'],config.space) for s in selected])
             return True
+        except PrivateMaterial:
+            return False
         except Exception as exc:
             with self.db() as conn:
                 conn.execute('BEGIN IMMEDIATE')

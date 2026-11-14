@@ -32,6 +32,7 @@
     "compressed_lower_chars": 3200,
     "point_batch": 10,
     "health_ratio": 0.5,
+    "slide_target_ratio": 0.3,
     "retries": 2
   },
   "pin": {
@@ -44,8 +45,11 @@
   },
   "briefing": {
     "recent_hours": 72,
-    "total_chars": 6000,
-    "entity_directory_chars": 1000,
+    "token_budget": {
+      "total": 30000, "relationship": 15000, "recent": 4500,
+      "pins": 3500, "knowledge": 2500, "entities": 2000, "promises": 1500,
+      "reserve": 2000
+    },
     "entity_directory_line_chars": 100
   },
   "extraction": {

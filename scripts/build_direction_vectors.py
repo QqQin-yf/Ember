@@ -23,6 +23,11 @@ load_env(BASE)
 
 
 def main() -> None:
+    from ember.maintenance_materials import events
+    from ember.privacy import Privacy
+    privacy = Privacy(DATA)
+    instance = os.environ.get('EMBER_INSTANCE', 'default')
+    library = list(events(DATA).values())
     rows = []
     with open(ENTITIES, encoding="utf-8") as f:
         for line in f:
@@ -30,8 +35,12 @@ def main() -> None:
             if not line:
                 continue
             e = json.loads(line)
+            related = [event for event in library if e['entity_id'] in event.get('entity_refs', [])]
+            if any(privacy.event_blocked(event, instance) for event in related):
+                continue
+            sources = [source for event in related for source in privacy.event_sources(event['event_id'], instance)]
             for d in e.get("directions", []):
-                vec = embed_text(d["description"])
+                vec = embed_text(d["description"], source_root=DATA, sources=sources)
                 model = embedding_model()
                 rows.append({
                     "direction_id": d["direction_id"],

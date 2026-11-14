@@ -150,13 +150,19 @@ def main():
               file=sys.stderr)
         return
 
+    from ember.privacy import Privacy, offline_material
+    privacy = Privacy(DATA)
+    instance = os.environ.get('EMBER_INSTANCE', 'default')
     member_ids = events_of_entity(events, args.entity)
+    if any(privacy.event_blocked(events[eid], instance) for eid in member_ids):
+        return
     if len(member_ids) < DIRECTION_THRESHOLD:
         print(f"Entity {entity.name} 下 Event {len(member_ids)} 条 "
               f"< 阈值 {DIRECTION_THRESHOLD}，不划分（整区域召回即可）。",
               file=sys.stderr)
         return
 
+    sources = [source for eid in member_ids for source in privacy.event_sources(eid, instance)]
     summaries = [f"{eid} {events[eid].get('summary', '')}" for eid in member_ids]
     if args.dry_run:
         print(json.dumps({"entity": args.entity,
@@ -169,7 +175,8 @@ def main():
     raw = None
     for attempt in range(3):
         try:
-            raw = call_llm(SPLIT_SYSTEM_PROMPT, user, engine)
+            with offline_material(DATA, sources):
+                raw = call_llm(SPLIT_SYSTEM_PROMPT, user, engine)
             break
         except Exception as ex:
             print(f"!! 第{attempt+1}次调用失败: {ex}", file=sys.stderr)

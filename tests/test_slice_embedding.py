@@ -114,7 +114,7 @@ class SliceEmbeddingTests(unittest.TestCase):
 
     def test_changed_during_request_does_not_store_stale_vector(self):
         source = self.store.save("s", self.pair)
-        def change(text):
+        def change(text, **privacy):
             self.pair[1]["content"] = "changed while API was running"
             self.store.save("s", self.pair)
             return [1.0, 0.5]
@@ -136,20 +136,20 @@ class SliceEmbeddingTests(unittest.TestCase):
                      {"model": "wrong", "data": [{"index": 0, "embedding": [1]}]}):
             with self.subTest(data=data), patch("urllib.request.urlopen", return_value=self.response(data)):
                 with self.assertRaisesRegex(SliceEmbeddingError, "embedding_response_invalid"):
-                    self.client.embed("text")
+                    self.client.embed("text", static_input=True)
 
     def test_http_error_and_provider_body_do_not_leak_secrets(self):
         error = urllib.error.HTTPError("https://example.com", 401, "synthetic-secret", {},
                                       io.BytesIO(b'synthetic-secret private-source-text'))
         with patch("urllib.request.urlopen", side_effect=error):
             with self.assertRaisesRegex(SliceEmbeddingError, "^embedding_http_401$"):
-                self.client.embed("private-source-text")
+                self.client.embed("private-source-text", static_input=True)
         self.assertTrue(error.fp.closed)
 
     def test_network_error_is_safe(self):
         with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("synthetic-secret")):
             with self.assertRaisesRegex(SliceEmbeddingError, "^embedding_unreachable$"):
-                self.client.embed("text")
+                self.client.embed("text", static_input=True)
 
     def test_no_database_is_an_empty_queue(self):
         with patch.object(self.client, "embed") as embed:

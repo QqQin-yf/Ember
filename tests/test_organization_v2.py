@@ -127,7 +127,7 @@ class OrganizationTests(unittest.TestCase):
         unrelated.entity_decision = {'state': 'none'}
         self.service.store.write_event(unrelated)
 
-        def ask(purpose, instruction, material, schema):
+        def ask(purpose, instruction, material, schema, **privacy):
             if purpose == 'relationship_links':
                 self.assertEqual([row['event_id'] for row in material['events']], ['earlier', 'later'])
                 return {'relations': [{'source': 'earlier', 'target': 'later', 'type': 'continues'}]}

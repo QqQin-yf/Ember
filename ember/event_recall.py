@@ -36,6 +36,8 @@ def append_events(service,result,session,turn,text,start=None,entries=None,conte
             hit=len(value)==len(query) and cosine(query,value)>=cfg['cue_threshold']
         if hit:
             routes.setdefault(route.event_id,[]).append(route.cue)
+    from .privacy import Privacy
+    privacy = Privacy(service.store.root)
     selected=[]
     for event in service.store.all_events():
         if (event.event_id in blocked or not eligible(event.event_id)
@@ -49,7 +51,7 @@ def append_events(service,result,session,turn,text,start=None,entries=None,conte
                     continue
         row=vectors.get(event.event_id)
         score=0.
-        if query and row and row['model']==space and row['text']==event.core and len(row['vector'])==len(query):
+        if query and row and not privacy.event_blocked(event.to_dict(), service.source_instance) and row['model']==space and row['text']==event.core and len(row['vector'])==len(query):
             score=cosine(query,row['vector'])
         cues=routes.get(event.event_id,[])
         if cues or score>=cfg['core_threshold']:

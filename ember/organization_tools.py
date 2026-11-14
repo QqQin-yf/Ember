@@ -25,7 +25,10 @@ def dispatch(service,name,args):
                 {k:v for k,v in e.to_dict().items() if k!='focus'} for e in service.store.all_events() if eid in e.entity_refs]}
         if not isinstance(args.get('summary'),str) or not args['summary'].strip():
             raise ValueError('nonempty_summary_required')
+        from datetime import datetime, timezone
         card.summary=args['summary'].strip()
+        card.summary_at = datetime.now(timezone.utc).isoformat()
+        card.summary_sources = None
         service.entity_store.save()
         with Organization(service).db() as conn:
             conn.execute('INSERT OR IGNORE INTO changed_entities VALUES (?)',(eid,))

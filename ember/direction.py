@@ -105,9 +105,13 @@ class DirectionMatcher:
                  margin_floor: float = MARGIN_FLOOR):
         self.entity_store = entity_store
         self.vector_store = vector_store
-        self.embed_fn = embed_fn or embed_text
+        self.embed_fn = embed_fn or self._embed_query
         self.top1_floor = top1_floor
         self.margin_floor = margin_floor
+
+    def _embed_query(self, text):
+        return embed_text(text, source_root=self.vector_store.root,
+                          query_source={'instance': None, 'session_id': None})
 
     def match(self, entity_hits: list, query: str) -> DirectionMatchResult:
         """对已命中的 Entity 做方向判断。entity_hits 为空时不应调用本方法。"""

@@ -19,6 +19,7 @@ def build_tools_spec(strict=False):
         "properties":{
             "summary":{"type":"string","minLength":1,"description":"一句话客观、简短地说清这段经历。"},
             "core":{"type":"string","minLength":1,"description":"第一人称的连贯叙述，写给自己的诚实版本：情况、细节、理解和感受都写在这里。"},
+            "private":{"type":"boolean","description":"Keep Event content and source turns local. Only authored recall cues may be embedded."},
             "significance":{"type":"integer","minimum":1,"maximum":10,"description":"事件的重要度，填 1 到 10 的整数。任何分数都可以写入。"},
             "kind":{"enum":["daily","relationship","project"],"description":"事件主类：日常、关于两人关系本身的互动、项目。"},
             "focus":{"type":"string","minLength":1,"description":"从来源区间逐字摘一句最重要的原话，写法同 start_quote；系统定位对应消息供 pin 截断，不要填写消息编号。"}}}

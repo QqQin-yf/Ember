@@ -1,5 +1,6 @@
 """Day-level drafts and bounded App review. Drafts never settle source material."""
 from datetime import datetime, timedelta
+from .privacy import PrivateMaterial
 import json
 import random
 import time
@@ -109,6 +110,8 @@ def propose_day(service):
             continue
         try:
             _propose(q, key, digest, refs, rows, boundary)
+        except PrivateMaterial:
+            continue
         except Exception as exc:
             logging.getLogger(__name__).warning('proposal day deferred: %s', type(exc).__name__)
             with q.db() as db:
@@ -122,6 +125,7 @@ def propose_day(service):
 
 
 def _propose(q, day, digest, refs, rows, boundary=()):
+    policy = {'source_root': q.root, 'sources': [*rows, *boundary], 'delayed': True}
     materials = []
     for index, row in enumerate(rows):
         materials.append({'index': index, 'messages': row['messages']})
@@ -164,16 +168,16 @@ def _propose(q, day, digest, refs, rows, boundary=()):
         for item in materials:
             cost = len(json.dumps(item,ensure_ascii=False).encode())
             if batch and size + cost > 48000:
-                notes.append(ask('slice_groups', instruction + ' 保留跨段待合并的候选和来源编号。',material(batch),schema))
+                notes.append(ask('slice_groups', instruction + ' 保留跨段待合并的候选和来源编号。',material(batch),schema,**policy))
                 batch, size = [], 0
             batch.append(item)
             size += cost
         if batch:
-            notes.append(ask('slice_groups',instruction,material(batch),schema))
-        result = ask('slice_groups',instruction+' 综合这些分段结果，同一件事只保留一个提议。',notes,schema)
+            notes.append(ask('slice_groups',instruction,material(batch),schema,**policy))
+        result = ask('slice_groups',instruction+' 综合这些分段结果，同一件事只保留一个提议。',notes,schema,**policy)
         result['recall'] = [label for note in notes for label in note['recall']]
     else:
-        result = ask('slice_groups',instruction,material(materials),schema)
+        result = ask('slice_groups',instruction,material(materials),schema,**policy)
     labels_by_index = {item['index']:item['label'] for item in result['recall']}
     if len(result['recall']) != len(rows) or set(labels_by_index) != set(range(len(rows))):
         raise ValueError('proposal_recall_coverage_invalid')

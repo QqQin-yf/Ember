@@ -62,7 +62,7 @@ class SearchMemoryTests(unittest.TestCase):
         _add(self.svc, "EVT-002", "讨论了漫剧的分镜设计")
         _add(self.svc, "EVT-003", "完全无关的事件内容")
 
-        def fake_embed(text: str):
+        def fake_embed(text: str, **privacy):
             if "漫画" in text or "漫剧" in text:
                 return VEC_A
             return VEC_FAR

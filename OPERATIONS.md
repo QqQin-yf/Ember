@@ -94,3 +94,63 @@ python -X utf8 scripts/export_tool_contracts.py
 ```
 
 工具导出默认写入 `设计讨论/codex回执/工具规范审阅.md`。`--output` 可指定文件，覆盖已有文件使用 `--force`。
+
+## Private memory egress
+
+Set EMBER_PRIVATE_CUTOVER once to the timezone-aware ISO timestamp of the first
+private-mode deployment. Keep the same value on subsequent rebuilds and for
+offline scripts. Missing cutover does not allow unverified outbound material. Events and Entity summaries with a trusted earlier
+material timestamp are eligible under the legacy rule. New model payloads need
+source identities or inherited provenance. A manually rewritten Event body or
+Entity summary with no source attribution remains local. Authored recall cues
+have a narrow exception to the private-content check and still require source
+provenance or a legacy Event. Raw transcript slices always respect explicit
+private ranges, including backdated ranges.
+
+With an open private range, automatic recall keeps local Event and Knowledge
+cue matching. Bound manual searches use the conversation state. A search or
+preview without a conversation binding uses local keyword matching whenever
+any private range is open in its Ember instance. No query embedding or remote
+slice reranking runs for that search.
+
+## Private mode rollout notes
+
+The first configured cutover is persisted in each instance's private.sqlite3.
+Health includes private configuration warnings. Keep the same timestamp on
+rebuilds. If old ranges exist without a cutover, their restrictions still
+apply and undated material receives no legacy exemption.
+
+A model request already admitted by the outbound check may finish after
+private mode starts. Dz can send the current user text for query embedding
+at turn start before any later backdating. That earlier submission cannot
+be recalled. The native CC turn-start hook sends no message body.
+
+## Production deployment and verification
+
+1. Prepare both builds and preserve the current image tags and deployment
+   configuration for rollback. Keep the operational proposal pause in effect.
+2. Before stopping, restarting, or recreating either service, tell the user
+   which services will restart and wait for an explicit go-ahead. Once approved,
+   set EMBER_PRIVATE_CUTOVER in the persistent Ember service environment
+   (`/srv/home/secrets/ember.env` on SG) to the timezone-aware first production
+   activation time. Set EMBER_PRIVATE_DELAY_SECONDS=3600 and
+   EMBER_ENABLE_PROPOSALS=0. If a cutover is already persisted, use its existing
+   value. Keep the cutover setting on subsequent rebuilds.
+3. Recreate Ember first and verify authenticated GET /health. Every
+   private.<instance>.cutover must be present and match the configured instant,
+   and every private.<instance>.warning must be null. Investigate any warning
+   before proceeding. Then recreate Deliz and verify its health and the
+   set_private MCP tool. Keep the previous image available for recovery.
+4. In an isolated synthetic Deliz conversation, start private mode, send one
+   synthetic dialogue turn, and record its exact user and reply message IDs.
+   Wait until Ember's source sync has consumed the turn. Check that it has zero
+   slice rows and zero vector rows. End private mode, send another synthetic
+   dialogue turn, and confirm the source sync created one slice. Record its
+   saved_at internally. Check zero matching ready vectors before the 3600-second
+   deadline, then poll after the deadline until one current ready vector is
+   present. Recheck that the first turn still has zero slices and vectors.
+   In the E2E receipt include only message IDs and counts.
+
+Denied model requests log one line at warning level with the configured purpose
+and fixed rejection code. These logs omit payload, source identities, endpoint,
+and credentials.

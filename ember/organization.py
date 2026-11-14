@@ -22,6 +22,8 @@ def document(event):
 
 class Organization:
     def __init__(self,service):
+        from .privacy import Privacy
+        self.privacy = Privacy(service.store.root)
         self.service=service
         self.root=Path(service.store.root)
 
@@ -45,22 +47,36 @@ class Organization:
 
     def themes(self):
         with self.db() as conn:
-            return [dict(r,members=json.loads(r['members']),vector=json.loads(r['vector'])) for r in conn.execute('SELECT * FROM themes')]
+            rows = [dict(r,members=json.loads(r['members']),vector=json.loads(r['vector']))
+                    for r in conn.execute('SELECT * FROM themes')]
+        private = {event.event_id for event in self.service.store.all_events() if self.event_private(event)}
+        return [row for row in rows if not private.intersection(row['members'])]
 
     def replacement(self,eid):
         with self.db() as conn:
             row=conn.execute('SELECT t.* FROM themes t JOIN replacements r ON r.theme_id=t.id WHERE r.event_id=?',(eid,)).fetchone()
         return dict(row) if row else None
 
+    def event_private(self, event):
+        from .privacy import Privacy
+        return self.privacy.event_blocked(event.to_dict(), self.service.source_instance)
+
     def vector(self,event,config):
+        if self.event_private(event):
+            raise ValueError('private_material')
         store=CoreVectorStore(str(self.root));old=store.get(event.event_id)
         if old and old['text']==event.core and old['model']==config.space:
             return old['vector']
-        vector=SliceEmbeddingClient(config).embed(event.core)
+        from .privacy import Privacy
+        vector=SliceEmbeddingClient(config).embed(event.core, source_root=self.root,
+            sources=self.privacy.event_sources(event.event_id, self.service.source_instance),
+            private=event.private)
         store.upsert(event.event_id,event.core,vector,config.space)
         return vector
 
     def copy_pool(self,event):
+        if self.event_private(event):
+            return None
         low=event.significance<=lifecycle_config()['promise']['low_score_max']
         origin=('daily' if low and event.kind=='daily' else
                 'promise' if low and event.kind=='promise' and event.status!='open' else None)
@@ -77,11 +93,16 @@ class Organization:
             pool={r['event_id']:json.loads(r['body']) for r in conn.execute('SELECT * FROM pool WHERE origin=?',(origin,))}
         if not members<=pool.keys() or len(members)<lifecycle_config()['grouping']['minimum']:
             return
-        material=[pool[eid] for eid in sorted(members)]
-        text=prose('theme_summary','根据全部副本客观概括这个主题。不能写成当事人自己的认知或规律。',material)
+        material=[pool[eid] for eid in sorted(members) if not self.event_private(self.service.store.get_event(eid))]
+        if len(material) != len(members):
+            return
+        from .privacy import Privacy
+        policy = self.privacy
+        sources = [source for eid in members for source in policy.event_sources(eid, self.service.source_instance)]
+        text=prose('theme_summary','根据全部副本客观概括这个主题。不能写成当事人自己的认知或规律。',material, source_root=self.root, sources=sources)
         label='来自较早的日常事件的概括' if origin=='daily' else '由第三方根据以前的约定客观总结'
         text=label+'：'+text
-        vector=SliceEmbeddingClient(config).embed(text)
+        vector=SliceEmbeddingClient(config).embed(text, source_root=self.root, sources=sources)
         tid=old['id'] if old else 'THM-'+fingerprint([origin,group['name'],sorted(members)])[:16]
         with self.db() as conn:
             conn.execute('INSERT OR REPLACE INTO themes VALUES (?,?,?,?,?,?,?)',
@@ -92,9 +113,31 @@ class Organization:
             for eid in members:
                 Lifecycle(self.root).mark(eid,'no_recall','daily_aggregated',[tid])
 
-    def entity_candidates(self,name,aliases,config,exclude=None):
+    def event_sources(self, events):
+        from .privacy import Privacy
+        policy = self.privacy
+        return [source for event in events
+                for source in policy.event_sources(event.event_id, self.service.source_instance)]
+
+    def entity_sources(self, eid):
+        from .privacy import Privacy
+        policy = self.privacy
+        if eid is None:
+            return []
+        try:
+            entity = self.service.entity_store.get(eid)
+        except KeyError:
+            return []
+        return policy.entity_sources(entity, self.service.store.all_events(), self.service.source_instance)
+
+    def entity_private(self, eid):
+        return any(eid in event.entity_refs and self.event_private(event)
+                   for event in self.service.store.all_events())
+
+    def entity_candidates(self,name,aliases,config,exclude=None,*,sources=()):
         client=SliceEmbeddingClient(config)
-        vector=client.embed('\n'.join([name,*aliases]))
+        vector=client.embed('\n'.join([name,*aliases]), source_root=self.root,
+                            sources=self.entity_sources(exclude) if exclude else sources)
         cards=[]
         names = {s.strip().casefold() for s in (name, *aliases)}
         life=Lifecycle(self.root)
@@ -103,28 +146,35 @@ class Organization:
             if card.entity_id==exclude or not eligible(card.entity_id):
                 continue
             row=self.entity_vector(card,config)
+            if row is None:
+                continue
             exact = any(s.strip().casefold() in names for s in (card.name, *card.aliases))
             if exact or (len(vector)==len(row['vector']) and cosine(vector,row['vector'])>=lifecycle_config()['grouping']['threshold']):
                 cards.append(card)
         return cards
 
     def entity_vector(self, card, config):
+        if self.entity_private(card.entity_id):
+            return None
         store = EntitySummaryVectorStore(str(self.root))
         text = '\n'.join([card.name, *card.aliases, card.summary])
         row = store.get(card.entity_id)
         if not row or row['text'] != text or row['model'] != config.space:
-            vector = SliceEmbeddingClient(config).embed(text)
+            vector = SliceEmbeddingClient(config).embed(text,source_root=self.root,sources=self.entity_sources(card.entity_id))
             store.upsert(card.entity_id, text, vector, config.space)
             row = store.get(card.entity_id)
         return row
 
-    def identify(self,group,cards,*,require_distinct=False):
+    def identify(self,group,cards,*,require_distinct=False,sources=()):
+        cards=[card for card in cards if not self.entity_private(card.entity_id)]
         if not cards:
             return None, True
         result=ask('entity_identity','只有确定同一具体对象才给 same_id。确认是不同的具体对象才填 distinct=true，拿不准填 false。主题相似不算同一对象。',
                    {'object':group,'existing':[e.to_dict() for e in cards]},
                    {'type':'object','required':['same_id'],'properties':{'same_id':{'type':['string','null']},
-                    'distinct':{'type':'boolean'}}})
+                    'distinct':{'type':'boolean'}}},source_root=self.root,
+                   sources=list(sources)+self.entity_sources(group.get('entity_id'))
+                           +[source for card in cards for source in self.entity_sources(card.entity_id)])
         if result['same_id'] is not None and result['same_id'] not in {e.entity_id for e in cards}:
             raise ValueError('unknown_entity_identity')
         return result['same_id'], result.get('distinct', False) or not require_distinct
@@ -137,6 +187,8 @@ class Organization:
         eligible = Lifecycle(self.root,self.service.source_instance).eligibility_checker()
         events=[e for e in self.service.store.all_events() if eligible(e.event_id)
                 and (eid in e.entity_refs or e.event_id in group['event_ids'])]
+        if any(self.event_private(event) for event in events):
+            raise ValueError('private_material')
         project=card.entity_type=='project' or any(e.kind=='project' for e in events)
         old=card.summary
         evidence={e.event_id:fingerprint(document(e)) for e in events}
@@ -152,13 +204,16 @@ class Organization:
             return eid
         material = []
         for event in events:
-            source = self.service.read_source_event(event.event_id, truncate=False)
+            source = self.service.read_source_event(event.event_id, truncate=False, include_private=False)
             material.append({**document(event), 'original': source.get('transcript') or None})
         text = prose('entity_summary',
-                     '阅读全部关联 Event，综合全部 Event 的 core 字段写一份第三人称客观概述。'
+                     '阅读全部关联 Event，综合全部 Event 的 core 字段写两三句第三人称客观概述，只保留直接说明该实体的内容。与实体无关的事件经过、部署日志和临时待办省略。跳过无依据的概括。'
                      '原话仅用于核对说话人、条件和上下文，缺原话时依据 core。保留原意、时间、例外和分歧；'
                      '区分计划、感受、猜测和已发生事实。不得补充材料未表达的事实，也不要只依据最新事件。',
-                     {'entity': card.name, 'events': material})
+                     {'entity': card.name, 'events': material},
+                     source_root=self.root,sources=self.event_sources(events))
+        if self.privacy.cutover() is not None:
+            card.summary_sources=self.event_sources(events)
         card.summary=text.strip();card.summary_at=datetime.now(timezone.utc).isoformat()
         card.aliases=aliases
         with self.service._generation_lock:
@@ -195,7 +250,7 @@ class Organization:
         eligible = life.eligibility_checker()
         events = []
         for event in self.service.store.all_events():
-            if (event.kind == 'relationship' or not eligible(event.event_id)
+            if (event.kind == 'relationship' or self.event_private(event) or not eligible(event.event_id)
                     or entity_id not in event.entity_refs):
                 continue
             try:
@@ -223,7 +278,8 @@ class Organization:
                          {'type':'object','required':['relations'],'properties':{'relations':{'type':'array','items':{
                              'type':'object','required':['source','target','type'],'properties':{
                                  'source':{'type':'string'},'target':{'type':'string'},
-                                 'type':{'enum':['continues','responds_to']}}}}}}) if len(window)>1 else {'relations':[]}
+                                 'type':{'enum':['continues','responds_to']}}}}}}, source_root=self.root,
+                         sources=self.event_sources([event for _, _, event in window])) if len(window)>1 else {'relations':[]}
             for edge in result['relations']:
                 source, target = edge['source'], edge['target']
                 if (event_id not in (source,target) or source not in order or target not in order
@@ -246,12 +302,13 @@ class Organization:
                     conn.execute('INSERT OR REPLACE INTO entity_links VALUES (?,?,?)',(entity_id,event_id,digest))
 
     def project_supersession(self,events):
-        rows=[document(e) for e in events if e.kind=='project']
+        public = [e for e in events if e.kind == 'project' and not self.event_private(e)]
+        rows = [document(e) for e in public]
         if len(rows)<lifecycle_config()['grouping']['minimum']:
             return
         result=ask('memory_group','只列明确被新的项目事实取代的旧 Event；事情完成后的过时过程状态也退出自动召回。保留可主动检索的原件。',rows,
                    {'type':'object','required':['superseded'],'properties':{'superseded':{'type':'array','items':{
-                       'type':'object','required':['old','new'],'properties':{'old':{'type':'string'},'new':{'type':'string'}}}}}})
+                       'type':'object','required':['old','new'],'properties':{'old':{'type':'string'},'new':{'type':'string'}}}}}}, source_root=self.root, sources=self.event_sources(public))
         by_id={e.event_id:e for e in events}
         from .promises import instant
         for pair in result['superseded']:
@@ -266,6 +323,8 @@ class Organization:
         with self.db() as conn:
             ids=[r[0] for r in conn.execute('SELECT entity_id FROM changed_entities')]
         for eid in ids:
+            if self.entity_private(eid):
+                continue
             primary_id = Lifecycle(self.root).canonical(eid)
             if primary_id != eid:
                 self.entity_vector(self.service.entity_store.get(primary_id), config)
@@ -281,7 +340,12 @@ class Organization:
                 order={e.entity_id:i for i,e in enumerate(self.service.entity_store.all())}
                 primary,absorbed=sorted([card,self.service.entity_store.get(target)],key=lambda e:(e.created_at or '',order[e.entity_id]))
                 text=prose('entity_summary','合并确定同一对象的卡片。只综合改写原有内容，逐句有据，保留原意、归属、时间、条件、例外与分歧；禁止增加原文未表达的事实、推断或说法。',
-                           [primary.to_dict(),absorbed.to_dict()])
+                           [primary.to_dict(),absorbed.to_dict()], source_root=self.root,
+                           sources=self.entity_sources(primary.entity_id)+self.entity_sources(absorbed.entity_id))
+                from .privacy import Privacy
+                if self.privacy.cutover() is not None:
+                    primary.summary_sources = self.entity_sources(primary.entity_id) + self.entity_sources(absorbed.entity_id)
+                primary.summary_at = datetime.now(timezone.utc).isoformat()
                 primary.summary='根据相关事件客观整理：'+text
                 primary.aliases=list(dict.fromkeys(primary.aliases+absorbed.aliases+[absorbed.name]))
                 with self.service._generation_lock:
@@ -315,11 +379,11 @@ class Organization:
         self.merge_changed(config)
         eligible = Lifecycle(self.root,self.service.source_instance).eligibility_checker()
         for event in self.service.store.all_events():
-            if event.kind=='relationship' or not eligible(event.event_id):
+            if (event.kind=='relationship' and not self.event_private(event)) or not eligible(event.event_id):
                 continue
             original=document(event)
             decision = event.entity_decision or {}
-            digest=fingerprint([original,decision]) if decision else fingerprint(original)
+            digest=fingerprint([original,decision,self.event_private(event)])
             with self.db() as conn:
                 row=conn.execute('SELECT * FROM processed WHERE event_id=?',(event.event_id,)).fetchone()
             if row and row['hash']==digest and not row['error']:
@@ -332,10 +396,20 @@ class Organization:
                         with Lifecycle(self.root).db() as conn:
                             old=conn.execute('SELECT * FROM vectors WHERE id=?',('cue:'+route.route_id,)).fetchone()
                         if not old or old['hash']!=route.cue or old['space']!=config.space:
-                            cue_vector=SliceEmbeddingClient(config).embed(route.cue)
+                            from .privacy import Privacy, PrivateMaterial
+                            cue_sources = self.privacy.authored_cue_sources(route.event_id, self.service.source_instance)
+                            try:
+                                cue_vector = SliceEmbeddingClient(config).embed(route.cue, source_root=self.root,
+                                    sources=cue_sources)
+                            except PrivateMaterial:
+                                continue
                             with Lifecycle(self.root).db() as conn:
                                 conn.execute('INSERT OR REPLACE INTO vectors VALUES (?,?,?,?)',
                                     ('cue:'+route.route_id,route.cue,config.space,json.dumps(cue_vector)))
+                if self.event_private(event):
+                    with self.db() as conn:
+                        conn.execute('INSERT OR REPLACE INTO processed VALUES (?,?,NULL,0)',(event.event_id,digest))
+                    continue
                 origin=self.copy_pool(event)
                 vector=self.vector(event,config)
                 state = decision.get('state')
@@ -361,21 +435,25 @@ class Organization:
                     continue
                 nearby=[]
                 for other in self.service.store.all_events():
-                    if other.kind!='relationship' and other.event_id!=event.event_id and eligible(other.event_id):
+                    if other.kind!='relationship' and other.event_id!=event.event_id and eligible(other.event_id) and not self.event_private(other):
                         ov=self.vector(other,config)
                         if len(ov)==len(vector) and cosine(vector,ov)>=lifecycle_config()['grouping']['threshold']:
                             nearby.append(other)
                 nearby=nearby[:lifecycle_config()['grouping']['batch_size']]
                 evidence={e.event_id:fingerprint(document(e)) for e in [event,*nearby]}
+                themes=self.themes()
+                theme_ids={eid for theme in themes for eid in theme['members']}
+                theme_events=[e for e in self.service.store.all_events() if e.event_id in theme_ids]
                 result=ask('memory_group','只判断是否属于同一主题。保留事实、说话人、条件、例外和分歧；不得增加材料未表达的内容。',
                            {'subject':original,'entity_hint':decision.get('name'),'nearby':[document(e) for e in nearby],
-                            'themes':[{k:v for k,v in t.items() if k not in ('vector','space')} for t in self.themes()]},
+                            'themes':[{k:v for k,v in t.items() if k not in ('vector','space')} for t in themes]},
                            {'type':'object','required':['groups'],'properties':{'groups':{'type':'array','items':{
                                'type':'object','required':['category','name','event_ids'],'properties':{
                                    'category':{'enum':['theme']},'name':{'type':'string','minLength':1},
                                    'event_ids':{'type':'array','minItems':1,'uniqueItems':True,'items':{'type':'string'}},
                                    'aliases':{'type':'array','items':{'type':'string'}},'theme_id':{'type':['string','null']},
-                                   'entity_type':{'enum':['project','person','animal','place','object']}}}}}})
+                                   'entity_type':{'enum':['project','person','animal','place','object']}}}}}},
+                           source_root=self.root,sources=self.event_sources([event,*nearby,*theme_events]))
                 allowed={event.event_id}|{e.event_id for e in nearby}
                 for group in result['groups']:
                     if not set(group['event_ids'])<=allowed or event.event_id not in group['event_ids']:

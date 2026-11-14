@@ -8,3 +8,5 @@ google-auth[requests]>=2,<3
 
 # IANA time zones on Windows, for local-midnight promise expiry.
 tzdata
+
+tiktoken>=0.9,<1

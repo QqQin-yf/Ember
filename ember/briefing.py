@@ -4,13 +4,13 @@ import json
 import os
 import sqlite3
 
-from .knowledge import KnowledgeStore
+from .briefing_budget import fit, join, tokens
+from .knowledge import KnowledgeStore, PROFILE_VISIBLE_CHARS
 from .lifecycle_config import lifecycle_config
 from .memory_lifecycle import Lifecycle, sources_in_context
 from .pin_policy import Pins
 from .promises import Promises
 from .source_refs import event_reference
-from .source_sync import sync_increment
 from .timeline import Timeline
 
 
@@ -72,17 +72,20 @@ def entity_directory(service, cfg):
     if not cards:
         return ''
     status = f'已展示全部 {len(cards)} 个 Entity。'
-    used = len(lines[0]) + 1 + len(f'展示 {len(cards)}/{len(cards)} 个 Entity，省略 {len(cards)} 个较不活跃的 Entity。')
+    budget=cfg.get('token_budget')
+    count=tokens if budget and 'entity_directory_chars' not in cfg else len
+    limit_total=cfg.get('entity_directory_chars',budget['entities'] if budget else 1000)
+    used = count(lines[0]) + 1 + count(f'展示 {len(cards)}/{len(cards)} 个 Entity，省略 {len(cards)} 个较不活跃的 Entity。')
     for card in cards:
         summary = ' '.join(card.summary.split())
         first = summary.partition('。')[0]
         limit = cfg.get('entity_directory_line_chars', 100)
         description = first if len(first) <= limit else first[:limit - 1] + '…'
         line = f'• {" ".join(card.name.split())} · {description or "待补概述"} · {card.entity_id}'
-        if used + len(line) + 1 > cfg.get('entity_directory_chars', 1000):
+        if used + count(line) + 1 > limit_total:
             break
         lines.append(line)
-        used += len(line) + 1
+        used += count(line) + 1
     shown = len(lines) - 1
     if shown < len(cards):
         status = f'展示 {shown}/{len(cards)} 个 Entity，省略 {len(cards)-shown} 个较不活跃的 Entity。'
@@ -115,7 +118,7 @@ def _refresh(service,args,sid,mid,ids):
     cfg=lifecycle_config()['briefing']
     from .event_mutation import remember_boundary
     remember_boundary(service,sid,mid,ids)
-    source_sync=sync_increment(service)
+    source_sync={'status':'background'}
     keep_turn=service.turn_ledger.turn_at_or_after(sid,mid) if mid else 0
     pins=Pins(service)
 
@@ -130,27 +133,30 @@ def _refresh(service,args,sid,mid,ids):
 
     now=datetime.now(timezone.utc)
     horizon=now-timedelta(hours=cfg['recent_hours'])
-    timeline=Timeline(service).render(onstage)
+    from .briefing_edits import state
+    _,edits=state(service)
+    budget=cfg.get('token_budget') if 'total_chars' not in cfg else None
     pinned=[e for e in pins.events() if e.kind!='relationship' and not onstage(e)]
     pin_ids={e.event_id for e in pinned}
-    pin_blocks=[pins.event_block(e) for e in pinned]
+    pin_blocks=[pins.event_block(e,local_only=True) for e in pinned]
     store=KnowledgeStore(service.store.root,service.source_instance)
-    knowledge=store.briefing()
+    knowledge=store.briefing(excluded=edits['knowledge'],budget=budget['knowledge'] if budget else None)
     profiles=store.identity_profiles()
     profile_lines=[]
-    limit=lifecycle_config()['pin']['knowledge_chars']
-    cognition={row['memory_id']:row for row in store.all() if row['kind']=='cognition'}
     for profile in profiles:
-        profile_lines.append(f"【{profile['label']}】{profile['overview'] or '待 App AI 整理'}")
-        for mid in profile['cognition_ids']:
-            item=cognition.get(mid)
-            if item:
-                content=item['content']
-                profile_lines.append(store.line(dict(item,content=content[:limit]+('…' if len(content)>limit else ''))))
+        overview=profile['overview']
+        chars=len(overview)
+        count=f'{chars}/{PROFILE_VISIBLE_CHARS} 字' if chars<=PROFILE_VISIBLE_CHARS else f'{chars} 字，显示前 {PROFILE_VISIBLE_CHARS} 字'
+        profile['overview']=overview[:PROFILE_VISIBLE_CHARS]
+        profile['chars']=chars
+        profile_lines.append(f"【{profile['label']}（{count}）】{profile['overview'] or '待 App AI 整理'}")
     profile_text='\n'.join(profile_lines)
     promises=Promises(service)
-    due=[e for e in promises.overdue(now) if not onstage(e)]
-    due_blocks=[f"约定到期 [{e.event_id}] {e.summary if e.event_id in pin_ids else e.core}（due={e.due}，open）" for e in due]
+    from .briefing_edits import protected
+    overrides=edits['event']
+    due=[e for e in promises.overdue(now) if not onstage(e)
+         and (protected(service,e) or overrides.get(e.event_id)!='hide')]
+    due_blocks=[f"约定到期 [{e.event_id}] {e.summary if e.event_id in pin_ids or (not protected(service,e) and overrides.get(e.event_id)=='summary') else e.core}（due={e.due}，open）" for e in due]
     previous=get(service)
     revision=int(previous.get('revision',0))+1
     known=[(turn,value) for (session,turn),value in service.turn_ledger.user_msg.items() if session==sid]
@@ -164,13 +170,26 @@ def _refresh(service,args,sid,mid,ids):
                              (sid,max(known)[0])).fetchone()
         if row:
             span['recall_id']=row[0]
+    directory = entity_directory(service, cfg)
+    if budget:
+        selected=[]
+        for event,block in zip(pinned,pin_blocks):
+            core=block.split('\n  【原文】',1)[0]
+            for candidate in (block,core):
+                if tokens(join([*(body for _,body in selected),candidate]))<=budget['pins']:
+                    selected.append((event,candidate))
+                    break
+        pinned=[event for event,_ in selected]
+        pin_blocks=[block for _,block in selected]
+        reminders=list(zip(due,due_blocks))
+        reminders=fit(reminders,max(0,budget['promises']-32),lambda item:item[1])
+        due=[event for event,_ in reminders]
+        due_blocks=[block for _,block in reminders]
     for event in {e.event_id:e for e in pinned+due if e.kind=='promise'}.values():
         promises.enter(event.event_id,'briefing',span)
     pending=len(promises.pending())
     pending_line=f'还有 {pending} 条进过上下文的约定没处理' if pending else ''
-    directory = entity_directory(service, cfg)
-    fixed=[directory,profile_text,timeline['text'],*pin_blocks,knowledge['text'],*due_blocks,pending_line]
-    remaining=max(0,cfg['total_chars']-sum(len(text)+1 for text in fixed if text))
+    other=join([*pin_blocks,knowledge['text'],*due_blocks,pending_line,directory])
     life=Lifecycle(service.store.root,service.source_instance)
     recent=[]
     for event in service.store.all_events():
@@ -184,18 +203,66 @@ def _refresh(service,args,sid,mid,ids):
                 continue
         except (ValueError,TypeError,AttributeError):
             continue
-        core=event.significance in (8,9,10)
+        action=None if protected(service,event) else overrides.get(event.event_id)
+        if action=='hide':
+            continue
+        core=event.significance in (8,9,10) and action!='summary'
         line=f"• [{service._briefing_when(event)}] {event.core if core else event.summary}"
         recent.append({'event':event,'line':line,'core':core,'created':created})
     recent.sort(key=lambda row:(-row['event'].significance,-row['created'].timestamp(),row['event'].event_id))
+    recent_demand=tokens(join(row['line'] for row in recent)) if budget else 0
+    relationship_budget=None
+    if budget:
+        fixed_targets=sum(budget[key] for key in ('pins','knowledge','entities','promises'))
+        spare=max(0,fixed_targets-tokens(other)+max(0,budget['recent']-recent_demand))
+        relationship_budget=max(0,min(budget['relationship']+spare,
+                                     budget['total']-budget['reserve']-tokens(other)))
+    timeline=Timeline(service).render(onstage,edits,budget=relationship_budget)
+    if budget:
+        fixed_tokens=tokens(join([timeline['text'],other]))
+        remaining=max(0,min(budget['recent']+max(0,relationship_budget-tokens(timeline['text'])),
+                            budget['total']-budget['reserve']-fixed_tokens))
+    else:
+        fixed=[directory,profile_text,timeline['text'],*pin_blocks,knowledge['text'],*due_blocks,pending_line]
+        remaining=max(0,cfg.get('total_chars',6000)-sum(len(text)+1 for text in fixed if text))
     chosen=list(recent);dropped={'core':0,'summary':0}
     used=sum(len(row['line'])+1 for row in chosen)
-    while chosen and used>remaining:
+    if budget:
+        chosen=fit(chosen,remaining,lambda row:row['line'])
+        for row in recent[len(chosen):]:
+            dropped['core' if row['core'] else 'summary']+=1
+    while not budget and chosen and used>remaining:
         row=chosen.pop();used-=len(row['line'])+1
         dropped['core' if row['core'] else 'summary']+=1
-    text='\n'.join(part for part in [profile_text,timeline['text'],*pin_blocks,
-                     '\n'.join(row['line'] for row in chosen),knowledge['text'],*due_blocks,pending_line] if part)
-    text = '\n'.join(part for part in (text, directory) if part)
+    slide_ids=timeline['slid_event_ids']
+    slide_notice=''
+    if slide_ids:
+        start=service.store.get_event(slide_ids[0]).event_time
+        end=service.store.get_event(slide_ids[-1]).event_time
+        slide_notice=f'关系时间线已滑出 {len(slide_ids)} 条旧事件（{start[:10]} 至 {end[:10]}），仍可查询。'
+    task=timeline['summary_task']
+    task_notice=(f"有关系时间线总结待办 {task['task_id']}，可调用 read_briefing_summary_task 读取。"
+                 if task else '')
+    update_notice=('有关系时间线合段的来源已修订，可调用 read_briefing_summary_task 查看。'
+                   if timeline['summary_updates'] else '')
+
+    from .privacy import Privacy
+    reminder=Privacy(service.store.root).status(service.source_instance,sid).get('reminder')
+
+    def body_text():
+        return join([timeline['text'],*pin_blocks,join(row['line'] for row in chosen),
+                     knowledge['text'],*due_blocks,pending_line,slide_notice,task_notice,update_notice,reminder,directory])
+
+    body=body_text()
+    if budget:
+        while chosen and tokens(body)>budget['total']:
+            row=chosen.pop()
+            dropped['core' if row['core'] else 'summary']+=1
+            body=body_text()
+        if tokens(body)>budget['total']:
+            return {'status':'failed','code':'briefing_protected_content_over_token_budget',
+                    'body_tokens':tokens(body),'token_limit':budget['total']}
+    text=join([profile_text,body])
     with Timeline(service).db() as conn:
         relationship_ids=[r[0] for r in conn.execute('SELECT event_id FROM timeline WHERE published_mode IS NOT NULL')]
     included=list(dict.fromkeys(relationship_ids+[e.event_id for e in pinned]+[row['event'].event_id for row in chosen]+[e.event_id for e in due]))
@@ -204,8 +271,11 @@ def _refresh(service,args,sid,mid,ids):
         service.recall_ledger.record(sid,0,'briefing',included)
     report={'status':'ok','text':text,'chars':len(text),'session_id':sid,'revision':revision,
             'refreshed_at':now.isoformat(),'source_sync':source_sync,'timeline':timeline['health'],'knowledge':knowledge,
-            'entity_directory':directory,'identity_profiles':profiles,
+            'entity_directory':directory,'identity_profiles':profiles,'summary_task':timeline['summary_task'],
+            'slid_event_ids':timeline['slid_event_ids'],'timeline_summary_updates':timeline['summary_updates'],
             'visible_event_ids':visible_ids,
+            **({'body_tokens':tokens(body),'token_budget':budget,'tokenizer':'o200k_base',
+                'profile_text':profile_text,'relationship_token_budget':relationship_budget} if budget else {}),
             'stats':{'relationship':len(relationship_ids),'pinned':len(pinned),'new72':len(recent),'kept_recent':len(chosen),
                      'due_promises':len(due),'pending_promises':pending,'dropped':dropped}}
     path=service._briefing_path()

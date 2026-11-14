@@ -34,7 +34,7 @@ class ExtractionTests(unittest.TestCase):
         return source
 
     def discover(self):
-        def grouping(purpose,instruction,material,schema):
+        def grouping(purpose,instruction,material,schema,**privacy):
             self.assertEqual(purpose,'slice_groups')
             return {'groups':[{'description':'same thing','slice_ids':[s['slice_id']]} for s in material['slices']]}
         with patch('ember.extraction.ask',side_effect=grouping) as model:
@@ -299,7 +299,7 @@ class ExtractionTests(unittest.TestCase):
                 patch('ember.extraction.ask',side_effect=ValueError('invalid group')):
             with self.assertRaises(ValueError):self.queue.discover(self.config)
         restarted=Extraction(self.service)
-        def group(purpose,instruction,material,schema):
+        def group(purpose,instruction,material,schema,**privacy):
             ids=[r['slice_id'] for r in material['slices']]
             self.assertEqual(ids,[second['slice_id']])
             return {'groups':[{'description':'later source','slice_ids':ids}]}

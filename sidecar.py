@@ -136,9 +136,10 @@ async def _list_tools() -> list[types.Tool]:
     from ember.timeline import tool_specs as timeline_specs
     from ember.organization_tools import tool_specs as organization_specs
     from ember.promises import tool_specs as promise_specs
+    from ember.privacy import tool_specs as private_specs
     from ember.extraction import tool_specs as extraction_specs
     specs = (build_tools_spec() + [build_revise_tool_spec()[0]]
-             + build_search_tool_spec() + build_pin_tool_specs() + knowledge_tool_specs() + promise_specs() + organization_specs() + timeline_specs() + pin_specs() + extraction_specs())
+             + build_search_tool_spec() + build_pin_tool_specs() + knowledge_tool_specs() + promise_specs() + organization_specs() + timeline_specs() + pin_specs() + extraction_specs() + private_specs())
     out: list[types.Tool] = []
     for spec in specs:
         fn = spec["function"]
@@ -224,7 +225,7 @@ async def _lifespan(app):
         cleanup = asyncio.create_task(_expire_recall_snapshots())
         pipeline = SlicePipeline(REGISTRY)
         app.state.slice_pipeline = pipeline
-        # Raw ingestion is pulled after committed Event batches or briefing refresh.
+        # Raw ingestion runs independently from briefing refresh.
         from ember.source_sync import SourceSyncWorker
         maintenance = SourceSyncWorker(REGISTRY)
         app.state.slice_maintenance = maintenance
@@ -391,7 +392,7 @@ async def _cc_hook(request: Request) -> JSONResponse:
         return JSONResponse({"code": "invalid_arguments"}, status_code=400)
     args = [body.get("cc_session"), body.get("recall_id")]
     if request.path_params["action"] == "start":
-        result = await asyncio.to_thread(svc.cc_turn_start, *args, body.get("anchor"))
+        result = await asyncio.to_thread(svc.cc_turn_start, *args, body.get("anchor"), body.get("private_anchor"))
     elif request.path_params["action"] == "end":
         result = await asyncio.to_thread(svc.cc_turn_end, *args)
     else:
@@ -424,6 +425,23 @@ async def _hook_turn_end(request: Request) -> JSONResponse:
         turn, assistant_message_id=_opt_int(body, "assistant_message_id"),
         recall_id=body.get("recall_id"), status=body.get("status", "done"),
         user_is_system=body.get("user_is_system", False)))
+
+
+async def _private(request: Request) -> JSONResponse:
+    from ember.privacy import dispatch
+
+    svc = _service_or_404(request)
+    if isinstance(svc, JSONResponse):
+        return svc
+    try:
+        body = await request.json()
+        if not isinstance(body, dict) or not isinstance(body.get('session_id'), str):
+            raise ValueError
+    except (ValueError, TypeError):
+        return JSONResponse({'status': 'failed', 'code': 'invalid_arguments'}, status_code=400)
+    result = await asyncio.to_thread(dispatch, svc, body, body['session_id'], body.get('anchor_message_id'),
+                                     branch_anchor=body.get('branch_anchor'))
+    return JSONResponse(result, status_code=400 if result.get('status') == 'failed' else 200)
 
 
 async def _slice_ingestion_status(request: Request) -> JSONResponse:
@@ -597,12 +615,23 @@ class BearerAuthMiddleware:
 
 
 async def _health(request: Request) -> JSONResponse:
-    return JSONResponse({"ok": True, "service": "ember"})
+    from ember.privacy import Privacy
+
+    def configuration():
+        result = {}
+        for name in REGISTRY.names:
+            cutover, warning = Privacy(REGISTRY.dir_of(name)).configuration
+            result[name] = {'cutover': cutover.isoformat() if cutover else None, 'warning': warning}
+        return result
+
+    return JSONResponse({"ok": True, "service": "ember",
+                         "private": await asyncio.to_thread(configuration)})
 
 
 app = BearerAuthMiddleware(Starlette(
     routes=[
         Route("/health", _health, methods=["GET"]),
+        Route("/ember/private", _private, methods=["POST"]),
         Route("/ember/runs/start", _run_lifecycle, methods=["POST"]),
         Route("/ember/runs/finish", _run_lifecycle, methods=["POST"]),
         Route("/ember/runs/{run_id}", _run_lifecycle, methods=["GET"]),

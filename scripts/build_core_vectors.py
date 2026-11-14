@@ -48,25 +48,31 @@ def main() -> None:
     model = embedding_model()
 
     # ---- 事件 core（含 superseded）----
-    events = store.all_events()
+    from ember.privacy import Privacy
+    privacy = Privacy(DATA)
+    instance = os.environ.get('EMBER_INSTANCE', 'default')
+    library = store.all_events()
+    events = [event for event in library if not privacy.event_blocked(event.to_dict(), instance)]
     core_rows: list[dict] = []
     for i, ev in enumerate(events, 1):
         text = (ev.core or ev.summary or "").strip()
         if not text:
             continue
         core_rows.append({"event_id": ev.event_id, "text": text,
-                          "vector": embed_text(text), "model": model})
+                          "vector": embed_text(text, source_root=DATA, sources=privacy.event_sources(ev.event_id, instance)), "model": model})
         print(f"  [{i}/{len(events)}] {ev.event_id} dim="
               f"{len(core_rows[-1]['vector'])}", file=sys.stderr)
     _write(os.path.join(DATA, "core_vectors.jsonl"), core_rows, "event_id")
 
     # ---- 实体 summary（非空才算）----
     ent_rows: list[dict] = []
-    ents = [e for e in estore.all() if (e.summary or "").strip()]
+    private_entities = {eid for event in library if privacy.event_blocked(event.to_dict(), instance)
+                        for eid in event.entity_refs}
+    ents = [e for e in estore.all() if e.entity_id not in private_entities and (e.summary or "").strip()]
     for i, e in enumerate(ents, 1):
         text = e.summary.strip()
         ent_rows.append({"entity_id": e.entity_id, "text": text,
-                         "vector": embed_text(text), "model": model})
+                         "vector": embed_text(text, source_root=DATA, sources=privacy.entity_sources(e, library, instance)), "model": model})
         print(f"  [{i}/{len(ents)}] entity {e.name} dim="
               f"{len(ent_rows[-1]['vector'])}", file=sys.stderr)
     _write(os.path.join(DATA, "entity_vectors.jsonl"), ent_rows, "entity_id")

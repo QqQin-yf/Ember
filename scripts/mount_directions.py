@@ -215,15 +215,21 @@ def main():
     updates: dict[str, dict] = {}
     report = []
 
+    from ember.privacy import Privacy, offline_material
+    privacy = Privacy(DATA)
+    instance = os.environ.get('EMBER_INSTANCE', 'default')
     for eid in targets:
         ev = events[eid]
+        if privacy.event_blocked(ev, instance):
+            continue
         core = ev.get("core") or ev.get("summary") or ""
         user = build_mount_user_prompt(dir_lines, eid, core)
         print(f"挂载 {eid} ...", file=sys.stderr)
         raw = None
         for attempt in range(3):
             try:
-                raw = call_llm(MOUNT_SYSTEM_PROMPT, user, engine)
+                with offline_material(DATA, privacy.event_sources(eid, instance)):
+                    raw = call_llm(MOUNT_SYSTEM_PROMPT, user, engine)
                 break
             except Exception as ex:
                 print(f"  !! 第{attempt+1}次调用失败: {ex}", file=sys.stderr)

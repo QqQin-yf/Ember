@@ -25,8 +25,13 @@ def catalog(service):
     """Typed originals, occurrence dates, provenance and Entity children."""
     from .maintenance_materials import event_document
     knowledge=KnowledgeStore(service.store.root,service.source_instance)
+    from .privacy import Privacy
+    policy = Privacy(service.store.root)
+    all_events = service.store.all_events()
+    private_ids = {e.event_id for e in all_events if policy.event_blocked(e.to_dict(), service.source_instance)}
+    private_entities = {eid for e in all_events if e.event_id in private_ids for eid in e.entity_refs}
     events={e.event_id:{'id':e.event_id,'kind':'event','document':event_document(e.to_dict()),
-        'sources':knowledge.event_sources(e.event_id) or []} for e in service.store.all_events()}
+        'sources':knowledge.event_sources(e.event_id) or []} for e in all_events if e.event_id not in private_ids}
     from .event_slices import EventSliceLinks
     for link in EventSliceLinks(service.store.root).all(service.source_instance):
         if link['event_id'] in events:
@@ -44,10 +49,14 @@ def catalog(service):
             if line.strip():
                 ev=json.loads(line);latest[ev['event_id']]=ev
     for ent in service.entity_store.all():
+        if ent.entity_id in private_entities:
+            continue
         children=[events[eid] for eid,e in latest.items() if ent.entity_id in e.get('entity_refs',[]) and eid in events]
         rows.append({'id':ent.entity_id,'kind':'entity','document':ent.to_dict(),'events':children,
                      'sources':list({s['slice_id']:s for e in children for s in e['sources']}.values())})
     for row in knowledge.all():
+        if any(policy.blocked(dict(source, instance=service.source_instance)) for source in row['sources']):
+            continue
         rows.append({'id':row['memory_id'],'kind':'knowledge','document':{k:row[k] for k in
             ('kind','content','cues','pinned','content_hash','confidence')},'sources':row['sources']})
     store=TurnSliceStore(service.store.root)
@@ -56,6 +65,8 @@ def catalog(service):
             ids=[r[0] for r in db.execute("SELECT DISTINCT s.slice_id FROM turn_slices s JOIN slice_embeddings e ON s.slice_id=e.slice_id AND s.content_hash=e.content_hash WHERE s.instance=? AND e.state='ready'",(service.source_instance,))]
         for sid in ids:
             s=store.get(sid)
+            if s is None:
+                continue
             rows.append({'id':sid,'kind':'slice','document':{'messages':s['messages']},
                          'sources':[{k:s[k] for k in ('slice_id','content_hash','session_id','user_message_id','assistant_message_id')}]})
     return rows
@@ -237,6 +248,14 @@ def apply_result(service,payload,output):
         if source.entity_id==target.entity_id:
             continue
         if source.summary and source.summary != target.summary:
+            from datetime import datetime, timezone
+            from .privacy import Privacy
+            policy = Privacy(service.store.root)
+            if policy.cutover() is not None:
+                library = service.store.all_events()
+                target.summary_sources = (policy.entity_sources(target, library, service.source_instance)
+                                          + policy.entity_sources(source, library, service.source_instance))
+            target.summary_at = datetime.now(timezone.utc).isoformat()
             target.summary = '\n'.join(filter(None,(target.summary,source.summary)))
         target.aliases=list(dict.fromkeys(target.aliases+[source.name]+source.aliases))
         target.directions=list({d.direction_id:d for d in target.directions+source.directions}.values())
@@ -275,7 +294,7 @@ def legacy_backfill(service, rows, vectors, config):
             store.upsert(row['id'],index_text(row),vectors[row['id']],model)
 
 
-def content_query(row,query,legacy,cache):
+def content_query(row,query,legacy,cache, **privacy):
     """Never compare old and VL vectors, even when dimensions happen to match."""
     model=row.get('model','')
     if not model.startswith('vl:'):
@@ -284,7 +303,7 @@ def content_query(row,query,legacy,cache):
     if model!='vl:'+config.space:
         return None
     if model not in cache:
-        cache[model]=SliceEmbeddingClient(config).embed(query)
+        cache[model]=SliceEmbeddingClient(config).embed(query, **privacy)
     return cache[model]
 
 
@@ -301,6 +320,18 @@ class MemoryMaintenanceWorker:
             life=Lifecycle(service.store.root,name)
             with service._generation_lock:
                 rows=catalog(service)
+            from .privacy import Privacy, PrivateMaterial
+            policy = Privacy(service.store.root)
+
+            def egress_sources(material):
+                if material['kind'] == 'entity':
+                    return policy.entity_sources(service.entity_store.get(material['id']),
+                                                 service.store.all_events(), name)
+                sources = [dict(source, instance=name) for source in material['sources']]
+                for item in ([material] if material['kind'] == 'event' else material.get('events', [])):
+                    sources.extend(policy.event_sources(item['id'], name))
+                return sources
+
             vectors={}
             for row in rows:
                 digest=fingerprint(row)
@@ -315,16 +346,22 @@ class MemoryMaintenanceWorker:
                         if ready:
                             vector=json.loads(ready[0])
                     if vector is None:
-                        vector=SliceEmbeddingClient(embedding).embed(index_text(row))
+                        try:
+                            vector = SliceEmbeddingClient(embedding).embed(index_text(row),
+                                source_root=service.store.root, sources=egress_sources(row))
+                        except PrivateMaterial:
+                            continue
                     with life.db() as db:
                         db.execute('INSERT OR REPLACE INTO vectors VALUES (?,?,?,?)',
                             (row['id'],digest,embedding.space,json.dumps(vector)))
                     return True
                 vectors[row['id']]=json.loads(old['vector'])
+            rows = [row for row in rows if row['id'] in vectors]
             with service._generation_lock:
                 legacy_backfill(service,rows,vectors,embedding)
             merge_exact_duplicates(service, rows)
             active=[r for r in rows if life.canonical(r['id'])==r['id']]
+            active_ids = {r['id'] for r in active}
             for row in active:
                 if row['kind'] not in ('event','entity'):
                     continue
@@ -337,7 +374,9 @@ class MemoryMaintenanceWorker:
                 with life.db() as db:
                     payload['existing_labels']=[dict(r) for r in db.execute('SELECT * FROM eligibility')
                         if r['id'] in {m['id'] for m in payload['materials']}]
-                    payload['existing_relations']=[json.loads(r[0]) for r in db.execute('SELECT body FROM relations')]
+                    payload['existing_relations'] = [relation for row in db.execute('SELECT body FROM relations')
+                        if (relation := json.loads(row[0])).get('source') in active_ids
+                        and relation.get('target') in active_ids]
                 if row['kind']=='event':
                     own_ids={s['slice_id'] for s in row['sources']}
                     payload['known_groups']=[g for g in payload['known_groups'] if not any(s['slice_id'] in own_ids for s in g['sources'])]
@@ -353,7 +392,10 @@ class MemoryMaintenanceWorker:
                 if task['state']=='done' or task['retry_at']>time.time():
                     continue
                 try:
-                    result=validate_result(MaintenanceClient(config).judge('memory_pool',payload),payload)
+                    result=validate_result(MaintenanceClient(config).judge('memory_pool',payload, source_root=service.store.root,
+                        sources=[dict(source, instance=service.source_instance)
+                                 for item in payload['known_groups'] for source in item['sources']]
+                                + [source for item in payload['materials'] for source in egress_sources(item)]),payload)
                     with service._generation_lock:
                         current={r['id']:r for r in catalog(service)}
                         if any(fingerprint(current.get(r['id']))!=fingerprint(r) for r in payload['materials']):

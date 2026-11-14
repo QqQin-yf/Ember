@@ -247,8 +247,19 @@ class EmberService:
             event.event_id, event.version_id, session.session_id, span_pairs, corpus,
             writer_recall_id=writer_recall_id, writer_tool_call_id=writer_tool_call_id,
             writer_turn=turn)
-        self.store.write_event(event)
-
+        from .privacy import Privacy
+        policy = Privacy(self.store.root)
+        evidence = self.event_sources.get(event.event_id)
+        with policy.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            for row in (evidence or {}).get('turn_messages', ()):
+                if policy.overlaps(db, self.source_instance, session.session_id,
+                                   row.get('user_message_id'), row.get('assistant_message_id')):
+                    event.private = True
+                    break
+            if event.private:
+                policy.protect_sources(policy.raw_event_sources(event.event_id, self.source_instance), db=db)
+            self.store.write_event(event)
 
         if span_pairs:
             self.turn_spans.fill(event.event_id, span_pairs,
@@ -278,6 +289,8 @@ class EmberService:
             "route_count": len(routes),
             "recall_cues": [r["cue"] for r in routes],
         }
+        from .briefing_edits import write_hint
+        result.update(write_hint(self,event))
         apply_replacement(self,event,targets)
         from .promises import Promises
         Promises(self).written(event)
@@ -296,7 +309,7 @@ class EmberService:
 
     READ_SOURCE_MAX_CHARS = 4000   # 单次返回总长上限（baseline）
 
-    def read_source_event(self, event_id: str, *, truncate=True, merge_sources=True) -> dict[str, Any]:
+    def read_source_event(self, event_id: str, *, truncate=True, merge_sources=True, local_only=False, include_private=True) -> dict[str, Any]:
         """翻原文单事件实现（只读；MCP 与召回呈现共用）。
 
         Frozen provenance supplies exact message IDs; the provider checks the
@@ -310,7 +323,7 @@ class EmberService:
             event_id=Lifecycle(self.store.root).canonical(self._resolve_event_id(event_id) or event_id)
             members=Pins(self).sources(event_id)
             if members:
-                originals=[self.read_source_event(eid,truncate=False,merge_sources=False) for eid in members]
+                originals=[self.read_source_event(eid,truncate=False,merge_sources=False,local_only=local_only,include_private=include_private) for eid in members]
                 text='\n\n'.join(r.get('transcript','') for r in originals if r.get('transcript'))
                 clipped=truncate and len(text)>self.READ_SOURCE_MAX_CHARS
                 result={'status':'ok' if all(r.get('status')=='ok' for r in originals) else 'partial',
@@ -319,9 +332,11 @@ class EmberService:
                 if not truncate:
                     result['messages']=[m for row in originals for m in (row.get('messages') or [m for item in row.get('slices',[]) for m in item['messages']])]
                 return result
-        explicit = read_memory(self, event_id, canonicalize=merge_sources)
+        explicit = read_memory(self, event_id, canonicalize=merge_sources,include_private=include_private)
         if explicit is not None:
             return explicit
+        if local_only:
+            return {"status":"not_archived","event_id":event_id}
         import re
         eid = (event_id or "").strip()
         resolved = self._resolve_event_id(eid) if eid else None
@@ -509,6 +524,7 @@ class EmberService:
             significance=w_event["significance"],
             kind=w_event["kind"], focus=w_event["focus"],
             due=w_event.get("due"),
+            private=w_event.get("private", False),
             entity_refs=refs,
             entity_decision=entity_decision,
             provenance_refs=["memory-writer", f"chat:{session.session_id}"],
@@ -679,7 +695,7 @@ class EmberService:
                         "hook timing operation=%s lock_wait_ms=%.0f execution_ms=%.0f",
                         operation, waited * 1000, elapsed * 1000)
 
-    def cc_turn_start(self, cc_session, recall_id, anchor):
+    def cc_turn_start(self, cc_session, recall_id, anchor, private_anchor=None):
         if (not identity(cc_session) or not identity(recall_id)
                 or (anchor is not None and not identity(anchor))):
             return self._generation_error("invalid_identity", "Invalid CC turn identity or anchor")
@@ -697,7 +713,7 @@ class EmberService:
             self._cc_recall_id = recall_id
             self._generation_contexts[recall_id] = {
                 "session": session, "turn": None, "cc_session": cc_session,
-                "anchor": anchor,
+                "anchor": anchor, "private_anchor": message_seq(private_anchor),
             }
             return {"ok": True}
 
@@ -1096,6 +1112,9 @@ class EmberService:
             with self._generation_lock:
                 context = self._generation_contexts.get(self._cc_recall_id)
                 if context is None:
+                    if name == 'set_private':
+                        from .privacy import dispatch
+                        return dispatch(self, arguments, 'main', None)
                     if name in (TOOL_NAME, PROMISE_TOOL_NAME, REVISE_TOOL_NAME, "write_memory_knowledge"):
                         return self._generation_error("cc_turn_missing", "No active CC turn. Submit a new prompt.")
                     # Non-authoring tools continue to work between prompts.
@@ -1233,6 +1252,16 @@ class EmberService:
                               context: dict | None = None,
                               recall_id: str | None = None,
                               tool_call_id: str | None = None) -> dict:
+        if name == 'set_private':
+            from .privacy import dispatch
+            active = context or self._live_turn or {}
+            session = active.get('session')
+            sid = session.session_id if session else None
+            if 'cc_session' in active:
+                return dispatch(self, arguments, sid, active.get('private_anchor'),
+                                branch_anchor=active.get('anchor'))
+            anchor = active.get('request_context', {}).get('user_message_id')
+            return dispatch(self, arguments, sid, anchor)
         if name in ('list_memory_pins','merge_memory_events'):
             from .pin_policy import Pins
             try:
@@ -1240,6 +1269,12 @@ class EmberService:
                     return Pins(self).listing() if name=='list_memory_pins' else Pins(self).merge(arguments)
             except (ValueError,KeyError,TypeError) as exc:
                 return {'status':'failed','code':'invalid_pin_operation','error':str(exc)}
+        from .briefing_edits import TOOL_NAMES as BRIEFING_TOOLS, dispatch as briefing_dispatch
+        if name in BRIEFING_TOOLS:
+            try:
+                return briefing_dispatch(self,name,arguments)
+            except (ValueError,KeyError,TypeError) as exc:
+                return {'status':'failed','code':'invalid_briefing_edit','error':str(exc)}
         if name=='read_relationship_point':
             from .timeline import Timeline
             return Timeline(self).read_point(arguments.get('point',''))
@@ -1283,7 +1318,7 @@ class EmberService:
         if name == READ_SOURCE_TOOL_NAME:
             return self.sidecar_read_memory_source(arguments.get("event_id") or "")
         if name == SEARCH_TOOL_NAME:
-            return self.sidecar_search_memory(arguments)
+            return self.sidecar_search_memory(arguments, context)
         if name == PIN_TOOL_NAME:
             return self.sidecar_pin_memory(arguments)
         if name == UNPIN_TOOL_NAME:
@@ -1391,12 +1426,14 @@ class EmberService:
         from .promises import tool_specs as promise_specs
         from .organization_tools import tool_specs as organization_specs
         from .timeline import tool_specs as timeline_specs
+        from .privacy import tool_specs as private_specs
+        from .briefing_edits import tool_specs as briefing_specs
         from .pin_policy import tool_specs as pin_specs
         from .proposals import tool_specs as proposal_specs
         from .extraction import tool_specs as extraction_specs
         return (build_tools_spec() + [build_revise_tool_spec()[0]]
                 + build_search_tool_spec() + build_pin_tool_specs()
-                + tool_specs() + promise_specs() + organization_specs() + timeline_specs() + pin_specs() + extraction_specs() + proposal_specs())
+                + tool_specs() + promise_specs() + organization_specs() + timeline_specs() + briefing_specs() + pin_specs() + extraction_specs() + proposal_specs() + private_specs())
 
     def sidecar_create_memory_event(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """MCP 工具 create_memory_event 执行体：进行中的一轮 + 参数 → 落库。
@@ -1545,10 +1582,16 @@ class EmberService:
         from .organization import Organization
         with Organization(self).db() as conn:
             conn.execute('DELETE FROM processed WHERE event_id=?',(resolved,))
+        from .privacy import Privacy, context_source
+        policy=Privacy(self.store.root)
+        source=context_source(self,context)
+        if source and (policy.active(self.source_instance,source['session_id']) or policy.blocked(dict(source,query=True))):
+            event.private=True
         self.store.write_event(event)  # append 覆盖：加载时新行盖旧行
         self.store.rebuild_index()
+        from .briefing_edits import write_hint
         return {"status": "revised", "event_id": resolved,
-                "revised_fields": revised}
+                "revised_fields": revised, **write_hint(self,event)}
 
     def sidecar_read_memory_source(self, event_id: str) -> dict[str, Any]:
         """MCP 工具 read_memory_source 执行体（只读，共用来源核验）。"""
@@ -1712,7 +1755,7 @@ class EmberService:
         return sum(1 for r in self.store.routes_for_event(event_id)
                    if self.store.restore_route(r.route_id))
 
-    def sidecar_search_memory(self, arguments: dict[str, Any]) -> dict[str, Any]:
+    def sidecar_search_memory(self, arguments: dict[str, Any], context=None) -> dict[str, Any]:
         """MCP 工具 search_memory 执行体：捞取（全库可达，如实标注）。"""
         args = arguments or {}
         query = str(args.get("query") or "").strip()
@@ -1730,12 +1773,22 @@ class EmberService:
             notes.append(k_note)
 
         # ---- 主模态：core 向量余弦；兜底：LIKE（embed 不可达）----
+        from .privacy import Privacy, context_source
+        policy = Privacy(self.store.root)
+        source = context_source(self, context)
+        blocked = policy.active(self.source_instance, source['session_id'] if source else None) or (
+            source is not None and policy.blocked(dict(source, query=True)))
+        privacy = dict(source_root=self.store.root, query_source=source or dict(
+            instance=self.source_instance, session_id=None))
+        if blocked:
+            notes.append('Private search uses local keywords.')
         scored: list[tuple[str, float]] = []
         try:
             from .memory_maintenance import content_query
             content_rows = self.core_vectors.all() or self.entity_vectors.all()
             first_vl = next((r for r in content_rows if r.get('model','').startswith('vl:')),None)
-            q_vec = content_query(first_vl,query,None,{}) if first_vl else embed_text(query)
+            q_vec = None if blocked else (content_query(first_vl,query,None,{},**privacy)
+                                           if first_vl else embed_text(query, **privacy))
         except Exception:  # noqa: BLE001 — 基础设施失败降级关键词
             q_vec = None
         in_range: dict[str, bool] = {}
@@ -1744,7 +1797,10 @@ class EmberService:
             from .memory_maintenance import content_query
             content_queries = {first_vl['model']:q_vec} if first_vl else {}
             for row in self.core_vectors.all():
-                candidate_query = content_query(row,query,None if first_vl else q_vec,content_queries)
+                event = events.get(row['event_id'])
+                if not event or policy.event_blocked(event.to_dict(), self.source_instance):
+                    continue
+                candidate_query = content_query(row,query,None if first_vl else q_vec,content_queries,**privacy)
                 if candidate_query is None or len(candidate_query)!=len(row['vector']):
                     continue
                 sim = cosine(candidate_query, row["vector"])
@@ -1756,11 +1812,12 @@ class EmberService:
         else:
             # LIKE 兜底：query 拆词（空格/逗号），任一词命中即算，
             # 按命中词数排序——降级模式下多关键词是排序信号
-            terms = [t for t in re.split(r"[，,、\s]+", query)
-                     if len(t.strip()) >= 2] or [query.lower()]
+            from .privacy import keywords
+            terms = keywords(query) if blocked else re.findall(r'[^\W_]+', query.casefold())
             scored_pool: list[tuple[str, int]] = []
             for eid, ev in events.items():
-                blob = f"{ev.core or ''}\n{ev.summary or ''}".lower()
+                cues = ' '.join(route.cue for route in self.store.routes_for_event(eid) if route.status == 'active')
+                blob = f"{ev.core or ''}\n{ev.summary or ''}\n{cues}".casefold()
                 hits = sum(1 for t in terms if t.lower() in blob)
                 if hits:
                     scored_pool.append((eid, hits))
@@ -1828,11 +1885,11 @@ class EmberService:
         try:
             q_vec2 = q_vec
             if q_vec2 is None:
-                q_vec2 = embed_text(query)
+                q_vec2 = None if blocked else embed_text(query, **privacy)
             from .memory_maintenance import content_query
             entity_queries = {first_vl['model']:q_vec} if first_vl and q_vec is not None else {}
-            for row in self.entity_vectors.all():
-                candidate_query = content_query(row,query,None if first_vl else q_vec2,entity_queries)
+            for row in self.entity_vectors.all() if q_vec2 is not None else []:
+                candidate_query = content_query(row,query,None if first_vl else q_vec2,entity_queries,**privacy)
                 if candidate_query is None or len(candidate_query)!=len(row['vector']):
                     continue
                 sim = cosine(candidate_query, row["vector"])
@@ -1940,7 +1997,7 @@ class EmberService:
 
     def _briefing_source_block(self, ev: Any) -> str:
         from .pin_policy import Pins
-        return Pins(self).event_block(ev)
+        return Pins(self).event_block(ev,local_only=True)
 
     def sidecar_briefing_refresh(self, args: dict[str, Any]) -> dict[str, Any]:
         from .briefing import refresh

@@ -32,7 +32,9 @@ def append_slice_presentations(service,result,query,*,blocked_events=()):
                 except ValueError:
                     stale.append(candidate['slice_id']);continue
                 candidates.append(candidate);sources.append(source)
-            ranks=SliceReranker(config,embed_config).rank(query,sources) if sources else []
+            ranks=SliceReranker(config,embed_config).rank(query, sources, source_root=service.store.root,
+                query_source=dict(instance=service.source_instance, session_id=trace['session_id'],
+                                  user_message_id=trace['anchor_message_id'])) if sources else []
             selection.update(status='ranked',model=config.model,min_score=config.score_floor('text'),modality='text',
                 source_budget_chars=config.source_budget_chars,stale_sources=stale,
                 rankings=[{'slice_id':candidates[r['index']]['slice_id'],'score':r['relevance_score']} for r in ranks])

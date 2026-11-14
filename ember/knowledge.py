@@ -1,6 +1,7 @@
 """App-authored knowledge and exact, possibly disjoint slice provenance."""
 import asyncio
 from contextlib import contextmanager
+from datetime import datetime, timezone
 import json
 import math
 from pathlib import Path
@@ -8,6 +9,17 @@ import sqlite3
 
 from .generations import fingerprint
 from .turn_slices import TurnSliceStore
+
+PROFILE_VISIBLE_CHARS = 400
+
+
+def briefing_edit_receipt():
+    return {
+        'updated_at': datetime.now(timezone.utc).isoformat(),
+        'next_briefing': '下次切换简报时带入。CC 在压缩、换窗、/clear 或 Deliz 截断后换版。',
+        'context': '本次改动已在当前工具调用上下文可见。同一页不会再发送新版简报。',
+    }
+
 
 KNOWLEDGE_THRESHOLD = 0.5
 KNOWLEDGE_BUDGET = 1000
@@ -59,24 +71,28 @@ class KnowledgeStore:
         finally:
             db.close()
 
-    def sources(self, slice_ids):
+    def sources(self, slice_ids, *, include_private=False):
         if (not isinstance(slice_ids, list) or not slice_ids or len(slice_ids)>100 or
                 any(not isinstance(s, str) or not s for s in slice_ids) or len(set(slice_ids))!=len(slice_ids)):
             raise ValueError('source_slice_ids must contain 1..100 distinct slice IDs')
         result = []
         store = TurnSliceStore(str(self.root))
+        from .privacy import Privacy
+        policy = Privacy(self.root)
         for sid in slice_ids:
-            row = store.get(sid)
+            row = store.get(sid, policy=policy, include_private=include_private)
             if row is None or row['instance'] != self.instance:
                 raise ValueError('source_slice_missing')
             result.append({k:row[k] for k in ('slice_id','content_hash','session_id','user_message_id','assistant_message_id')})
         return result
 
-    def read_sources(self, sources):
+    def read_sources(self, sources, *, include_private=False):
         store = TurnSliceStore(str(self.root))
         result = []
+        from .privacy import Privacy
+        policy = Privacy(self.root)
         for source in sources:
-            row = store.get(source['slice_id'])
+            row = store.get(source['slice_id'], policy=policy, include_private=include_private)
             if row is None or row['instance']!=self.instance or row['content_hash']!=source['content_hash']:
                 raise ValueError('source_slice_changed_or_missing')
             result.append(row)
@@ -138,22 +154,26 @@ class KnowledgeStore:
                     'pinned':False,'items':[{'memory_id':r['memory_id'],'content':r['content']} for r in rows if r['pinned']],
                     'hint':'这类满了，先 unpin 一条。'}
             db.execute('UPDATE knowledge SET pinned=? WHERE memory_id=? AND instance=?',(int(pinned),mid,self.instance))
-        return {'status':'ok','memory_id':mid,'pinned':pinned,'class':'knowledge','used':len(chosen),'limit':limit}
+        return {'status':'ok','memory_id':mid,'pinned':pinned,'class':'knowledge','used':len(chosen),'limit':limit,
+                **(briefing_edit_receipt() if target['pinned'] != pinned else {})}
 
-    def briefing(self):
+    def briefing(self,*,excluded=(),budget=None):
         from .memory_lifecycle import Lifecycle
         from .lifecycle_config import lifecycle_config
         cfg=lifecycle_config()['pin']
-        chosen=[r for r in self.all() if r['pinned'] and Lifecycle(self.root,self.instance).eligible(r['memory_id'])]
+        chosen=[r for r in self.all() if r['pinned'] and r['memory_id'] not in excluded and Lifecycle(self.root,self.instance).eligible(r['memory_id'])]
         clipped=[dict(r,content=r['content'][:cfg['knowledge_chars']]+('…（后面还有，可下钻）' if len(r['content'])>cfg['knowledge_chars'] else '')) for r in chosen]
+        if budget is not None:
+            from .briefing_budget import fit
+            clipped=fit(clipped,budget,self.line)
         text='\n'.join(self.line(r) for r in clipped)
-        return {'text':text,'memory_ids':[r['memory_id'] for r in chosen],
+        return {'text':text,'memory_ids':[r['memory_id'] for r in clipped],
                 'chars':len(text),'limit':cfg['knowledge_limit'],'item_char_limit':cfg['knowledge_chars'],
                 'token_upper_bound':token_bound(text),'count_method':'utf8_bytes_upper_bound'}
 
     def identity_profiles(self):
         from .memory_lifecycle import Lifecycle
-        labels = {'user': '关于你（用户）', 'assistant': '关于我（App AI）'}
+        labels = {'user': 'YOU', 'assistant': 'I'}
         records = {}
         if self.path.exists():
             with self.db() as db:
@@ -176,7 +196,7 @@ class KnowledgeStore:
 
     def set_identity_profile(self, subject, overview, cognition_ids):
         from .memory_lifecycle import Lifecycle
-        if (subject not in ('user','assistant') or not isinstance(overview,str) or len(overview.strip())>600
+        if (subject not in ('user','assistant') or not isinstance(overview,str)
                 or not isinstance(cognition_ids,list) or len(cognition_ids)>8
                 or any(not isinstance(mid,str) for mid in cognition_ids)
                 or len(set(cognition_ids))!=len(cognition_ids)):
@@ -188,7 +208,9 @@ class KnowledgeStore:
         with self.db() as db:
             db.execute('INSERT OR REPLACE INTO identity_profiles VALUES (?,?,?,?)',
                        (self.instance, subject, overview.strip(), json.dumps(cognition_ids)))
-        return {'status':'ok','profile':next(r for r in self.identity_profiles() if r['subject']==subject)}
+        chars=len(overview.strip())
+        return {'status':'ok','subject':subject,'chars':chars,'visible_chars':min(chars,PROFILE_VISIBLE_CHARS),
+                'truncated':chars>PROFILE_VISIBLE_CHARS,**briefing_edit_receipt()}
 
     def event_sources(self, eid):
         if not self.path.exists():
@@ -242,13 +264,25 @@ class KnowledgeStore:
                 db.execute('INSERT OR REPLACE INTO review_materials VALUES (?,?)',(gid,json.dumps(material)))
         return {'status':'ok','group_id':gid,'state':state}
 
+    def briefing_hidden(self):
+        from contextlib import closing
+        path=self.root/'memory_lifecycle.sqlite3'
+        if not path.exists():
+            return {}
+        with closing(sqlite3.connect(path.resolve().as_uri()+'?mode=ro',uri=True)) as db:
+            if not db.execute("SELECT 1 FROM sqlite_master WHERE name='briefing_edits'").fetchone():
+                return {}
+            row=db.execute('SELECT body FROM briefing_edits ORDER BY revision DESC LIMIT 1').fetchone()
+        return json.loads(row[0])['knowledge'] if row else {}
+
     def match(self, text, vector=None, space=None):
         from .memory_lifecycle import Lifecycle
         life=Lifecycle(self.root,self.instance)
         eligible=life.eligibility_checker()
+        hidden=self.briefing_hidden()
         hits=[]
         for row in self.all():
-            if row['pinned'] or not eligible(row['memory_id']):
+            if (row['pinned'] and row['memory_id'] not in hidden) or not eligible(row['memory_id']):
                 continue
             cue=any(c.casefold() in text.casefold() for c in row['cues'])
             score=None
@@ -274,7 +308,12 @@ def embed_knowledge(root, instance, config):
         space=knowledge_space(config)
         if row['vector'] and row['space']==space and row['vector_hash']==row['content_hash']:
             continue
-        vector=SliceEmbeddingClient(config).embed(row['content'])
+        from .privacy import PrivateMaterial
+        try:
+            vector=SliceEmbeddingClient(config).embed(row['content'], source_root=root,
+                sources=[dict(source, instance=instance) for source in row['sources']])
+        except PrivateMaterial:
+            continue
         with store.db() as db:
             db.execute('UPDATE knowledge SET vector_json=?,space=?,vector_hash=? WHERE memory_id=? AND content_hash=?',
                 (json.dumps(vector),space,row['content_hash'],row['memory_id'],row['content_hash']))

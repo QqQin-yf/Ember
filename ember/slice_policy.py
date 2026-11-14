@@ -27,7 +27,7 @@ def parent_allowed(event, root):
     from .pin_store import PinStore
     if PinStore(str(root)).is_pinned(event.event_id):
         return False
-    if event.kind not in ('daily','promise'):
+    if event.private or event.kind not in ('daily','promise'):
         return False
     if event.kind=='promise' and event.significance<=lifecycle_config()['promise']['low_score_max'] and event.status!='open':
         return False
@@ -75,10 +75,19 @@ def prepare_slices(service,config):
         return
     cfg=lifecycle_config()['slice'];client=SliceEmbeddingClient(config)
     cores=CoreVectorStore(root)
+    from .privacy import Privacy, PrivateMaterial, seconds_until_eligible
+    privacy = Privacy(root)
     for ev in service.store.all_events():
+        if privacy.event_blocked(ev.to_dict(), service.source_instance):
+            continue
         row=cores.get(ev.event_id)
         if not row or row['text']!=ev.core or row['model']!=config.space:
-            cores.upsert(ev.event_id,ev.core,client.embed(ev.core),config.space)
+            try:
+                vector = client.embed(ev.core, source_root=root,
+                    sources=privacy.event_sources(ev.event_id, service.source_instance), private=ev.private)
+            except PrivateMaterial:
+                continue
+            cores.upsert(ev.event_id, ev.core, vector, config.space)
     # Prototypes share the exact embedding namespace, never a different model.
     life=Lifecycle(root,service.source_instance)
     prototypes=[]
@@ -90,21 +99,23 @@ def prepare_slices(service,config):
         if row:
             vector=json.loads(row[0])
         else:
-            vector=client.embed(text)
+            vector=client.embed(text, static_input=True)
             with life.db() as db:
                 db.execute('INSERT OR REPLACE INTO vectors VALUES (?,?,?,?)',
                            (key,fingerprint(text),config.space,json.dumps(vector)))
         prototypes.append(vector)
-    with store._db() as db:
-        ids=[r[0] for r in db.execute('SELECT slice_id FROM turn_slices WHERE instance=?',(service.source_instance,))]
-    for sid in ids:
-        source=store.get(sid)
-        if source is None:
+    for source in store.for_instance(service.source_instance, privacy):
+        if seconds_until_eligible(source):
             continue
+        sid = source['slice_id']
         keep=sid in owned or informative(source)
         if keep:
-            ready=store.embedding(sid,config.space)
-            vector=ready['vector'] if ready else client.embed(slice_text(source))
+            ready=store.embedding(sid,config.space,policy=privacy)
+            try:
+                vector = ready['vector'] if ready else client.embed(
+                    slice_text(source), source_root=root, sources=[source], delayed=True)
+            except PrivateMaterial:
+                continue
             keep=sid in owned or not any(len(p)==len(vector) and cosine(p,vector)>=cfg['filler_threshold'] for p in prototypes)
             if keep and not ready:
                 store.save_embedding(source,config.space,vector)

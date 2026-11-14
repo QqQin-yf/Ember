@@ -12,10 +12,10 @@ def embedding_model():
     return settings('recall_embed',require_key=False).model
 
 
-def embed_text(text: str, timeout=None, retries=None) -> list[float]:
+def embed_text(text: str, timeout=None, retries=None, **privacy) -> list[float]:
     """Recall vector space selected by the recall_embed purpose."""
     from .model_gateway import call_model, ModelCallError
-    data=call_model('recall_embed',{'input':text},timeout_seconds=timeout,retries=retries)
+    data=call_model('recall_embed',{'input':text},timeout_seconds=timeout,retries=retries, **privacy)
     try:
         vector=data['data'][0]['embedding']
         if (not isinstance(vector,list) or not vector or any(type(v) not in (int,float) or

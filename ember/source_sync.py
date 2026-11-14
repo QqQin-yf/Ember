@@ -1,4 +1,4 @@
-"""Shared durable cursor for Event-batch and briefing-triggered source pulls."""
+"""Shared durable cursor for Event-batch and periodic background source pulls."""
 import asyncio
 from collections import defaultdict
 from contextlib import contextmanager
@@ -36,7 +36,7 @@ def sync_increment(service):
     """Hold one cursor lease across pull, derived writes and cursor advancement.
 
     Content-addressed slice upserts make a crash before advancement replay-safe.
-    A page is acknowledged only after its vectors and bindings are durable.
+    A page is acknowledged after local storage. Deferred vectors are handled by the worker.
     """
     instance=service.source_instance
     if not source_client.configured():
@@ -61,7 +61,7 @@ def sync_increment(service):
                         store.save(item['session_id'],item['messages'],instance=instance,
                                    user_is_system=item.get('user_is_system',False))
                     except source_client.SourceUnavailable as exc:
-                        if exc.code != 'source_revoked':
+                        if exc.code not in ('source_revoked', 'source_private'):
                             raise
                 prepare_slices(service,cfg)
                 cursor=page['cursor']
@@ -82,18 +82,28 @@ class SourceSyncWorker:
     def __init__(self,registry):
         self.registry=registry
         self.stop_event=asyncio.Event()
+        self.next_poll={}
+        self.last_instance=None
 
     def process_one(self):
-        for name in self.registry.names:
+        names=list(self.registry.names)
+        if self.last_instance in names:
+            split=names.index(self.last_instance)+1
+            names=names[split:]+names[:split]
+        for name in names:
+            service=self.registry.service(name)
             from .promises import Promises
-            Promises(self.registry.service(name)).sweep()
-            root=self.registry.dir_of(name)
-            if not (Path(root)/'source_sync.sqlite3').exists():
-                continue
+            Promises(service).sweep()
+            root=service.store.root
+            now=time.time()
             with db(root) as conn:
                 row=conn.execute('SELECT * FROM sync WHERE instance=?',(name,)).fetchone()
-            if row and row['requested']>row['completed'] and row['retry_at']<=time.time():
-                sync_increment(self.registry.service(name))
+            due=now>=self.next_poll.get(name,0)
+            requested=row and row['requested']>row['completed']
+            if (due or requested) and (not row or row['retry_at']<=now) and source_client.configured():
+                sync_increment(service)
+                self.next_poll[name]=time.time()+30
+                self.last_instance=name
                 return True
         return False
 

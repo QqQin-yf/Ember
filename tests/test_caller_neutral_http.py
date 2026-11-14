@@ -58,20 +58,21 @@ class CallerNeutralHTTPTests(unittest.TestCase):
         self.assertEqual(report['status'], 'ok')
         self.assertEqual(report['session_id'], 'cc-example')
         self.assertIn('remember the beacon', report['text'])
-        self.assertEqual(report['source_sync'], {'status': 'unavailable', 'code': 'source_unconfigured'})
+        self.assertEqual(report['source_sync'], {'status': 'background'})
         self.assertEqual(self.client.get('/ember/briefing').json(), report)
         self.assertEqual(self.client.get('/ember/briefing',
             headers={'X-Heart-Instance': 'default'}).json()['status'], 'empty')
 
-    def test_source_outage_is_reported_without_rejecting_caller(self):
+    def test_briefing_does_not_pull_source_even_during_outage(self):
         with patch.object(source_client, 'SOURCE_URL', 'http://source.invalid'), \
                 patch('ember.source_sync.SliceEmbeddingConfig.load'), \
                 patch.object(source_client, 'fetch_source_increment',
-                    side_effect=source_client.SourceUnavailable('offline', 'source_unreachable')):
+                    side_effect=AssertionError('source pull entered briefing')) as fetch:
             report = self.client.post('/ember/briefing/refresh',
                 json={'session_id': 'cc-example'}).json()
         self.assertEqual(report['status'], 'ok')
-        self.assertEqual(report['source_sync']['code'], 'source_unreachable')
+        fetch.assert_not_called()
+        self.assertEqual(report['source_sync'], {'status':'background'})
         self.assertIn('remember the beacon', report['text'])
 
     def test_briefing_fallback_http_is_read_only_and_instance_scoped(self):
@@ -101,7 +102,7 @@ class CallerNeutralHTTPTests(unittest.TestCase):
         self.service.store.write_event(Event('concurrent', 'v1', 'source', 'source', now, now,
             summary='summary', core='concurrent new memory', significance=8))
         started, release = threading.Event(), threading.Event()
-        def sync(service):
+        def sync(*args):
             started.set()
             if not release.wait(5):
                 raise AssertionError('test did not release refresh')
@@ -123,7 +124,7 @@ class CallerNeutralHTTPTests(unittest.TestCase):
                     result = await asyncio.wait_for(task, timeout=3)
                 self.assertEqual(result.json()['revision'], snapshot['revision']+1)
                 self.assertEqual(self.service.sidecar_briefing_get(), result.json())
-        with patch('ember.briefing.sync_increment', side_effect=sync):
+        with patch('ember.event_mutation.remember_boundary', side_effect=sync):
             asyncio.run(requests())
 
     def test_fallback_obeys_shared_http_auth_and_instance_validation(self):

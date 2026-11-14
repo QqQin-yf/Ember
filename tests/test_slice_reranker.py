@@ -54,7 +54,7 @@ class SliceRerankerTests(unittest.TestCase):
     def test_vl_reranker_payload_and_untrusted_indices(self):
         response=io.BytesIO(json.dumps({'results':[{'index':0,'relevance_score':.8}]}).encode())
         with patch('ember.model_gateway.urllib.request.urlopen',return_value=response) as http:
-            ranks=SliceReranker(self.rerank,self.config).rank('query',[self.sources[0]])
+            ranks=SliceReranker(self.rerank,self.config).rank('query',[self.sources[0]], source_root=self.root)
         request=http.call_args.args[0]
         body=json.loads(request.data)
         self.assertEqual(body['model'],'Qwen/Qwen3-VL-Reranker-8B')
@@ -63,7 +63,7 @@ class SliceRerankerTests(unittest.TestCase):
         self.assertEqual(ranks[0]['relevance_score'],.8)
         response=io.BytesIO(json.dumps({'results':[{'index':99,'relevance_score':.8}]}).encode())
         with patch('ember.model_gateway.urllib.request.urlopen',return_value=response),self.assertRaises(RerankerError):
-            SliceReranker(self.rerank,self.config).rank('query',[self.sources[0]])
+            SliceReranker(self.rerank,self.config).rank('query',[self.sources[0]], source_root=self.root)
 
     def present(self,refs):
         original={'prefix':'legacy prefix','presentations':[], 'recall_refs':{'events':refs},

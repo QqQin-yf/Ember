@@ -119,7 +119,11 @@ def semantic_hits(input_text: str,
     candidates = [r for r in routes if vector_store.has(r.route_id)]
     if not candidates:
         return [], "no_vectors"
-    embed = embed_fn or embed_text
+    def local_query(text):
+        return embed_text(text, source_root=vector_store.root,
+                          query_source={'instance': None, 'session_id': None})
+
+    embed = embed_fn or local_query
     try:
         q_vec = embed(input_text)
     except Exception:  # noqa: BLE001 — 基础设施失败统一降级，不阻断召回

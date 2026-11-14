@@ -187,10 +187,11 @@ def _run_tests():
                         "pin_memory", "unpin_memory", "read_memory_slices", "search_memory_slices",
                         "write_promise", "list_pending_promises", "process_promise",
                         "revise_entity_summary", "read_entity_events", "read_relationship_point",
+                        "read_briefing_summary_task", "edit_briefing",
                         "list_memory_pins", "merge_memory_events", "get_memory_extraction_batch",
                         "finish_memory_extraction_group", "write_memory_knowledge",
                         "get_memory_proposals", "review_memory_proposals", "read_memory_proposal_sources",
-                        "review_memory_knowledge", "set_knowledge_pin", "list_memory_knowledge", "set_identity_profile"},
+                        "review_memory_knowledge", "set_knowledge_pin", "list_memory_knowledge", "set_identity_profile", "set_private"},
               str(names))
 
         print("== S11 hooks 与 MCP 共用召回/写入主路 ==")

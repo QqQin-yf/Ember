@@ -125,7 +125,9 @@ class TestCallLLM(unittest.TestCase):
             path=write_registry(td,split_model='glm-x')
             env={'ZHIPU_API_KEY':'k','EMBER_MODELS_CONFIG':path}
             with mock.patch.dict(os.environ,env),mock.patch('urllib.request.urlopen',self._fake_urlopen(captured)):
-                out=executors.call_llm('sys','user','glm',task='split')
+                from ember.privacy import offline_material
+                with offline_material(td, [{'instance':'default','session_id':'synthetic','user_message_id':'1'}]):
+                    out=executors.call_llm('sys','user','glm',task='split')
         self.assertEqual(out, "ok")
         self.assertEqual(captured["body"]["model"], "glm-x")       # split 的模型变量
         self.assertEqual(captured["body"]["temperature"], 0.3)     # split 的温度
@@ -137,7 +139,9 @@ class TestCallLLM(unittest.TestCase):
         with mock.patch.dict(os.environ, env, clear=True), \
              mock.patch("urllib.request.urlopen",
                         self._fake_urlopen(captured)):
-            executors.call_llm("sys", "user", "glm", task="mount")
+            from ember.privacy import offline_material
+            with tempfile.TemporaryDirectory() as td, offline_material(td, [{"instance":"default","session_id":"synthetic","user_message_id":"1"}]):
+                executors.call_llm("sys", "user", "glm", task="mount")
         self.assertEqual(captured["body"]["model"], "glm-4.7")     # 最终兜底
 
     def test_retired_or_unknown_task_rejected_before_any_engine(self):

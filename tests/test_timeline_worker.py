@@ -40,7 +40,7 @@ class TimelineWorkerTests(unittest.TestCase):
     def test_retry_waits_for_deadline_and_survives_restart(self):
         self.event()
         with patch('ember.timeline.time.time',return_value=1000), \
-                patch.object(Timeline,'extract',side_effect=OSError('offline')):
+                patch.object(Timeline,'prepare',side_effect=OSError('offline')):
             self.worker.process_one('one')
         self.assertIsNone(ready(self.tmp.name,now=1000))
         self.assertIsNotNone(ready(self.tmp.name,now=100000))
@@ -72,17 +72,6 @@ class TimelineWorkerTests(unittest.TestCase):
         with patch.object(Timeline,'prepare',autospec=True) as prepare:
             self.assertTrue(self.worker.process_one('one'))
         prepare.assert_called_once()
-
-    def test_refresh_failure_schedules_background_retry_after_worker_is_idle(self):
-        self.event()
-        self.worker.process_one('one')
-        from ember.timeline_work import ready
-        self.assertIsNone(ready(self.tmp.name,now=1000))
-        # A later cut can make an old compressed batch eligible for points.
-        with patch.object(Timeline,'next_retry',return_value=2000):
-            Timeline(self.service).render()
-        self.assertIsNone(ready(self.tmp.name,now=1999))
-        self.assertIsNotNone(ready(self.tmp.name,now=2000))
 
     def test_worker_completion_preserves_a_retry_scheduled_by_concurrent_refresh(self):
         from ember.timeline_work import defer, finish

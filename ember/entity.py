@@ -63,6 +63,7 @@ class Entity:
 
     entity_type: str = "object"
     created_at: str = ""
+    summary_sources: list[dict] | None = None
 
     ALLOWED_STATUS = ("open", "closed")
 

@@ -14,7 +14,7 @@ async def check():
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=sidecar.app),base_url='http://fixture') as c:
         assert (await c.get('/health')).status_code==401
         r=await c.get('/health',headers={'Authorization':'Bearer fixture-token'})
-        assert r.status_code==200 and r.json()=={'ok':True,'service':'ember'}
+        assert r.status_code==200 and r.json()['ok'] is True and r.json()['service']=='ember' and 'private' in r.json()
 asyncio.run(check())
 """
             result=subprocess.run([sys.executable,'-c',code],env=env,cwd=Path(__file__).resolve().parents[1],capture_output=True,text=True)

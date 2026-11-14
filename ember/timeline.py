@@ -47,7 +47,9 @@ class Timeline:
                 return (0,stamp.astimezone(timezone.utc),event.event_id)
             except (ValueError,TypeError,AttributeError):
                 return (1,event.event_id)
-        return sorted([e for e in self.service.store.all_events() if e.kind=='relationship'],key=order)
+        from .memory_lifecycle import Lifecycle
+        eligible=Lifecycle(self.service.store.root,self.service.source_instance).eligibility_checker()
+        return sorted([e for e in self.service.store.all_events() if e.kind=='relationship' and eligible(e.event_id)],key=order)
 
     @staticmethod
     def digest(event):
@@ -106,74 +108,17 @@ class Timeline:
                 if total<=cfg['lower_chars']:
                     break
 
-    def extract(self,conn,events):
-        cfg=lifecycle_config()['timeline']
-        pending=[dict(r) for r in conn.execute("SELECT * FROM timeline WHERE mode='compressed' AND compressed IS NOT NULL")]
-        from .event_mutation import visible
-        ordered=[r for eid in events for r in pending if r['event_id']==eid and events[eid].significance<10 and not self.service.pin_store.is_pinned(eid) and not visible(self.service,events[eid])]
-        if sum(len(r['compressed']) for r in ordered)<=cfg['compressed_upper_chars']:
-            conn.execute("DELETE FROM metadata WHERE key IN ('point_error','point_retry')")
-            return
-        while sum(len(r['compressed']) for r in ordered)>=cfg['compressed_lower_chars'] and ordered:
-            batch=ordered[:cfg['point_batch']]
-            ids={r['event_id'] for r in batch}
-            previous=self.points(conn)
-            result=ask('relationship_points',
-                '接着已有要点往下写，只写这一批中已有要点没有的新内容；后事改变前事时写“后来……”，不回头改已有文字。每条要点列出来源 event_ids。重复事实可用 existing_point_id 补来源，text 必须为空。必须覆盖这批全部 Event，不能把不相干来源塞进去。',
-                {'previous':previous,'batch':[{'event_id':r['event_id'],'text':r['compressed']} for r in batch]},
-                {'type':'object','required':['points'],'properties':{'points':{'type':'array','items':{
-                    'type':'object','required':['text','event_ids'],'properties':{'text':{'type':'string'},
-                        'event_ids':{'type':'array','minItems':1,'uniqueItems':True,'items':{'type':'string'}},
-                        'existing_point_id':{'type':'string'}}}}}})
-            coverage=set();known={p['id']:p for p in previous}
-            for item in result['points']:
-                members=set(item['event_ids']);coverage|=members
-                if not members<=ids:
-                    raise ValueError('point_source_outside_batch')
-                if item.get('existing_point_id'):
-                    if item['existing_point_id'] not in known or item['text']:
-                        raise ValueError('point_text_is_append_only')
-                elif not item['text'].strip():
-                    raise ValueError('empty_new_point')
-            if coverage!=ids or any(self.digest(self.service.store.get_event(r['event_id']))!=r['hash'] for r in batch):
-                raise ValueError('point_sources_changed_or_incomplete')
-            for item in result['points']:
-                pid=item.get('existing_point_id')
-                members=set(item['event_ids'])
-                if pid:
-                    members.update(known[pid]['event_ids'])
-                    conn.execute('UPDATE points SET event_ids=?,intervals=? WHERE id=?',
-                                 (json.dumps(sorted(members)),json.dumps(self.intervals(members)),pid))
-                else:
-                    pid='PT-'+fingerprint([item['text'],sorted(members)])[:16]
-                    conn.execute('INSERT OR IGNORE INTO points(id,text,event_ids,intervals) VALUES (?,?,?,?)',
-                                 (pid,item['text'],json.dumps(sorted(members)),json.dumps(self.intervals(members))))
-            from .event_mutation import seal
-            seal(self.service,ids)
-            conn.executemany("UPDATE timeline SET mode='pointed' WHERE event_id=?",[(eid,) for eid in ids])
-            ordered=ordered[len(batch):]
-        conn.execute("DELETE FROM metadata WHERE key IN ('point_error','point_retry')")
-
-    def prepare(self,refresh=False):
+    def prepare(self):
         cfg=lifecycle_config()['timeline']
         with self.lock,self.db() as conn:
             conn.execute('BEGIN IMMEDIATE')
             events=self.synchronize(conn)
-            from .event_mutation import visible
-            input_hash=fingerprint([[(eid,self.digest(e),visible(self.service,e)) for eid,e in events.items()],self.service.pin_store.all(),cfg])
+            input_hash=fingerprint([[(eid,self.digest(e)) for eid,e in events.items()],self.service.pin_store.all(),cfg])
             previous=conn.execute("SELECT value FROM metadata WHERE key='input_hash'").fetchone()
             cached=conn.execute("SELECT value FROM metadata WHERE key='health'").fetchone()
-            point_error=conn.execute("SELECT value FROM metadata WHERE key='point_retry'").fetchone()
-            retry_point=point_error and (refresh or float(point_error[0])<=time.time())
-            if previous and previous[0]==input_hash and cached and not retry_point:
+            if previous and previous[0]==input_hash and cached:
                 return json.loads(cached[0])
-
             self.choose(conn,events)
-            try:
-                self.extract(conn,events)
-            except Exception as exc:
-                conn.execute("INSERT OR REPLACE INTO metadata VALUES ('point_error',?)",(type(exc).__name__,))
-                conn.execute("INSERT OR REPLACE INTO metadata VALUES ('point_retry',?)",(str(time.time()+lifecycle_config()['slice']['retry_seconds']),))
             health=self.health(conn,events)
             conn.execute("INSERT OR REPLACE INTO metadata VALUES ('health',?)",(json.dumps(health),))
             conn.execute("INSERT OR REPLACE INTO metadata VALUES ('input_hash',?)",(input_hash,))
@@ -188,42 +133,55 @@ class Timeline:
             codes.append('relationship_timeline_budget_ratio')
         if any(r['error'] for r in rows.values()):
             codes.append('relationship_compression_pending')
-        if conn.execute("SELECT 1 FROM metadata WHERE key='point_error'").fetchone():
-            codes.append('relationship_points_failed')
         if old+original>lifecycle_config()['timeline']['upper_chars']:
             codes.append('relationship_timeline_over_budget')
         return {'codes':codes,'compressed_and_points_chars':old,'original_chars':original}
 
-    def render(self,onstage=lambda event:False):
-        with self.lock:
-            self.prepare(refresh=True)
-            from .timeline_work import defer
-            defer(self.service.store.root,self.next_retry())
-            with self.db() as conn:
-                events={e.event_id:e for e in self.events()}
-                rows={r['event_id']:dict(r) for r in conn.execute('SELECT * FROM timeline')}
-                conn.execute('UPDATE timeline SET published_mode=NULL')
-                blocks=[]
-                original_ids=[]
-                order={eid:i for i,eid in enumerate(events)}
-                for point in self.points(conn):
-                    if all(onstage(events[eid]) for eid in point['event_ids'] if eid in events):
-                        continue
-                    blocks.append((min(order[i] for i in point['event_ids'] if i in order),point['text']))
-                    conn.executemany("UPDATE timeline SET published_mode='pointed' WHERE event_id=?",[(i,) for i in point['event_ids']])
-                for eid,event in events.items():
-                    if onstage(event) or (rows[eid]['mode']=='pointed' and event.significance<10 and not self.service.pin_store.is_pinned(eid)):
-                        continue
-                    mode='original' if event.significance==10 or self.service.pin_store.is_pinned(eid) or not rows[eid]['compressed'] else rows[eid]['mode']
-                    text=(self.service._briefing_source_block(event) if self.service.pin_store.is_pinned(eid) else
-                          rows[eid]['compressed'] if mode=='compressed' else event.core)
-                    blocks.append((order[eid],text))
-                    if mode=='original':
-                        original_ids.append(eid)
-                    conn.execute('UPDATE timeline SET published_mode=? WHERE event_id=?',(mode,eid))
-                health=self.health(conn,events)
-                return {'text':'\n'.join(text for _,text in sorted(blocks,key=lambda item:item[0])),
-                        'health':health, 'original_event_ids':original_ids}
+    def slid_ids(self,conn=None):
+        if conn is None:
+            if not self.path.exists():
+                return []
+            with self.db() as db:
+                return self.slid_ids(db)
+        row=conn.execute("SELECT value FROM metadata WHERE key='slid_event_ids'").fetchone()
+        return json.loads(row[0]) if row else []
+
+    def render(self,onstage=lambda event:False,edits=None,*,budget=None):
+        from .briefing_edits import plan, state, summary_updates
+        from .briefing_budget import tokens
+        cfg=lifecycle_config()
+        with self.lock,self.db() as conn:
+            events=self.synchronize(conn)
+            limit=budget if budget is not None else cfg['timeline']['upper_chars']
+            count=tokens if budget is not None else len
+            slid=self.slid_ids(conn)
+            edits=state(self.service)[1] if edits is None else edits
+            rows,task,dropped,slid_now=plan(self.service,events.values(),edits,
+                                   limit,cfg['briefing']['recent_hours'],onstage,count=count,slid=slid,
+                                   slide_threshold=cfg['timeline']['health_ratio'],
+                                   slide_target=cfg['timeline'].get('slide_target_ratio',0.3))
+            if slid_now:
+                conn.execute("INSERT OR REPLACE INTO metadata VALUES ('slid_event_ids',?)",
+                             (json.dumps(list(dict.fromkeys(slid+slid_now))),))
+            conn.execute('UPDATE timeline SET published_mode=NULL')
+            for _,_,mode,ids in rows:
+                conn.executemany('UPDATE timeline SET published_mode=?,mode=? WHERE event_id=?',
+                                 [(mode,mode,eid) for eid in ids])
+            text='\n'.join(row[1] for row in rows)
+            original=[eid for eid,_,mode,_ in rows if mode=='original']
+            old=sum(len(text) for _,text,mode,_ in rows if mode!='original')
+            codes=[]
+            if old and old/max(1,sum(len(row[1]) for row in rows))>=cfg['timeline']['health_ratio']:
+                codes.append('relationship_timeline_budget_ratio')
+            if slid_now:
+                codes.append('relationship_timeline_window_slid')
+            if count(text)>limit:
+                codes.append('relationship_timeline_over_budget')
+            health={'codes':codes,'compressed_and_points_chars':old,'original_chars':sum(len(row[1]) for row in rows)-old}
+            conn.execute("INSERT OR REPLACE INTO metadata VALUES ('health',?)",(json.dumps(health),))
+            return {'text':text,'rows':rows,'original_event_ids':original,'dropped_event_ids':dropped+slid_now,'slid_event_ids':slid_now,
+                    'summary_task':{k:v for k,v in task.items() if k!='sources'} if task else None,
+                    'summary_updates':summary_updates(self.service,edits),'health':health}
 
     def mode(self,eid):
         if not self.path.exists():
@@ -235,7 +193,9 @@ class Timeline:
     def link(self):
         """Relationships connect history; they never supersede earlier Events."""
         from .relation import EventRelation
-        ordered=self.events()
+        from .privacy import Privacy
+        policy = Privacy(self.service.store.root)
+        ordered = [e for e in self.events() if not policy.event_blocked(e.to_dict(), self.service.source_instance)]
         for index,event in enumerate(ordered):
             digest=self.digest(event)
             with self.db() as conn:
@@ -244,12 +204,15 @@ class Timeline:
                 continue
             try:
                 earlier=ordered[:index][-lifecycle_config()['grouping']['batch_size']:]
+                sources = [source for item in [event, *earlier]
+                           for source in policy.event_sources(item.event_id, self.service.source_instance)]
                 result=ask('relationship_links','判断这件关系事件对前面的哪些事件构成延续或回应；不做取代，不提 Entity，可以没有关系。',
                     {'current':{'event_id':event.event_id,'core':event.core},
                      'earlier':[{'event_id':e.event_id,'core':e.core} for e in earlier]},
                     {'type':'object','required':['relations'],'properties':{'relations':{'type':'array','items':{
                         'type':'object','required':['event_id','type'],'properties':{'event_id':{'type':'string'},
-                            'type':{'enum':['continues','responds_to']}}}}}}) if earlier else {'relations':[]}
+                            'type':{'enum':['continues','responds_to']}}}}}},
+                    source_root=self.service.store.root, sources=sources) if earlier else {'relations':[]}
                 if any(r['event_id'] not in {e.event_id for e in earlier} for r in result['relations']):
                     raise ValueError('relationship_link_outside_history')
                 with self.service._generation_lock:
@@ -271,9 +234,6 @@ class Timeline:
     def next_retry(self):
         with self.db() as conn:
             deadlines=[r[0] for r in conn.execute("SELECT retry_at FROM timeline WHERE error IS NOT NULL UNION ALL SELECT retry_at FROM link_jobs WHERE error IS NOT NULL")]
-            point=conn.execute("SELECT value FROM metadata WHERE key='point_retry'").fetchone()
-            if point:
-                deadlines.append(float(point[0]))
         return min(deadlines) if deadlines else None
 
     def read_point(self,point):

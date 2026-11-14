@@ -36,7 +36,37 @@ class ModelCallError(RuntimeError):
         super().__init__('model_http_'+str(status) if status else 'model_'+kind)
 
 
-def call_model(purpose,payload,*,config=None,timeout_seconds=None,retries=None):
+def _safe_purpose(purpose):
+    try:
+        return settings(purpose, require_key=False).purpose
+    except (ModelConfigError, TypeError):
+        return 'unknown'
+
+
+def call_model(purpose, payload, *, config=None, timeout_seconds=None, retries=None,
+               source_root=None, sources=(), private=False, delayed=False, query_source=None,
+               static_input=False):
+    from .privacy import authorize, offline_sources, PrivateMaterial
+    inherited = offline_sources.get()
+    if inherited is not None and source_root is None:
+        source_root, sources = inherited
+    try:
+        if query_source is not None and source_root is None and not static_input:
+            raise PrivateMaterial('private_source_unverified')
+        with authorize(source_root, sources, private=private, delayed=delayed, query_source=query_source,
+                       source_required=not static_input and (query_source is None or purpose == 'rerank')):
+            pass
+    except PrivateMaterial as exc:
+        reason = str(exc)
+        if reason not in {'private_material', 'private_delay', 'private_cutover_unavailable',
+                          'private_source_unverified'}:
+            reason = 'private_policy_denied'
+        log.warning('model egress denied purpose=%s reason=%s', _safe_purpose(purpose), reason)
+        raise
+    return _call_model(purpose, payload, config=config, timeout_seconds=timeout_seconds, retries=retries)
+
+
+def _call_model(purpose,payload,*,config=None,timeout_seconds=None,retries=None):
     cfg=config or settings(purpose)
     if cfg.purpose!=purpose:
         raise ModelConfigError('model_purpose_mismatch')

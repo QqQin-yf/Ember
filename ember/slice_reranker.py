@@ -59,12 +59,13 @@ class SliceReranker:
     def __init__(self, config, embed_config):
         self.config,self.embed_config=config,embed_config
 
-    def rank(self, query, sources):
+    def rank(self, query, sources, *, source_root=None, query_source=None):
         cfg=self.config._settings or replace(settings('rerank',require_key=False),model=self.config.model,
             base_url=self.embed_config.base_url,api_key=self.embed_config.api_key,timeout_seconds=self.config.timeout_seconds)
         try:
             data=call_model('rerank',{'query':query,'documents':[slice_text(s) for s in sources],
-                'top_n':len(sources),'return_documents':False},config=cfg)
+                'top_n':len(sources),'return_documents':False},config=cfg,source_root=source_root,
+                sources=sources,delayed=True,query_source=query_source)
             results=data['results']
             if (not isinstance(results,list) or len(results)!=len(sources) or
                     any(not isinstance(r,dict) or type(r.get('index')) is not int or

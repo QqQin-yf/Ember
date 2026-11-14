@@ -59,7 +59,8 @@ class SlicePipelineTests(unittest.TestCase):
         receipt = self.enqueue()
         source, embed = self.process()
         source.assert_called_once_with('s', ['1', '2'], instance='default')
-        embed.assert_called_once_with('user:\nprovider original user\n\nassistant:\nprovider original reply')
+        self.assertEqual(embed.call_args.args, ('user:\nprovider original user\n\nassistant:\nprovider original reply',))
+        self.assertTrue(embed.call_args.kwargs['delayed'])
         job = self.jobs().status(receipt['job_id'])
         store = TurnSliceStore(str(self.root))
         self.assertEqual(len(store.get(job['slice_id'])['messages']), 2)
@@ -69,7 +70,8 @@ class SlicePipelineTests(unittest.TestCase):
     def test_system_side_excluded_before_embedding(self):
         receipt = self.enqueue(system=True)
         _, embed = self.process()
-        embed.assert_called_once_with('assistant:\nprovider original reply')
+        self.assertEqual(embed.call_args.args, ('assistant:\nprovider original reply',))
+        self.assertTrue(embed.call_args.kwargs['delayed'])
         job = self.jobs().status(receipt['job_id'])
         self.assertEqual(len(TurnSliceStore(str(self.root)).get(job['slice_id'])['messages']), 1)
 

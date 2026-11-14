@@ -89,7 +89,13 @@ class ExactPathTests(unittest.TestCase):
         self.assertNotIn("wrong current branch", result["transcript"])
         lines = []
         self.assertTrue(self.svc._inline_source_lines("E", lines))
-        self.assertIn("old assistant", self.svc._briefing_source_block(self.svc.store.get_event("E")))
+        from ember.pin_policy import Pins
+        event=self.svc.store.get_event("E")
+        requests=len(self.server.requests)
+        self.assertNotIn("old assistant",self.svc._briefing_source_block(event))
+        self.assertEqual(len(self.server.requests),requests)
+        self.assertIn("old assistant",Pins(self.svc).event_block(event))
+        self.assertIn("old assistant",self.svc._briefing_source_block(event))
 
     def test_legacy_or_changed_version_never_guesses(self):
         for evidence, version in ((False, "v1"), (True, "v2")):

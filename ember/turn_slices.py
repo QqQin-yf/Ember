@@ -97,6 +97,26 @@ class TurnSliceStore:
         body = json.dumps(kept, ensure_ascii=False, sort_keys=True)
         content_hash = hashlib.sha256(body.encode()).hexdigest()
         now = datetime.now(timezone.utc).isoformat()
+        from .privacy import authorize, PrivateMaterial
+        source = dict(instance=instance, session_id=session_id,
+                      user_message_id=key[2], assistant_message_id=key[3])
+        try:
+            with authorize(self.path.parent, [source]):
+                self._save_source(key, messages, slice_id, omitted, body, content_hash, now, instance, session_id)
+        except PrivateMaterial:
+            raise source_client.SourceUnavailable('Private source turn', 'source_private') from None
+        saved = self.get(slice_id)
+        if saved is None:
+            raise source_client.SourceUnavailable('Source turn changed access', 'source_revoked')
+        try:
+            from .event_slices import EventSliceLinks, sync_from_files
+            sync_from_files(self.path.parent, instance)
+            EventSliceLinks(self.path.parent).reconcile_slice(saved)
+        except (OSError, sqlite3.Error, ValueError):
+            pass
+        return saved
+
+    def _save_source(self, key, messages, slice_id, omitted, body, content_hash, now, instance, session_id):
         with self._db() as db:
             db.execute('BEGIN IMMEDIATE')
             if db.execute("""SELECT 1 FROM revoked_source_messages
@@ -122,16 +142,6 @@ class TurnSliceStore:
                     pass
                 else:
                     db.execute('INSERT OR REPLACE INTO slice_source_times VALUES (?,?)', (slice_id, occurred))
-        saved = self.get(slice_id)
-        if saved is None:
-            raise source_client.SourceUnavailable('Source turn was revoked', 'source_revoked')
-        try:
-            from .event_slices import EventSliceLinks, sync_from_files
-            sync_from_files(self.path.parent, instance)
-            EventSliceLinks(self.path.parent).reconcile_slice(saved)
-        except (OSError, sqlite3.Error, ValueError):
-            pass  # Derived memberships can be rebuilt; keep the durable original.
-        return saved
 
     def revoke(self, instance: str, session_id: str, message_ids) -> None:
         """Keep source identities as tombstones so replay cannot restore an old slice."""
@@ -150,31 +160,56 @@ class TurnSliceStore:
             db.execute(f'DELETE FROM slice_embeddings WHERE slice_id IN ({matching})', (instance, session_id))
             db.execute(f'DELETE FROM turn_slices WHERE slice_id IN ({matching})', (instance, session_id))
 
-    def get(self, slice_id: str) -> dict | None:
+    def get(self, slice_id: str, *, policy=None, include_private=False) -> dict | None:
         if not self.path.exists():
             return None
         with self._db() as db:
             row = db.execute("SELECT * FROM turn_slices WHERE slice_id=?", (slice_id,)).fetchone()
+        return self._source(row, policy, include_private)
+
+    def _source(self, row, policy, include_private=False):
         if row is None:
             return None
         result = dict(row)
+        from .privacy import Privacy
+        if not include_private and (policy or Privacy(self.path.parent)).blocked(result):
+            return None
         result["messages"] = json.loads(result.pop("messages_json"))
         result["user_is_system"] = bool(result["user_is_system"])
         return result
 
-    def pending_embeddings(self, space: str, limit: int = 100) -> list[dict]:
+    def for_instance(self, instance, policy):
+        if not self.path.exists():
+            return []
+        with self._db() as db:
+            rows = db.execute('SELECT * FROM turn_slices WHERE instance=? ORDER BY saved_at DESC, slice_id',
+                              (instance,)).fetchall()
+        return [source for row in rows if (source := self._source(row, policy)) is not None]
+
+    def pending_embeddings(self, space: str, limit: int = 100, *, eligible_only=False) -> list[dict]:
         """Missing, failed or stale vectors; never treat stale results as ready."""
         if not self.path.exists():
             return []
         if type(limit) is not int or limit < 1:
             raise ValueError("Positive limit required")
         with self._db() as db:
-            rows = db.execute("""SELECT s.slice_id FROM turn_slices s
+            rows = db.execute("""SELECT s.* FROM turn_slices s
                 LEFT JOIN slice_embeddings e ON s.slice_id=e.slice_id AND e.space=?
                 WHERE e.slice_id IS NULL OR e.state!='ready'
                    OR e.content_hash!=s.content_hash
-                ORDER BY s.saved_at, s.slice_id LIMIT ?""", (space, limit)).fetchall()
-        return [self.get(row["slice_id"]) for row in rows]
+                ORDER BY s.saved_at, s.slice_id""", (space,)).fetchall()
+        from .privacy import seconds_until_eligible
+        from .privacy import Privacy
+        policy = Privacy(self.path.parent)
+        result = []
+        for row in rows:
+            source = self._source(row, policy)
+            if source is None or (eligible_only and seconds_until_eligible(source)):
+                continue
+            result.append(source)
+            if len(result) == limit:
+                break
+        return result
 
     def save_embedding(self, source: dict, space: str, vector: list[float] | None,
                        error_code: str | None = None) -> bool:
@@ -197,7 +232,7 @@ class TurnSliceStore:
                  error_code, datetime.now(timezone.utc).isoformat()))
         return True
 
-    def embedding(self, slice_id: str, space: str) -> dict | None:
+    def embedding(self, slice_id: str, space: str, *, policy=None) -> dict | None:
         if not self.path.exists():
             return None
         with self._db() as db:
@@ -205,7 +240,7 @@ class TurnSliceStore:
                 JOIN turn_slices s ON e.slice_id=s.slice_id AND e.content_hash=s.content_hash
                 WHERE e.slice_id=? AND e.space=? AND e.state='ready'""",
                 (slice_id, space)).fetchone()
-        if row is None:
+        if row is None or self.get(slice_id, policy=policy) is None:
             return None
         result = dict(row)
         result["vector"] = json.loads(result.pop("vector_json"))

@@ -28,7 +28,7 @@ class IncrementalSliceTests(unittest.TestCase):
             patcher.start();self.addCleanup(patcher.stop)
 
     @staticmethod
-    def embed(text):
+    def embed(text, **privacy):
         return [0.,1.] if text in ('好','嗯嗯','晚安','哈哈','好的，知道了','嗯嗯，好呀') else [1.,0.]
 
     def turn(self,user='晚上吃了麻辣烫',reply='下次还想去',seq=1):

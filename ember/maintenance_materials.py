@@ -76,7 +76,8 @@ def _legacy_frames(root):
 
 def prepare(root, instance, event_id):
     event = events(root).get(event_id)
-    if event is None:
+    from .privacy import Privacy
+    if event is None or Privacy(root).event_blocked(event, instance):
         raise MaintenancePending('event_content_missing')
     from .knowledge import KnowledgeStore
     explicit = KnowledgeStore(root,instance).event_sources(event_id)
@@ -131,6 +132,9 @@ def old_slice(root, candidate, instance):
     source = TurnSliceStore(str(root)).get(candidate['candidate_id'])
     if source is None or source['instance'] != instance or source['content_hash'] != candidate['content_hash']:
         raise MaintenancePending('candidate_source_changed_or_missing')
+    from .privacy import seconds_until_eligible
+    if seconds_until_eligible(source):
+        raise MaintenancePending('candidate_source_delayed')
     return {'candidate_id': candidate['candidate_id'], 'messages': source['messages']}
 
 
@@ -165,6 +169,9 @@ def stage_two(root, material, candidates):
             if len(rows) != 1:
                 raise MaintenancePending('trigger_slice_missing_or_ambiguous')
             source = rows[0]
+            from .privacy import Privacy, seconds_until_eligible
+            if Privacy(root).blocked(source) or seconds_until_eligible(source):
+                raise MaintenancePending('trigger_source_unavailable')
             item['new_turns'].append({'turn': turn, 'slice_id': source['slice_id'],
                 'content_hash': source['content_hash'], 'messages': json.loads(source['messages_json'])})
         # Event membership is only a possible destination, never proof of a relation.
@@ -172,7 +179,7 @@ def stage_two(root, material, candidates):
         item['possible_event_sources'] = []
         for membership in candidate['span_memberships']:
             event = library.get(membership['event_id'])
-            if event and str(event.get('version_id')) == str(membership['version_id']):
+            if event and not Privacy(root).event_blocked(event, material['instance']) and str(event.get('version_id')) == str(membership['version_id']):
                 item['possible_event_sources'].append({'event': event_document(event),
                     'event_hash': fingerprint(event_document(event))})
         result.append(item)

@@ -46,7 +46,7 @@ class SliceRecallTests(unittest.TestCase):
         middle = self.add(3, [0., 1.])
         last = self.add(5, [-1., 0.])
         metadata, embed = self.match('完整输入。第二句话？')
-        embed.assert_called_once_with('完整输入。第二句话？')
+        self.assertEqual(embed.call_args.args, ('完整输入。第二句话？',))
         trace = SliceRecall(self.tmp.name).trace(metadata['trace_id'])
         self.assertEqual([r['slice_id'] for r in trace['rankings']],
                          [first['slice_id'], middle['slice_id'], last['slice_id']])

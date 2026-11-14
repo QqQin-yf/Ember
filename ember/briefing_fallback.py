@@ -7,6 +7,7 @@ from pathlib import Path
 import sqlite3
 
 from .briefing import get
+from .briefing_budget import join, tokens
 from .lifecycle_config import lifecycle_config
 from .memory_lifecycle import sources_in_context
 from .promises import instant
@@ -235,6 +236,9 @@ def fallback(service, args):
                        "SELECT id FROM eligibility WHERE state!='active'")}
             aliases = dict(state.rows('memory_lifecycle.sqlite3', 'aliases', 'SELECT id,target FROM aliases'))
             blocked.update(aliases)
+            edits = state.rows('memory_lifecycle.sqlite3', 'briefing_edits',
+                               'SELECT body FROM briefing_edits ORDER BY revision DESC LIMIT 1')
+            overrides = json.loads(edits[0][0])['event'] if edits else {}
             pinned = set()
             for eid in service.pin_store.all():
                 seen = set()
@@ -248,6 +252,9 @@ def fallback(service, args):
             recent, promises = [], []
             for event, created in candidates:
                 if event.event_id in blocked:
+                    continue
+                action = overrides.get(event.event_id) if event.significance<10 and event.event_id not in pinned else None
+                if action=='hide':
                     continue
                 is_promise = event.kind == 'promise'
                 if not is_promise and (event.event_id in pinned or not service.sleep_state.recall_allowed(event.event_id)):
@@ -265,11 +272,11 @@ def fallback(service, args):
                     if onstage:
                         continue
                 if is_promise:
-                    body = event.summary if event.event_id in pinned else event.core
+                    body = event.summary if event.event_id in pinned or action=='summary' else event.core
                     line = f'约定到期 [{event.event_id}] {body}（due={event.due}，open）'
                     promises.append((event, line))
                 else:
-                    body = event.core if event.significance in (8, 9, 10) else event.summary
+                    body = event.core if event.significance in (8, 9, 10) and action!='summary' else event.summary
                     line = f'• [{service._briefing_when(event)}] {body}'
                     recent.append((event, line, created))
             recent.sort(key=lambda row: (-row[0].significance, -row[2].timestamp(), row[0].event_id))
@@ -288,21 +295,31 @@ def fallback(service, args):
         directory = ''
     if directory:
         text = text.removesuffix(directory).removesuffix('\n')
+    budget=cfg.get('token_budget') if 'total_chars' not in cfg else None
+    profiles=snapshot.get('profile_text','')
+    def fits(candidate):
+        body=join([candidate,directory])
+        if profiles and body.startswith(profiles):
+            body=body.removeprefix(profiles).removeprefix('\n')
+        return tokens(body)<=budget['total'] if budget else len(candidate)<=cfg.get('total_chars',6000)
+
     if additions:
         expanded = '\n'.join(part for part in [text, NOTICE, *(line for _, line in additions)] if part)
-        if reason is None and len(expanded) <= cfg['total_chars']:
+        if reason is None and fits(expanded):
             text = expanded
             metadata['expanded_count'] = len(additions)
             if isinstance(visible_ids, list):
                 metadata['visible_event_ids'] = list(dict.fromkeys(
                     visible_ids + [event.event_id for event, _ in additions]))
         else:
-            reason = reason or 'total_chars_exceeded'
+            reason = reason or ('total_tokens_exceeded' if budget else 'total_chars_exceeded')
             metadata['unexpanded'] = [{'event_id': event.event_id, 'reason': reason} for event, _ in additions]
             metadata['unexpanded_count'] = len(additions)
             event_ids = '、'.join(event.event_id for event, _ in additions)
-            text += (f'\n{NOTICE}\n有 {len(additions)} 条新记忆没有展开；Event ID：{event_ids}。'
+            notice = (f'\n{NOTICE}\n有 {len(additions)} 条新记忆没有展开；Event ID：{event_ids}。'
                      '请用 search_memory / read_memory_source 查看。')
+            if not budget or fits(text+notice):
+                text+=notice
     text = '\n'.join(part for part in (text, directory) if part)
     return dict(metadata, status='ok', text=text, chars=len(text), session_id=sid,
                 revision=snapshot['revision'], refreshed_at=snapshot['refreshed_at'])

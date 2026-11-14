@@ -85,12 +85,18 @@ class IngestionJobs:
             db.execute('UPDATE jobs SET slice_id=? WHERE job_id=? AND claim_token=?',
                        (slice_id, job['job_id'], job['claim_token']))
 
-    def finish(self, job, error_code=None):
+    def defer(self, job, seconds):
+        with self.db() as db:
+            db.execute("""UPDATE jobs SET state='pending',retry_at=?,lease_until=0,claim_token=NULL
+                WHERE job_id=? AND claim_token=?""",
+                (time.time() + seconds, job['job_id'], job['claim_token']))
+
+    def finish(self, job, error_code=None, *, cancelled=False):
         delay = min(300, 2 ** min(job['attempts'], 8)) if error_code else 0
         with self.db() as db:
             db.execute('''UPDATE jobs SET state=?,error_code=?,retry_at=?,lease_until=0,claim_token=NULL
                 WHERE job_id=? AND claim_token=?''',
-                ('failed' if error_code else 'ready', error_code, time.time() + delay,
+                ('cancelled' if cancelled else 'failed' if error_code else 'ready', error_code, time.time() + delay,
                  job['job_id'], job['claim_token']))
 
 
@@ -119,25 +125,38 @@ class SlicePipeline:
             if job is None:
                 continue
             store = TurnSliceStore(root)
+            from .privacy import Privacy, PrivateMaterial, seconds_until_eligible
             try:
+                if Privacy(root).blocked(job):
+                    jobs.finish(job, cancelled=True)
+                    return True
                 source = store.get(job['slice_id']) if job['slice_id'] else None
                 if source is None:
                     source = fetch_and_save_turn(store, job['session_id'], job['assistant_message_id'],
                         user_message_id=job['user_message_id'], instance=job['instance'],
                         user_is_system=bool(job['user_is_system']))
                     jobs.attach_slice(job, source['slice_id'])
+                wait = seconds_until_eligible(source)
+                if wait:
+                    jobs.defer(job, wait)
+                    return True
                 config = SliceEmbeddingConfig.load(self.config_path)
                 if store.embedding(source['slice_id'], config.space) is None:
                     client = SliceEmbeddingClient(config)
                     try:
-                        vector = client.embed(slice_text(source))
+                        vector = client.embed(slice_text(source), source_root=root, sources=[source], delayed=True)
                     except SliceEmbeddingError as exc:
                         store.save_embedding(source, config.space, None, error_code=str(exc))
                         raise
                     if not store.save_embedding(source, config.space, vector):
                         raise SliceEmbeddingError('slice_changed')
+            except PrivateMaterial as exc:
+                if str(exc) == 'private_delay':
+                    jobs.defer(job, seconds_until_eligible(source))
+                else:
+                    jobs.finish(job, cancelled=True)
             except source_client.SourceUnavailable as exc:
-                jobs.finish(job, exc.code)
+                jobs.finish(job, exc.code, cancelled=exc.code in ('source_private', 'source_revoked'))
             except SliceEmbeddingError as exc:
                 jobs.finish(job, str(exc))
             except (OSError, sqlite3.Error, ValueError):

@@ -26,8 +26,6 @@ class FiveLayerBriefingTests(unittest.TestCase):
         self.cfg=copy.deepcopy(lifecycle_config());self.cfg['briefing']['total_chars']=50000
         for target in ('ember.briefing.lifecycle_config','ember.timeline.lifecycle_config'):
             patcher=patch(target,side_effect=lambda:self.cfg);patcher.start();self.addCleanup(patcher.stop)
-        patcher=patch('ember.briefing.sync_increment',return_value={'status':'ok'})
-        patcher.start();self.addCleanup(patcher.stop)
 
     def event(self,eid,kind='daily',score=8,pin=False,due=None):
         now=datetime.now(timezone.utc).isoformat()
@@ -95,17 +93,45 @@ class FiveLayerBriefingTests(unittest.TestCase):
     def test_app_identity_profiles_are_pinned_and_hide_retired_cognition(self):
         from ember.knowledge_tools import dispatch
         mid = self.knowledge('PROFILE-COGNITION')
-        args = {'subject':'assistant','overview':'APP-OVERVIEW','cognition_ids':[mid]}
+        args = {'subject':'assistant','overview':'APP-OVERVIEW'+'x'*388+'HIDDEN-TAIL','cognition_ids':[mid]}
         self.assertEqual(dispatch(self.service,'set_identity_profile',args)['status'],'failed')
-        self.assertEqual(dispatch(self.service,'set_identity_profile',args,{})['status'],'ok')
+        receipt=dispatch(self.service,'set_identity_profile',args,{})
+        self.assertEqual(receipt['status'],'ok')
+        self.assertEqual(receipt['chars'],411)
+        self.assertEqual(receipt['visible_chars'],400)
+        self.assertIsNotNone(datetime.fromisoformat(receipt['updated_at']).tzinfo)
+        self.assertIn('/clear',receipt['next_briefing'])
         first = self.refresh()
         self.assertEqual([p['subject'] for p in first['identity_profiles']],['user','assistant'])
         self.assertIn('APP-OVERVIEW',first['text'])
+        self.assertNotIn('HIDDEN-TAIL',first['text'])
+        self.assertNotIn('HIDDEN-TAIL',first['identity_profiles'][1]['overview'])
+        self.assertTrue(KnowledgeStore(self.tmp.name).identity_profiles()[1]['overview'].endswith('HIDDEN-TAIL'))
         self.assertEqual(first['identity_profiles'][1]['cognition_ids'],[mid])
         Lifecycle(self.tmp.name).mark(mid,'no_recall','low_confidence',['review'])
         second = self.refresh()
         self.assertNotIn('PROFILE-COGNITION',second['text'])
         self.assertEqual(second['identity_profiles'][1]['cognition_ids'],[])
+
+    def test_token_budget_lends_unused_space_and_excludes_profiles(self):
+        from ember.briefing_budget import tokens
+        del self.cfg['briefing']['total_chars']
+        budget=self.cfg['briefing']['token_budget']
+        budget.update(total=160,relationship=40,recent=20,pins=20,
+                      knowledge=20,entities=20,promises=20,reserve=20)
+        store=KnowledgeStore(self.tmp.name)
+        store.set_identity_profile('user','hello '*160,[])
+        relationship=self.event('relationship','relationship',score=10)
+        relationship.core='relationship '*70
+        self.service.store.write_event(relationship)
+        report=self.refresh()
+        self.assertEqual(report['status'],'ok')
+        self.assertGreater(report['relationship_token_budget'],40)
+        self.assertIn(relationship.core,report['text'])
+        body=report['text'].removeprefix(report['profile_text']+'\n')
+        self.assertEqual(report['body_tokens'],tokens(body))
+        self.assertLessEqual(tokens(body),160)
+        self.assertGreater(tokens(report['text']),tokens(body))
 
     def test_get_is_frozen_until_next_explicit_refresh(self):
         self.event('pin',pin=True);self.knowledge('OLD-KNOWLEDGE')

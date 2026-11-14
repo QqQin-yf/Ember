@@ -165,7 +165,7 @@ class BriefingFallbackTests(unittest.TestCase):
             worker = pool.submit(hold_refresh)
             self.assertTrue(acquired.wait(2))
             try:
-                with patch('ember.briefing.sync_increment', side_effect=AssertionError('sync')), \
+                with patch('ember.source_sync.sync_increment', side_effect=AssertionError('sync')), \
                      patch('ember.timeline.Timeline.render', side_effect=AssertionError('timeline')):
                     report = pool.submit(self.fallback).result(timeout=2)
                 self.assertEqual(report['expanded_count'], 1)

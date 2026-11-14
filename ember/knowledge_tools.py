@@ -23,8 +23,8 @@ def tool_specs():
              {'memory_id':{'type':'string'},'pinned':{'type':'boolean'}},['memory_id','pinned']),
         spec('list_memory_knowledge','读取现有认知/规律与 pin 预算，供平时自主取舍。',{})]
     specs += [
-        spec('set_identity_profile','由 App AI 更新 briefing 顶部的两张常驻认知卡之一。user 是用户，assistant 是你自己。overview 用你自己的话表达当前理解。cognition_ids 只填已有的认知 ID。本次提交替换该卡全部内容。',
-            {'subject':{'enum':['user','assistant']},'overview':{'type':'string','maxLength':600},
+        spec('set_identity_profile','更新 briefing 顶部的常驻认知卡。YOU（user）是你对用户的直接理解，I（assistant）是你对自己的直接理解。overview 只写清晰、有依据的认知、了解、理解或定义。具体经过写成 Event，通用规律写成 Knowledge。YOU / I 和 Knowledge 可以共用同一份认知，不必重复写。cognition_ids 可引用已有认知，简报只展示 overview 的前 400 字。本次提交替换该卡全部内容。',
+            {'subject':{'enum':['user','assistant']},'overview':{'type':'string'},
              'cognition_ids':dict(strings,minItems=0,maxItems=8)}, ['subject','overview','cognition_ids']),
         spec('review_memory_knowledge','审阅相似认知/规律：维持、改写补写或合并。每条必须列为keep/rewrite/merge目标或merge_ids成员，不能遗漏；每条最终保留项必须评分。只有近期经历明确打破或过时才能<=5，须提供逐字来源证据。改写/合并带 source_slice_ids 时，这些切片自动结掉；keep 不结新材料。',
             {'group_id':{'type':'string'},'items':{'type':'array','minItems':1,'items':{'type':'object',
@@ -41,7 +41,7 @@ TOOL_NAMES={'set_identity_profile', 'list_memory_knowledge', 'set_knowledge_pin'
 VOLATILE_TOOLS={'read_memory_slices','search_memory_slices','list_pending_promises','get_memory_extraction_batch'}
 
 
-def read_memory(service, memory_id, canonicalize=True):
+def read_memory(service, memory_id, canonicalize=True, *, include_private=True):
     from .memory_lifecycle import Lifecycle
     if canonicalize:
         memory_id=Lifecycle(service.store.root,service.source_instance).canonical(memory_id)
@@ -58,7 +58,7 @@ def read_memory(service, memory_id, canonicalize=True):
         except KeyError:
             return None
     try:
-        rows=store.read_sources(sources)
+        rows=store.read_sources(sources, include_private=include_private)
         return {'status':'ok','memory_id':memory_id,'sources':sources,'slices':rows,
                 'transcript':'\n\n'.join(f"[{r['slice_id']}]\n"+'\n'.join(f"{m['role']}: {m['content']}" for m in r['messages']) for r in rows)}
     except ValueError as exc:
@@ -101,6 +101,9 @@ def write_event(service, args, context):
             from .memory_lifecycle import Lifecycle
             Lifecycle(service.store.root,service.source_instance).mark(
                 event.event_id,'no_recall','low_confidence',[context['proposal_id']])
+    if event.private:
+        from .privacy import Privacy
+        Privacy(service.store.root).protect_sources(dict(source, instance=service.source_instance) for source in rows)
     service.store.write_event(event)
     for index,route in enumerate(validated['recall_routes'],1):
         service.store.write_route(RecallRoute(route_id=f'rt_{event.event_id}_{index:02d}',event_id=event.event_id,
@@ -113,7 +116,8 @@ def write_event(service, args, context):
     request_sync(service)
     from .extraction import Extraction
     Extraction(service).record_sources(sources,event.event_id,'written')
-    return {'status':'created','event_id':event.event_id,'summary':event.summary,
+    from .briefing_edits import write_hint
+    return {'status':'created','event_id':event.event_id,'summary':event.summary,**write_hint(service,event),
             'source_slice_ids':args['source_slice_ids']}
 
 
@@ -154,18 +158,24 @@ def dispatch(service,name,args,context=None):
             if sum(bool(args.get(k)) for k in ('slice_ids','memory_id','group_id'))!=1:
                 raise ValueError('Choose exactly one of slice_ids, memory_id, group_id')
             if args.get('memory_id'):
-                return read_memory(service,args['memory_id']) or {'status':'failed','code':'memory_not_found'}
+                result = read_memory(service, args['memory_id'])
+                if result is None and service._resolve_event_id(args['memory_id']):
+                    return service.read_source_event(args['memory_id'], truncate=False)
+                return result or {'status':'failed','code':'memory_not_found'}
             if args.get('group_id'):
                 from .extraction import Extraction
                 group=Extraction(service).live_group(args['group_id'])
                 sources=group['sources']
             else:
-                sources=store.sources(args['slice_ids'])
-            return {'status':'ok','slices':store.read_sources(sources)}
+                sources=store.sources(args['slice_ids'], include_private=True)
+            return {'status':'ok','slices':store.read_sources(sources, include_private=True)}
         if name=='search_memory_slices':
             from .slice_recall import SliceRecall
             recall=SliceRecall(service.store.root,service.source_instance)
-            result=recall.match(args.get('query'),purpose='search')
+            from .privacy import context_source
+            source = context_source(service, context) or {}
+            result=recall.match(args.get('query'), session_id=source.get('session_id'),
+                                anchor_message_id=source.get('user_message_id'), purpose='search')
             trace=recall.trace(result['trace_id'],True)
             k=args.get('k',5)
             if type(k) is not int or not 1<=k<=20:

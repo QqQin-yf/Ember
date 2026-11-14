@@ -210,7 +210,20 @@ class SliceMaintenanceWorker:
                 phase = 'event' if pending_one else 'turn'
                 batch = (pending_one or pending_two)[:config.batch_size]
                 payload = stage_one(root, material, batch) if phase == 'event' else stage_two(root, material, batch)
-                decisions = MaintenanceClient(config).judge(phase, payload)
+                from .privacy import Privacy
+                from .turn_slices import TurnSliceStore
+                policy = Privacy(root)
+                sources = policy.event_sources(material['event_id'], material['instance'])
+                store = TurnSliceStore(root)
+                for item in payload['candidates']:
+                    for target in item.get('possible_event_sources', []):
+                        sources.extend(policy.event_sources(target['event']['event_id'], material['instance']))
+                    for sid in [item['candidate_id'], *(row['slice_id'] for row in item.get('new_turns', []))]:
+                        source = store.get(sid)
+                        if source is None:
+                            raise MaintenancePending('candidate_source_changed_or_missing')
+                        sources.append(source)
+                decisions = MaintenanceClient(config).judge(phase, payload, source_root=root, sources=sources)
                 validate_decisions(phase, payload, decisions)
                 current = events(root)
                 if fingerprint(event_document(current[job['event_id']])) != job['event_hash']:

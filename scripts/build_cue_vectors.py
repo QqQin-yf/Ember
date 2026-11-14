@@ -45,6 +45,10 @@ def main() -> None:
     # active + lexical 才参与召回；同文本 cue 复用同一个向量
     targets = [r for r in routes.values()
                if r.get("status") == "active" and r.get("matcher") == "lexical"]
+    from ember.privacy import Privacy, PrivateMaterial
+    policy = Privacy(DATA)
+    instance = os.environ.get('EMBER_INSTANCE', 'default')
+    route_events = {route['route_id']: route['event_id'] for route in targets}
     by_cue: dict[str, str] = {}       # cue 小写 → 首个 route_id（代表）
     reps: list[tuple[str, str]] = []  # (代表 route_id, cue 原文)
     for r in sorted(targets, key=lambda x: x["route_id"]):
@@ -61,7 +65,11 @@ def main() -> None:
     model_used: str | None = None
     rows: list[dict] = []
     for i, (rid, cue) in enumerate(reps, 1):
-        vec = embed_text(cue)
+        sources = policy.authored_cue_sources(route_events[rid], instance)
+        try:
+            vec = embed_text(cue, source_root=DATA, sources=sources)
+        except PrivateMaterial:
+            continue
         # model 取自环境变量回显（与 build_direction_vectors 同口径）
         model_used = embedding_model()
         rows.append({"route_id": rid, "cue": cue,
