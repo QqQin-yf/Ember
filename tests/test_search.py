@@ -126,6 +126,84 @@ class SearchMemoryTests(unittest.TestCase):
         out = self.svc.sidecar_search_memory({})
         self.assertEqual(out["status"], "failed")
 
+    def test_summary_phrase_wins_even_when_its_core_vector_misses(self):
+        phrase = '她担心换了版本以后，我会忘记以前的约定'
+        ev = self.svc.store.get_event('EVT-001')
+        ev.summary = phrase
+        self.svc.core_vectors.upsert(ev.event_id, ev.core, VEC_A, 'test-model')
+        # Query embeds to VEC_FAR: EVT-003 is a semantic hit, EVT-001 is not.
+        out = self.svc.sidecar_search_memory({'query': phrase, 'k': 1})
+        self.assertEqual(out['items'][0]['event_id'], 'EVT-001')
+        self.assertEqual(out['total'], 2)
+
+    def test_summary_matches_punctuation_changes_without_an_index(self):
+        _add(self.svc, 'EVT-010', 'A different description')
+        self.svc.store.get_event('EVT-010').summary = '她担心版本变化，过去的约定会丢失。'
+        query = '她担心版本变化、过去的约定会丢失'
+        for available in (True, False):
+            with self.subTest(embedding_available=available), mock.patch(
+                'ember.service.embed_text', side_effect=None if available else RuntimeError('offline'),
+                return_value=VEC_FAR):
+                out = self.svc.sidecar_search_memory({'query': query, 'k': 1})
+            self.assertEqual(out['items'][0]['event_id'], 'EVT-010')
+
+    def test_summary_clause_and_core_matches_supplement_vectors(self):
+        self.svc.store.get_event('EVT-001').summary = '她担心版本变化，过去的约定会丢失。'
+        self.svc.store.get_event('EVT-002').core = '过去的约定会丢失'
+        out = self.svc.sidecar_search_memory({'query': '过去的约定会丢失', 'k': 5})
+        ids = [item['event_id'] for item in out['items']]
+        self.assertEqual(set(ids), {'EVT-001', 'EVT-002', 'EVT-003'})
+        self.assertEqual(len(ids), len(set(ids)))
+
+    def test_cue_matches_also_supplement_vectors(self):
+        from ember.models import RecallRoute
+        self.svc.store.write_route(RecallRoute(
+            route_id='rt-search', event_id='EVT-001', cue='a unique cue',
+            matcher='lexical', cue_type='conceptual'))
+        out = self.svc.sidecar_search_memory({'query': 'a unique cue', 'k': 1})
+        self.assertEqual(out['items'][0]['event_id'], 'EVT-001')
+
+    def test_same_event_matching_summary_and_vector_is_returned_once(self):
+        self.svc.store.get_event('EVT-003').summary = 'an exact summary'
+        out = self.svc.sidecar_search_memory({'query': 'an exact summary'})
+        self.assertEqual([item['event_id'] for item in out['items']], ['EVT-003'])
+
+    def test_slash_time_range_accepts_the_documented_input(self):
+        expression = '2026-11-11T00:00:00/2026-11-12T06:00:00'
+        self.assertEqual(self.svc._parse_time_range(expression),
+                         self.svc._parse_time_range(expression.replace('/', '..')))
+        _add(self.svc, 'EVT-010', 'A different core', ingest='2026-11-11T12:00:00+00:00')
+        self.svc.store.get_event('EVT-010').summary = 'A uniquely remembered summary'
+        out = self.svc.sidecar_search_memory({'query': 'A uniquely remembered summary',
+                                            'time_range': expression, 'k': 5})
+        self.assertEqual(out['status'], 'ok')
+        self.assertEqual([item['event_id'] for item in out['items']], ['EVT-010'])
+
+    def test_time_filter_uses_occurrence_time_and_precise_timestamp_bounds(self):
+        for eid, occurred in [('EVT-010', '2026-11-11T12:00:00+08:00'),
+                              ('EVT-011', '2026-11-12T06:00:01+08:00')]:
+            _add(self.svc, eid, 'A different core', ingest='2026-11-15T12:00:00+08:00')
+            event = self.svc.store.get_event(eid)
+            event.event_time = occurred
+            event.summary = 'A uniquely remembered summary'
+        out = self.svc.sidecar_search_memory({'query': 'A uniquely remembered summary',
+            'time_range': '2026-11-11T00:00:00+08:00/2026-11-12T06:00:00+08:00'})
+        self.assertEqual([item['event_id'] for item in out['items']], ['EVT-010'])
+        self.assertEqual(out['items'][0]['event_time'], '2026-11-11T12:00:00+08:00')
+
+    def test_date_only_range_includes_whole_end_day(self):
+        expression = '2026-11-11/2026-11-12'
+        start, end = self.svc._parse_time_range(expression)
+        self.assertEqual(start.isoformat()[:19], '2026-11-11T00:00:00')
+        self.assertEqual(end.isoformat()[:26], '2026-11-12T23:59:59.999999')
+
+    def test_missing_occurrence_time_falls_back_to_ingest_time(self):
+        event = self.svc.store.get_event('EVT-001')
+        event.event_time = ''
+        event.summary = 'A uniquely remembered summary'
+        out = self.svc.sidecar_search_memory({'query': event.summary, 'time_range': '2026-10-15', 'k': 1})
+        self.assertEqual([item['event_id'] for item in out['items']], ['EVT-001'])
+
     def test_like_fallback_with_multi_keywords(self) -> None:
         """embed 挂了 → LIKE 兜底：拆词并集，多词命中排前，note 告知。"""
         orig = self._mock.side_effect

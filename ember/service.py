@@ -1687,8 +1687,12 @@ class EmberService:
             start = now - timedelta(days=int(m.group(1)))
             return start, now
         if expr in rel:
-            return rel[expr]
-        for sep in ("..", "至", "~"):
+            start, end = rel[expr]
+            start = start.replace(hour=0, minute=0, second=0, microsecond=0)
+            if end.date() < now.date():
+                end = end.replace(hour=23, minute=59, second=59, microsecond=999999)
+            return start, end
+        for sep in ("..", "/", "至", "~"):
             if sep in expr:
                 a, b = expr.split(sep, 1)
                 try:
@@ -1696,10 +1700,15 @@ class EmberService:
                     e = datetime.fromisoformat(b.strip()).astimezone()
                 except ValueError:
                     return None
-                return min(s, e), max(s, e)
+                end_text = b.strip() if s <= e else a.strip()
+                start, end = min(s, e), max(s, e)
+                if re.fullmatch(r'\d{4}-\d{2}-\d{2}', end_text):
+                    end += timedelta(days=1, microseconds=-1)
+                return start, end
         try:   # 单日
             d = datetime.fromisoformat(expr).astimezone()
-            return d, d
+            end = d + timedelta(days=1, microseconds=-1) if re.fullmatch(r'\d{4}-\d{2}-\d{2}', expr) else d
+            return d, end
         except ValueError:
             return None
 
@@ -1772,7 +1781,7 @@ class EmberService:
         if k_note:
             notes.append(k_note)
 
-        # ---- 主模态：core 向量余弦；兜底：LIKE（embed 不可达）----
+        # Semantic core matches are combined with local summary/core/cue matches.
         from .privacy import Privacy, context_source
         policy = Privacy(self.store.root)
         source = context_source(self, context)
@@ -1808,36 +1817,45 @@ class EmberService:
                     scored.append((row["event_id"], sim))
             scored = [(eid, s) for eid, s in scored if eid in events]
             scored.sort(key=lambda x: x[1], reverse=True)
-            pool = scored
-        else:
-            # LIKE 兜底：query 拆词（空格/逗号），任一词命中即算，
-            # 按命中词数排序——降级模式下多关键词是排序信号
-            from .privacy import keywords
-            terms = keywords(query) if blocked else re.findall(r'[^\W_]+', query.casefold())
-            scored_pool: list[tuple[str, int]] = []
-            for eid, ev in events.items():
-                cues = ' '.join(route.cue for route in self.store.routes_for_event(eid) if route.status == 'active')
-                blob = f"{ev.core or ''}\n{ev.summary or ''}\n{cues}".casefold()
-                hits = sum(1 for t in terms if t.lower() in blob)
-                if hits:
-                    scored_pool.append((eid, hits))
-            scored_pool.sort(key=lambda x: (-x[1], x[0]))
-            pool = scored_pool
+        if q_vec is None:
             notes.append("向量服务不可达，已降级关键词检索（多关键词取并集）")
 
-        # ---- 时间过滤（ingest_time 落区间）----
+        # Always search the displayed summary too, even when vectors are available.
+        # Exact text wins over semantic neighbours; partial matches supplement them.
+        from .search_matching import text_matches
+        from .privacy import keywords
+        local_terms = keywords(query) if blocked else None
+        lexical = {}
+        for eid, ev in events.items():
+            cues = [route.cue for route in self.store.routes_for_event(eid) if route.status == 'active']
+            match = text_matches(query, [ev.summary or '', ev.core or '', *cues], terms=local_terms)
+            if any(match):
+                lexical[eid] = match
+        semantic = dict(scored)
+        ranked = sorted(semantic.keys() | lexical.keys(), key=lambda eid: (
+            -lexical.get(eid, (0, 0))[0],
+            -(eid in semantic),
+            -semantic.get(eid, 0),
+            -lexical.get(eid, (0, 0))[1],
+            eid))
+        pool = [(eid, semantic.get(eid, 0)) for eid in ranked]
+
+        # Match the occurrence time shown in briefing; legacy records may lack it.
         if tr is not None:
             start, end = tr
 
             def _in(eid: str) -> bool:
                 if eid in in_range:
                     return in_range[eid]
-                raw = events[eid].ingest_time
-                try:
-                    t = datetime.fromisoformat(raw).astimezone()
-                    ok = start <= t <= end + timedelta(days=1)
-                except (TypeError, ValueError):
-                    ok = False
+                event = events[eid]
+                ok = False
+                for raw in (event.event_time, event.ingest_time):
+                    try:
+                        t = datetime.fromisoformat(raw).astimezone()
+                    except (TypeError, ValueError):
+                        continue
+                    ok = start <= t <= end
+                    break
                 in_range[eid] = ok
                 return ok
 
@@ -1856,6 +1874,7 @@ class EmberService:
             ev = events[eid]
             item: dict[str, Any] = {
                 "event_id": eid, "summary": ev.summary or "",
+                "event_time": ev.event_time,
                 "ingest_time": ev.ingest_time,
             }
             status = "normal"

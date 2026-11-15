@@ -123,7 +123,13 @@ POST /mcp/ 使用 MCP Streamable HTTP，tools/list 返回 22 个工具。所有�
 | get_memory_extraction_batch / finish_memory_extraction_group | 提取材料批次及不写确认 |
 | list_pending_promises / process_promise | 曝光约定处理及 pinned promise 主动 log |
 | revise_entity_summary / read_entity_events | Entity 摘要订正及成员下钻 |
-| read_relationship_point | 查询要点来源 Event 和时间 |
+| read_relationship_point | 查询历史要点来源 Event 和时间 |
+
+`search_memory.query` 可直接使用 briefing 中的 summary、core 片段或自然语言描述。每次搜索同时匹配本地 summary、core、有效 cue 和已有 core 语义向量；忽略标点、空格及大小写差异的完整文本命中优先，候选合并去重后应用时间筛选与 k 上限。向量服务不可用时保留本地文本匹配，不要求猜 cue。
+
+`time_range` 支持 `起点/终点`、`起点..终点`、`至`、`~` 分隔的 ISO 范围及相对日期。筛选按 `event_time`，缺失或无效才回退到 `ingest_time`；结果同时返回这两个字段。带时分秒的终点精确生效，只有日期的终点包含当天全天。建议明确提供时区，例如 `2026-11-11T00:00:00+08:00/2026-11-12T06:00:00+08:00`。
+
+关系时间线正文每条显示 `[event_id]`；合并总结显示全部来源 Event ID，可直接用 `read_memory_source(event_id)` 下钻。ID 文字计入关系线预算。
 
 原文回执不写入持久工具账；进程重启后读取回执可能返回 result_not_retained。
 
@@ -185,7 +191,7 @@ merge_memory_events(event_ids,summary,core) 合并意思相同的 10 分无 due 
 
 ### 5.6 关系时间线
 
-关系 Event 后台逐件压一份，pin 住的也缓存压缩版；原件不删除。关系只挂 continues / responds_to 边，不相互取代，不提 Entity。拼装时按总量上下限，从早到晚逐件换压缩版；压缩区超限再按批抽点。要点只追加新文字或“后来……”；每条存来源 Event 和可能断开的时间区间。briefing 只放要点文字，read_relationship_point(point) 可按完整要点文字或 point_id 返回来源 Event 和时间，再下钻原话。
+关系 Event 保留原始 core 和 summary，关系只挂 continues / responds_to 边，不相互取代，不提 Entity。关系线预算充足时显示 core；自动换成已有 summary 需要同时满足事件超过近期窗口且预算不足，按重要性由低到高处理。pin 和重要性 10 的事件受保护；手动 summary 覆盖及有效的作者合并总结另行生效。每条正文携带 Event ID，合并总结携带全部来源 ID，显示开销计入预算。`read_memory_source(event_id)` 下钻原话；`read_relationship_point(point)` 继续支持历史要点引用。
 
 关系要点只追加，永不因 pin 作废或重建。已抽点的关系事件再被 pin 时，要点保留，该事件在自己的时间线位置额外给原样及原文；unpin 后只撤掉这份额外原样。抽点只收原文已不在当前窗口的历史事件；抽点后修订持续锁定。尚未抽点的冷静期订正只重压该件。
 

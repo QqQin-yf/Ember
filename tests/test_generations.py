@@ -494,6 +494,21 @@ class GenerationHTTPTests(unittest.IsolatedAsyncioTestCase):
         _, result = await self.tool(args={"query": "Ember"}, name="search_memory")
         self.assertEqual(result["status"], "ok", result)
 
+    async def test_unbound_search_accepts_summary_and_slash_time_range(self):
+        from ember.models import Event
+        svc = self.registry.service('default')
+        summary = '她担心版本变化，过去的约定会丢失。'
+        svc.store.write_event(Event('EVT-summary', 'v1', 'source', 'raw',
+            '2026-11-11T12:00:00+08:00', '2026-11-15T12:00:00+08:00',
+            summary=summary, core='A differently worded experience'))
+        with patch('ember.service.embed_text', return_value=[1., 0.]):
+            response, result = await self.tool(name='search_memory', args={
+                'query': summary, 'k': 2,
+                'time_range': '2026-11-11T00:00:00+08:00/2026-11-12T06:00:00+08:00'})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(result['status'], 'ok', result)
+        self.assertEqual([item['event_id'] for item in result['items']], ['EVT-summary'])
+
     async def test_fallback_writes_bind_exact_messages_and_replay_in_parallel(self):
         import asyncio
 

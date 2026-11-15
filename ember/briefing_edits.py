@@ -23,6 +23,10 @@ def protected(service,event):
     return event.significance==10 or service.pin_store.is_pinned(event.event_id)
 
 
+def row_text(row):
+    return f"[{', '.join(row[3])}] {row[1]}"
+
+
 def plan(service,events,edits,budget,near_hours,onstage=lambda e:False,now=None,count=len,slid=(),slide_threshold=None,slide_target=0.3):
     now=now or datetime.now(timezone.utc)
     cutoff=now-timedelta(hours=near_hours)
@@ -64,22 +68,23 @@ def plan(service,events,edits,budget,near_hours,onstage=lambda e:False,now=None,
         if old and event.significance<8 and not protected(service,event):
             candidates.append(mid)
     def size(items):
-        return sum(count(row[1]) for row in items)+max(0,len(items)-1)
+        return sum(count(row_text(row)) for row in items)+max(0,len(items)-1)
     used=size(rows)
     positions={row[0]:index for index,row in enumerate(rows)}
     for mid in sorted(compressible,key=lambda mid:events[mid].significance):
         if used<=budget:
             break
         index=positions[mid]
-        used+=count(events[mid].summary)-count(rows[index][1])
+        previous=rows[index]
         rows[index]=(mid,events[mid].summary,'compressed',[mid])
+        used+=count(row_text(rows[index]))-count(row_text(previous))
     before=used
     dropped=[]
     by_id={row[0]:row for row in rows}
     for mid in sorted(candidates,key=lambda mid:events[mid].significance):
         if used<=budget:
             break
-        used-=count(by_id[mid][1])+(len(rows)-len(dropped)>1)
+        used-=count(row_text(by_id[mid]))+(len(rows)-len(dropped)>1)
         dropped.append(mid)
     dropped_set=set(dropped)
     rows=[row for row in rows if row[0] not in dropped_set]
@@ -112,19 +117,20 @@ def plan(service,events,edits,budget,near_hours,onstage=lambda e:False,now=None,
             break
     slid_now=[]
     # Use the same character ratio as the timeline health report.
-    total_chars=sum(len(row[1]) for row in rows)
-    short_chars=sum(len(body) for _,body,mode,_ in rows if mode!='original')
+    total_chars=sum(len(row_text(row)) for row in rows)
+    short_chars=sum(len(row_text(row)) for row in rows if row[2]!='original')
     if (slide_threshold is not None and used>budget and total_chars
             and short_chars/total_chars>=slide_threshold):
-        for mid,body,mode,ids in rows:
+        for row in rows:
+            mid,body,mode,ids=row
             if total_chars==0 or short_chars/total_chars<=slide_target:
                 break
             if any(protected(service,events[eid]) for eid in ids):
                 continue
             slid_now.extend(ids)
-            total_chars-=len(body)
+            total_chars-=len(row_text(row))
             if mode!='original':
-                short_chars-=len(body)
+                short_chars-=len(row_text(row))
         slid_set=set(slid_now)
         rows=[row for row in rows if not slid_set.intersection(row[3])]
         if task and slid_set.intersection(task['sources']):

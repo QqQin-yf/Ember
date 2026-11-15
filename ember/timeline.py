@@ -154,7 +154,7 @@ class Timeline:
             return json.loads(row[0]) if row else None
 
     def render(self,onstage=lambda event:False,edits=None,*,budget=None):
-        from .briefing_edits import plan, state, summary_updates
+        from .briefing_edits import plan, state, summary_updates, row_text
         from .briefing_budget import tokens
         cfg=lifecycle_config()
         with self.lock,self.db() as conn:
@@ -189,17 +189,17 @@ class Timeline:
             for _,_,mode,ids in rows:
                 conn.executemany('UPDATE timeline SET published_mode=?,mode=? WHERE event_id=?',
                                  [(mode,mode,eid) for eid in ids])
-            text='\n'.join(row[1] for row in rows)
+            text='\n'.join(row_text(row) for row in rows)
             original=[eid for eid,_,mode,_ in rows if mode=='original']
-            old=sum(len(text) for _,text,mode,_ in rows if mode!='original')
+            old=sum(len(row_text(row)) for row in rows if row[2]!='original')
             codes=[]
-            if old and old/max(1,sum(len(row[1]) for row in rows))>=cfg['timeline']['health_ratio']:
+            if old and old/max(1,sum(len(row_text(row)) for row in rows))>=cfg['timeline']['health_ratio']:
                 codes.append('relationship_timeline_budget_ratio')
             if slid_now:
                 codes.append('relationship_timeline_window_slid')
             if count(text)>limit:
                 codes.append('relationship_timeline_over_budget')
-            health={'codes':codes,'compressed_and_points_chars':old,'original_chars':sum(len(row[1]) for row in rows)-old}
+            health={'codes':codes,'compressed_and_points_chars':old,'original_chars':sum(len(row_text(row)) for row in rows)-old}
             conn.execute("INSERT OR REPLACE INTO metadata VALUES ('health',?)",(json.dumps(health),))
             return {'text':text,'rows':rows,'original_event_ids':original,'dropped_event_ids':dropped+slid_now,'slid_event_ids':slid_now,'slide_notice':slide_notice,
                     'summary_task':{k:v for k,v in task.items() if k!='sources'} if task else None,
