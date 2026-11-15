@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 import sqlite3
 
-from .briefing import get
+from .briefing import get, recent_uses_core
 from .briefing_budget import join, tokens
 from .lifecycle_config import lifecycle_config
 from .memory_lifecycle import sources_in_context
@@ -207,7 +207,7 @@ def fallback(service, args):
 
     now = datetime.now(timezone.utc)
     cfg = lifecycle_config()['briefing']
-    horizon = now - timedelta(hours=cfg['recent_hours'])
+    horizon = now - timedelta(hours=cfg.get('recent_event_hours',96))
     candidates = []
     for event in service.store.all_events():
         try:
@@ -276,7 +276,7 @@ def fallback(service, args):
                     line = f'约定到期 [{event.event_id}] {body}（due={event.due}，open）'
                     promises.append((event, line))
                 else:
-                    body = event.core if event.significance in (8, 9, 10) and action!='summary' else event.summary
+                    body = event.core if recent_uses_core(event,created,now,cfg) and action!='summary' else event.summary
                     line = f'• [{service._briefing_when(event)}] {body}'
                     recent.append((event, line, created))
             recent.sort(key=lambda row: (-row[0].significance, -row[2].timestamp(), row[0].event_id))

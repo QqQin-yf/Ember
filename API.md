@@ -256,7 +256,7 @@ Ember 在 Event 落库后后台拉取，以及 POST /ember/briefing/refresh 时�
 
 ## 8. briefing
 
-POST /ember/briefing/refresh 收 session_id、keep_from_message_id，可附精确 context_message_ids；新会话、截断和断线重进需要新简报时调用。先兜底同步原文增量、等待关系压缩/抽点，再按顺序保存完整快照：关系时间线；其他 pin 原文；近期非关系、非 promise 的 8–10 分 core / 1–7 分 summary；pin 的认知/规律；到期 open 约定及待处理数量。未 pin 的 10 分也进入 72 小时近期层，超过窗口不永久常驻。promise 的浮现规则优先，不通过近期层提前带入未到期或无 due 约定。
+POST /ember/briefing/refresh 收 session_id、keep_from_message_id，可附精确 context_message_ids；新会话、截断和断线重进需要新简报时调用。先兜底同步原文增量、等待关系压缩/抽点，再按顺序保存完整快照：关系时间线；其他 pin 原文；近期非关系、非 promise Event（入库 48 小时内全部用 core；超过 48 小时至 96 小时，8–10 分用 core、1–7 分用 summary）；pin 的认知/规律；到期 open 约定及待处理数量。未 pin 的 10 分也受 96 小时近期窗口限制，超过窗口不永久常驻。promise 的浮现规则优先，不通过近期层提前带入未到期或无 due 约定。
 
 `session_id` 为必填非空字符串，允许 `cc-` 前缀；`keep_from_message_id` 和 `context_message_ids` 都可省略，只传 `{"session_id":"cc-example"}` 即可刷新。窗口参数使用已配置来源的消息编号，不依赖 Deliz 特有的 leaf、活动版本或截断回调。未提供窗口参数时不排除当前窗口来源。原文增量仍由 Ember 从配置的来源拉取；来源未配置或不可达时，`source_sync` 报告 `unavailable`，继续使用已有准确记忆拼装。
 
@@ -270,7 +270,7 @@ POST /ember/briefing/refresh 收 session_id、keep_from_message_id，可附精�
 
 `POST /ember/briefing/fallback` 用于 refresh 超时或失败时取用已有记忆。请求与 refresh 相同：必填非空 `session_id`，可选 `keep_from_message_id`、`context_message_ids`；支持相同的实例路由和鉴权。最小请求为 `{"session_id":"cc-example"}`。参数非法返回 `status=failed`、`code=invalid_briefing_context`。
 
-接口保留最近保存的快照原文，追加刷新时间之后写入且仍在 72 小时近期层内的非关系、非 promise、未 pin Event：8–10 分用 core，1–7 分用 summary，沿用近期层排序、日期和资格筛选。随后追加快照之后新到期的 open 约定，以及快照之后新写入但已经到期的 open 约定。已在快照时到期的旧约定不重复追加。新增部分开头为「以下为上次简报之后的新记忆，简报尚未完成刷新」。关系时间线、pin 原文、认知/规律及待处理数量沿用快照，不重新拼装。
+接口保留最近保存的快照原文，追加刷新时间之后写入且仍在 96 小时近期层内的非关系、非 promise、未 pin Event：入库 48 小时内全部用 core，超过 48 小时至 96 小时按 8–10 分用 core、1–7 分用 summary，沿用近期层排序、日期和资格筛选。随后追加快照之后新到期的 open 约定，以及快照之后新写入但已经到期的 open 约定。已在快照时到期的旧约定不重复追加。新增部分开头为「以下为上次简报之后的新记忆，简报尚未完成刷新」。关系时间线、pin 原文、认知/规律及待处理数量沿用快照，不重新拼装。
 
 窗口参数仅过滤新增部分；来源全部在当前窗口的新 Event 不重复放入，跨会话或只在窗口内保留部分来源的 Event 保留。未传窗口参数不按窗口排除。来源不完整或切片版本已变化时，保守保留，不据此认定原文已在窗口中。
 

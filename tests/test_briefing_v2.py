@@ -18,6 +18,15 @@ from ember.timeline import Timeline
 from ember.turn_slices import TurnSliceStore
 
 
+def recent_age_cases():
+    return [('fresh',timedelta(hours=1),'all-core'),
+            ('at48',timedelta(hours=48),'all-core'),
+            ('after48',timedelta(hours=48,seconds=1),'score'),
+            ('at96',timedelta(hours=96),'score'),
+            ('after96',timedelta(hours=96,seconds=1),'excluded'),
+            ('future',-timedelta(seconds=1),'excluded')]
+
+
 class FiveLayerBriefingTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
@@ -43,6 +52,35 @@ class FiveLayerBriefingTests(unittest.TestCase):
     def refresh(self,**kwargs):
         return self.service.sidecar_briefing_refresh(dict(session_id='current',**kwargs))
 
+    def test_recent_age_tiers_use_ingest_time_and_keep_old_pins(self):
+        now=datetime.now(timezone.utc)
+        class Frozen(datetime):
+            @classmethod
+            def now(cls,tz=None):
+                return now
+        cases=[]
+        for label,age,mode in recent_age_cases():
+            for score in (1,7,8,10):
+                event=self.event(f'{label}-score-{score}-end',score=score)
+                event.ingest_time=(now-age).isoformat()
+                event.event_time=(now-timedelta(days=30)).isoformat()
+                cases.append((event,mode))
+        pinned=self.event('old-pin',score=1,pin=True)
+        pinned.ingest_time=(now-timedelta(hours=97)).isoformat()
+        with patch('ember.briefing.datetime',Frozen):
+            report=self.refresh()
+        self.assertEqual(report['status'],'ok')
+        for event,mode in cases:
+            with self.subTest(event=event.event_id):
+                if mode=='excluded':
+                    self.assertNotIn(event.core,report['text'])
+                    self.assertNotIn(event.summary,report['text'])
+                    continue
+                core=mode=='all-core' or event.significance>=8
+                self.assertIn(event.core if core else event.summary,report['text'])
+                self.assertNotIn(event.summary if core else event.core,report['text'])
+        self.assertIn('RAW-old-pin',report['text'])
+
     def test_entity_directory_is_a_separate_footer(self):
         self.service.entity_store.upsert(Entity('project', 'Deliz', summary='聊天前端。详细历史。'))
         event = self.event('current')
@@ -66,6 +104,7 @@ class FiveLayerBriefingTests(unittest.TestCase):
         self.event('relationship','relationship')
         self.event('pin',pin=True)
         self.event('recent-core',score=9);self.event('recent-summary',score=6)
+        self.service.store.get_event('recent-summary').ingest_time=(datetime.now(timezone.utc)-timedelta(hours=60)).isoformat()
         self.event('ten',score=10)
         old=self.event('old-ten',score=10)
         old.ingest_time=old.event_time=(datetime.now(timezone.utc)-timedelta(days=4)).isoformat()
@@ -145,6 +184,7 @@ class FiveLayerBriefingTests(unittest.TestCase):
     def test_forced_layers_survive_budget_and_recent_is_trimmed_low_first(self):
         self.cfg['briefing']['total_chars']=1
         self.event('pin',pin=True);self.event('core',score=9);self.event('summary',score=5)
+        self.service.store.get_event('summary').ingest_time=(datetime.now(timezone.utc)-timedelta(hours=60)).isoformat()
         self.event('due','promise',due=(datetime.now(timezone.utc)-timedelta(hours=1)).isoformat())
         self.knowledge('KNOWLEDGE')
         report=self.refresh();text=report['text']

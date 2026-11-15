@@ -114,6 +114,11 @@ def refresh(service,args):
             return {'status':'failed','code':'briefing_refresh_unavailable'}
 
 
+def recent_uses_core(event,created,now,cfg):
+    return (created >= now-timedelta(hours=cfg.get('recent_core_hours',48))
+            or event.significance in (8,9,10))
+
+
 def _refresh(service,args,sid,mid,ids):
     cfg=lifecycle_config()['briefing']
     from .event_mutation import remember_boundary
@@ -132,7 +137,7 @@ def _refresh(service,args,sid,mid,ids):
                     any(end>=keep_turn for _,end in service.turn_spans.span_of_event(event)))
 
     now=datetime.now(timezone.utc)
-    horizon=now-timedelta(hours=cfg['recent_hours'])
+    horizon=now-timedelta(hours=cfg.get('recent_event_hours',96))
     from .briefing_edits import state
     _,edits=state(service)
     budget=cfg.get('token_budget') if 'total_chars' not in cfg else None
@@ -206,7 +211,7 @@ def _refresh(service,args,sid,mid,ids):
         action=None if protected(service,event) else overrides.get(event.event_id)
         if action=='hide':
             continue
-        core=event.significance in (8,9,10) and action!='summary'
+        core=recent_uses_core(event,created,now,cfg) and action!='summary'
         line=f"• [{service._briefing_when(event)}] {event.core if core else event.summary}"
         recent.append({'event':event,'line':line,'core':core,'created':created})
     recent.sort(key=lambda row:(-row['event'].significance,-row['created'].timestamp(),row['event'].event_id))

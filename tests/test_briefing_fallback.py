@@ -51,13 +51,41 @@ class BriefingFallbackTests(unittest.TestCase):
                          {'existing','new-summary','new-core','new-ten','new-due'})
         self.assertEqual(report['unexpanded_count'], 0)
         text = report['text']
-        for value in ('CORE-new-core', 'CORE-new-ten', 'SUMMARY-new-summary', 'CORE-new-due'):
+        for value in ('CORE-new-core', 'CORE-new-ten', 'CORE-new-summary', 'CORE-new-due'):
             self.assertIn(value, text)
         self.assertLess(text.index('CORE-new-ten'), text.index('CORE-new-core'))
-        self.assertLess(text.index('SUMMARY-new-summary'), text.index('CORE-new-due'))
+        self.assertLess(text.index('CORE-new-summary'), text.index('CORE-new-due'))
         for value in ('CORE-new-pin', 'RAW-new-pin', 'CORE-new-relation', 'NEW-KNOWLEDGE', 'CORE-future', 'CORE-without-due'):
             self.assertNotIn(value, text)
         self.assertEqual(self.service.sidecar_briefing_get(), snapshot)
+
+    def test_new_events_use_the_same_48_96_hour_tiers_without_writes(self):
+        now=datetime.now(timezone.utc)
+        snapshot=self.refresh()
+        snapshot['refreshed_at']=(now-timedelta(hours=120)).isoformat()
+        Path(self.service._briefing_path()).write_text(json.dumps(snapshot),encoding='utf-8')
+        cases=[]
+        for label,age,mode in fixtures.recent_age_cases():
+            for score in (1,7,8,10):
+                event=self.event(f'{label}-score-{score}-end',score=score)
+                event.ingest_time=(now-age).isoformat()
+                event.event_time=(now-timedelta(days=30)).isoformat()
+                cases.append((event,mode))
+        before=self.files()
+        with patch('ember.briefing_fallback.datetime') as clock:
+            clock.now.return_value=now
+            report=self.fallback()
+        self.assertEqual(report['status'],'ok')
+        self.assertEqual(self.files(),before)
+        for event,mode in cases:
+            with self.subTest(event=event.event_id):
+                if mode=='excluded':
+                    self.assertNotIn(event.core,report['text'])
+                    self.assertNotIn(event.summary,report['text'])
+                    continue
+                core=mode=='all-core' or event.significance>=8
+                self.assertIn(event.core if core else event.summary,report['text'])
+                self.assertNotIn(event.summary if core else event.core,report['text'])
 
     def test_existing_promise_newly_due_and_old_overdue_not_repeated(self):
         now = datetime.now(timezone.utc)
@@ -82,7 +110,7 @@ class BriefingFallbackTests(unittest.TestCase):
         event = self.event('done', 'promise', due=(datetime.now(timezone.utc)-timedelta(hours=1)).isoformat())
         event.status = 'done'
         # Only old-ten ages out; the remaining additions are written close to the later read.
-        now = datetime.now(timezone.utc)+timedelta(hours=73)
+        now = datetime.now(timezone.utc)+timedelta(hours=97)
         for event in self.service.store.all_events():
             if event.event_id != 'old-ten':
                 event.ingest_time = (now-timedelta(minutes=1)).isoformat()

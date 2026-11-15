@@ -150,9 +150,9 @@ class BriefingTests(unittest.TestCase):
         self.assertIn("EVT-C9 的完整叙述", text)
         self.assertIn("EVT-C8 的完整叙述", text)
         self.assertNotIn("EVT-R1 的完整叙述", text)
-        # summary 层：1-7 新增
-        self.assertIn("EVT-S6 的摘要", text)
-        self.assertIn("EVT-S2 的摘要", text)
+        # Fresh daily Events use core regardless of significance.
+        self.assertIn("EVT-S6 的完整叙述", text)
+        self.assertIn("EVT-S2 的完整叙述", text)
         # 排除：现场 / 观察事件 / 72h 外 / 非最相关召回
         self.assertNotIn("EVT-STAGE", text)
         self.assertNotIn("EVT-OBS", text)
@@ -216,7 +216,7 @@ class BriefingTests(unittest.TestCase):
         # 出生图章在窗口内、经历在旧轮 → 进（core 层，sig 9）
         self.assertIn("EVT-LATE 的完整叙述", out["text"])
         # 跨会话 → 不参与现场排除，进（summary 层）
-        self.assertIn("别会话的摘要", out["text"])
+        self.assertIn("别会话的完整叙述", out["text"])
         # 同会话、经历区间（50）真在窗口内 → 仍然排除（EVT-STAGE）
         self.assertNotIn("EVT-STAGE", out["text"])
 
@@ -265,7 +265,7 @@ class BriefingTests(unittest.TestCase):
         out = self._refresh()
         self.assertRegex(out["text"], r"◆ \[日期：\d{4}-\d{2}-\d{2}\]")
         self.assertRegex(out["text"], r"• \[日期：\d{4}-\d{2}-\d{2}\]")
-        for eid, content in (("EVT-PIN", "完整叙述"), ("EVT-C9", "完整叙述"), ("EVT-S6", "摘要")):
+        for eid, content in (("EVT-PIN", "完整叙述"), ("EVT-C9", "完整叙述"), ("EVT-S6", "完整叙述")):
             event = self.svc.store.get_event(eid)
             expected = datetime.fromisoformat(event.event_time).strftime("%Y-%m-%d")
             self.assertIn(f"[日期：{expected}] {eid} 的{content}", out["text"])
@@ -284,7 +284,7 @@ class BriefingTests(unittest.TestCase):
                 text = self._refresh()["text"]
                 self.assertIn(f"◆ [{label}] EVT-PIN 的完整叙述", text)
                 self.assertIn(f"• [{label}] EVT-C9 的完整叙述", text)
-                self.assertIn(f"• [{label}] EVT-S6 的摘要", text)
+                self.assertIn(f"• [{label}] EVT-S6 的完整叙述", text)
 
     def test_date_label_does_not_fall_back_to_ingest_time(self) -> None:
         from types import SimpleNamespace
