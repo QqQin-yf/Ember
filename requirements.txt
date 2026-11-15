@@ -10,3 +10,5 @@ google-auth[requests]>=2,<3
 tzdata
 
 tiktoken>=0.9,<1
+
+numpy>=2,<3

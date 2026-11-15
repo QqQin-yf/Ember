@@ -90,6 +90,8 @@ def prepare_slices(service,config):
             cores.upsert(ev.event_id, ev.core, vector, config.space)
     # Prototypes share the exact embedding namespace, never a different model.
     life=Lifecycle(root,service.source_instance)
+    import numpy as np
+
     prototypes=[]
     from .generations import fingerprint
     for text in cfg['filler_texts']:
@@ -104,6 +106,13 @@ def prepare_slices(service,config):
                 db.execute('INSERT OR REPLACE INTO vectors VALUES (?,?,?,?)',
                            (key,fingerprint(text),config.space,json.dumps(vector)))
         prototypes.append(vector)
+    prototypes_by_size = {}
+    for prototype in prototypes:
+        prototypes_by_size.setdefault(len(prototype), []).append(prototype)
+    for size, group in prototypes_by_size.items():
+        matrix = np.asarray(group, dtype=np.float64)
+        norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+        prototypes_by_size[size] = np.divide(matrix, norms, out=np.zeros_like(matrix), where=norms != 0)
     for source in store.for_instance(service.source_instance, privacy):
         if seconds_until_eligible(source):
             continue
@@ -116,7 +125,14 @@ def prepare_slices(service,config):
                     slice_text(source), source_root=root, sources=[source], delayed=True)
             except PrivateMaterial:
                 continue
-            keep=sid in owned or not any(len(p)==len(vector) and cosine(p,vector)>=cfg['filler_threshold'] for p in prototypes)
+            matrix = prototypes_by_size.get(len(vector))
+            if sid not in owned and matrix is not None:
+                query = np.asarray(vector, dtype=np.float64)
+                norm = np.linalg.norm(query)
+                if norm:
+                    query = query / norm
+                scores = np.einsum('ij,j->i', matrix, query)
+                keep = not np.any(scores >= cfg['filler_threshold'])
             if keep and not ready:
                 store.save_embedding(source,config.space,vector)
         if not keep:

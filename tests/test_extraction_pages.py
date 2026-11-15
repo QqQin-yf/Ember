@@ -41,6 +41,25 @@ class ExtractionPageTests(unittest.TestCase):
         Extraction(self.service).record_sources([second], '', 'skipped')
         self.assertTrue(pages.status(self.service, scope)['complete'])
 
+    def test_status_does_no_recovery_and_startup_repairs_only_unrecorded_results(self):
+        first = self.source(1)
+        second = self.source(2)
+        self.queue.knowledge.save_event_sources('missing-event', [first])
+        self.queue.knowledge.create('pattern', 'First result', ['decision'], [first['slice_id']])
+        self.queue.recover_outputs(startup=True)
+        self.queue.knowledge.create('pattern', 'Second result', ['decision'], [second['slice_id']])
+        scope = {'session_id': 'old', 'assistant_message_ids': [4, 6]}
+        with patch.object(Extraction, 'db', side_effect=AssertionError('status must use read-only connections')):
+            self.assertEqual(pages.status(self.service, scope)['pending_count'], 1)
+        with patch.object(self.queue, '_record_results', wraps=self.queue._record_results) as record:
+            self.queue.recover_outputs()
+            self.assertEqual(len(record.call_args.args[1]), 1)
+            self.assertEqual(record.call_args.args[1][0][1], second['slice_id'])
+            record.reset_mock()
+            self.queue.recover_outputs()
+            record.assert_not_called()
+        self.assertTrue(pages.status(self.service, scope)['complete'])
+
     def test_scoped_batch_and_skip_cannot_consume_another_page(self):
         first = self.source(1)
         second = self.source(2)

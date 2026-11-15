@@ -66,6 +66,31 @@ class KnowledgeStore:
                 db.execute('ALTER TABLE knowledge ADD COLUMN proposal_id TEXT')
             if 'significance' not in columns:
                 db.execute('ALTER TABLE knowledge ADD COLUMN significance INTEGER')
+            if not db.execute("SELECT 1 FROM sqlite_master WHERE name='extraction_output_queue'").fetchone():
+                db.executescript("""BEGIN IMMEDIATE;
+                    CREATE TABLE IF NOT EXISTS extraction_output_queue (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT, instance TEXT NOT NULL, memory_id TEXT NOT NULL,
+                        sources_json TEXT NOT NULL, requires_event INTEGER NOT NULL);
+                    CREATE INDEX IF NOT EXISTS extraction_output_instance ON extraction_output_queue(instance,id);
+                    CREATE TRIGGER IF NOT EXISTS extraction_output_knowledge_insert AFTER INSERT ON knowledge BEGIN
+                        INSERT INTO extraction_output_queue(instance,memory_id,sources_json,requires_event)
+                        VALUES (NEW.instance,NEW.memory_id,NEW.sources_json,0);
+                    END;
+                    CREATE TRIGGER IF NOT EXISTS extraction_output_knowledge_update AFTER UPDATE OF sources_json ON knowledge
+                    WHEN OLD.sources_json<>NEW.sources_json BEGIN
+                        INSERT INTO extraction_output_queue(instance,memory_id,sources_json,requires_event)
+                        VALUES (NEW.instance,NEW.memory_id,NEW.sources_json,0);
+                    END;
+                    CREATE TRIGGER IF NOT EXISTS extraction_output_event_insert AFTER INSERT ON slice_memory_sources BEGIN
+                        INSERT INTO extraction_output_queue(instance,memory_id,sources_json,requires_event)
+                        VALUES (NEW.instance,NEW.memory_id,NEW.sources_json,1);
+                    END;
+                    CREATE TABLE IF NOT EXISTS extraction_output_migration (version INTEGER PRIMARY KEY);""")
+                with db:
+                    if db.execute('INSERT OR IGNORE INTO extraction_output_migration VALUES (1)').rowcount:
+                        for table, requires_event in (('knowledge', 0), ('slice_memory_sources', 1)):
+                            db.execute(f"""INSERT INTO extraction_output_queue(instance,memory_id,sources_json,requires_event)
+                                SELECT instance,memory_id,sources_json,? FROM {table}""", (requires_event,))
             with db:
                 yield db
         finally:

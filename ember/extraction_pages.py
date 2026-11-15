@@ -4,12 +4,14 @@ Maintenance uses the existing generation/tool receipt ledger without inventing
 a user message, recall exposure or visible assistant reply.
 """
 import json
+from pathlib import Path
 from .generations import fingerprint
 from .source_refs import message_seq
 from .turn_slices import TurnSliceStore
 from .extraction import Extraction
 from .slice_policy import informative
-from .event_slices import EventSliceLinks, sync_from_files
+from .maintenance_materials import _read_db, event_document
+from .generations import fingerprint
 
 ALLOWED_TOOLS = frozenset({
     'get_memory_extraction_batch', 'finish_memory_extraction_group',
@@ -37,18 +39,60 @@ def sources(service, session_id, ids, message_ids=None):
     args = [service.source_instance, session_id]
     if message_ids is not None:
         marks = ','.join('?' for _ in message_ids)
-        sql += f' AND (user_message_id IN ({marks}) OR assistant_message_id IN ({marks}))'
-        args.extend(sorted(message_ids))
-        args.extend(sorted(message_ids))
+        # Keep each half on its message-id index even for very long sessions.
+        sql = f'''
+            SELECT * FROM turn_slices WHERE rowid IN (
+                SELECT rowid FROM turn_slices WHERE instance=? AND session_id=? AND user_message_id IN ({marks})
+                UNION
+                SELECT rowid FROM turn_slices WHERE instance=? AND session_id=? AND assistant_message_id IN ({marks})
+            )
+        '''
+        selected = sorted(message_ids)
+        args = [*args, *selected, *args, *selected]
     elif ids is not None:
         sql += ' AND assistant_message_id IN (' + ','.join('?' for _ in ids) + ')'
         args.extend(sorted(ids))
-    with store._db() as conn:
-        rows = [dict(row) for row in conn.execute(sql + ' ORDER BY saved_at,slice_id', args)]
+    rows = _read_db(store.path, sql + ' ORDER BY saved_at,slice_id', args)
     for row in rows:
         row['messages'] = json.loads(row.pop('messages_json'))
         row['user_is_system'] = bool(row['user_is_system'])
     return rows
+
+
+def settled_sources(service, slice_ids):
+    if not slice_ids:
+        return set(), set()
+    root = Path(service.store.root)
+    store = TurnSliceStore(root)
+    owned, done = set(), set()
+    tables = {row['name'] for row in _read_db(store.path, 'SELECT name FROM sqlite_master WHERE type="table"')}
+    for start in range(0, len(slice_ids), 500):
+        batch = slice_ids[start:start + 500]
+        marks = ','.join('?' for _ in batch)
+        params = [service.source_instance, *batch]
+        done.update((row['slice_id'], row['content_hash']) for row in _read_db(
+            root / 'extraction.sqlite3',
+            f'SELECT slice_id,content_hash FROM source_results WHERE instance=? AND slice_id IN ({marks})', params))
+        if 'event_slice_memberships' in tables:
+            owned.update(row['slice_id'] for row in _read_db(store.path, f"""
+                SELECT DISTINCT m.slice_id FROM event_slice_memberships m
+                JOIN event_span_sources s ON m.instance=s.instance AND m.event_id=s.event_id
+                    AND m.version_id=s.version_id AND m.source_hash=s.source_hash
+                WHERE m.instance=? AND m.slice_id IN ({marks}) AND s.state='ready'
+            """, params))
+        if 'event_slice_additions' in tables:
+            for row in _read_db(store.path, f"""
+                SELECT a.* FROM event_slice_additions a JOIN turn_slices t
+                    ON a.slice_id=t.slice_id AND a.instance=t.instance AND a.content_hash=t.content_hash
+                WHERE a.instance=? AND a.slice_id IN ({marks})
+            """, params):
+                target = service.store._events.get(row['event_id'])
+                new = service.store._events.get(row['new_event_id'])
+                if (target and new and str(target.version_id) == row['version_id']
+                        and fingerprint(event_document(target.to_dict())) == row['event_hash']
+                        and fingerprint(event_document(new.to_dict())) == row['new_event_hash']):
+                    owned.add(row['slice_id'])
+    return owned, done
 
 
 def status(service, body):
@@ -61,12 +105,7 @@ def status(service, body):
     session_id, ids = scope(status_body)
     selected = {str(value) for value in message_ids} if message_ids is not None else None
     rows = sources(service, session_id, ids, selected)
-    queue = Extraction(service)
-    queue.recover_outputs()
-    sync_from_files(service.store.root, service.source_instance)
-    owned = {row['slice_id'] for row in EventSliceLinks(service.store.root).all(service.source_instance)}
-    with queue.db() as conn:
-        done = queue.completed_sources(conn)
+    owned, done = settled_sources(service, [row['slice_id'] for row in rows])
     items = []
     for row in rows:
         settled = row['slice_id'] in owned or (row['slice_id'], row['content_hash']) in done or not informative(row)

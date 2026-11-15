@@ -40,7 +40,9 @@ class EventSliceLinks:
                 addition_id TEXT PRIMARY KEY, instance TEXT NOT NULL,event_id TEXT NOT NULL,
                 version_id TEXT NOT NULL,event_hash TEXT NOT NULL,slice_id TEXT NOT NULL,
                 content_hash TEXT NOT NULL,turn INTEGER NOT NULL,new_event_id TEXT NOT NULL,
-                new_event_hash TEXT NOT NULL,evidence_json TEXT NOT NULL,job_id TEXT NOT NULL);''')
+                new_event_hash TEXT NOT NULL,evidence_json TEXT NOT NULL,job_id TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS event_slice_membership_lookup ON event_slice_memberships(instance,slice_id);
+                CREATE INDEX IF NOT EXISTS event_slice_addition_lookup ON event_slice_additions(instance,slice_id);''')
             yield db
 
     @staticmethod

@@ -105,6 +105,8 @@ def write_event(service, args, context):
         from .privacy import Privacy
         Privacy(service.store.root).protect_sources(dict(source, instance=service.source_instance) for source in rows)
     service.store.write_event(event)
+    from .extraction import Extraction
+    Extraction(service).record_sources(sources,event.event_id,'written')
     for index,route in enumerate(validated['recall_routes'],1):
         service.store.write_route(RecallRoute(route_id=f'rt_{event.event_id}_{index:02d}',event_id=event.event_id,
             matcher='lexical',cue_type=route['cue_type'],cue=route['cue'],status='active',
@@ -114,8 +116,6 @@ def write_event(service, args, context):
     Promises(service).written(event)
     from .source_sync import request_sync
     request_sync(service)
-    from .extraction import Extraction
-    Extraction(service).record_sources(sources,event.event_id,'written')
     from .briefing_edits import write_hint
     return {'status':'created','event_id':event.event_id,'summary':event.summary,**write_hint(service,event,created=True),
             'source_slice_ids':args['source_slice_ids']}

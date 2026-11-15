@@ -34,6 +34,10 @@ class TurnSliceStore:
                 content_hash TEXT NOT NULL,
                 saved_at TEXT NOT NULL
             )""")
+            db.execute("""CREATE INDEX IF NOT EXISTS turn_slices_assistant_lookup
+                ON turn_slices(instance,session_id,assistant_message_id)""")
+            db.execute("""CREATE INDEX IF NOT EXISTS turn_slices_user_lookup
+                ON turn_slices(instance,session_id,user_message_id)""")
             db.execute("""CREATE TABLE IF NOT EXISTS slice_source_times (
                 slice_id TEXT PRIMARY KEY, occurred_at TEXT NOT NULL)""")
             db.execute("""CREATE TABLE IF NOT EXISTS slice_embeddings (

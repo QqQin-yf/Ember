@@ -222,6 +222,9 @@ async def _expire_recall_snapshots() -> None:
 @contextlib.asynccontextmanager
 async def _lifespan(app):
     async with session_manager.run():
+        from ember.extraction import Extraction, ExtractionWorker
+        for name in REGISTRY.names:
+            await asyncio.to_thread(Extraction(REGISTRY.service(name)).recover_outputs, startup=True)
         cleanup = asyncio.create_task(_expire_recall_snapshots())
         pipeline = SlicePipeline(REGISTRY)
         app.state.slice_pipeline = pipeline
@@ -241,7 +244,6 @@ async def _lifespan(app):
         from ember.timeline import TimelineWorker
         timeline_worker=TimelineWorker(REGISTRY)
         timeline_task=asyncio.create_task(timeline_worker.run())
-        from ember.extraction import ExtractionWorker
         extraction_worker=ExtractionWorker(REGISTRY)
         extraction_task=asyncio.create_task(extraction_worker.run())
         try:
@@ -552,9 +554,6 @@ async def _extraction_page(request: Request) -> JSONResponse:
         body = await request.json()
         if not isinstance(body, dict):
             raise ValueError('Expected JSON object')
-        if operation == 'status':
-            from ember.source_sync import request_sync
-            await asyncio.to_thread(request_sync, svc)
         result = await asyncio.to_thread(getattr(extraction_pages, operation), svc, body)
         return JSONResponse(result)
     except (ValueError, KeyError, TypeError) as exc:

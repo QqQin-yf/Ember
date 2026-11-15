@@ -56,31 +56,59 @@ class Extraction:
     def record_sources(self,sources,result_id='',action='skipped'):
         """A source version is consumed by its durable authoring result, not an ack."""
         with self.db() as conn:
-            conn.executemany('INSERT OR IGNORE INTO source_results VALUES (?,?,?,?,?)',
-                [(self.instance,s['slice_id'],s['content_hash'],result_id,action) for s in sources])
-            conn.executemany('DELETE FROM grouping_retries WHERE instance=? AND slice_id=? AND content_hash=?',
-                [(self.instance,s['slice_id'],s['content_hash']) for s in sources])
-            done=self.completed_sources(conn)
-            for row in conn.execute('SELECT * FROM groups WHERE instance=?',(self.instance,)).fetchall():
-                refs=json.loads(row['sources'])
-                if all((s['slice_id'],s['content_hash']) in done for s in refs):
-                    conn.execute("UPDATE groups SET state='completed' WHERE id=?",(row['id'],))
+            self._record_results(conn, [
+                (self.instance, s['slice_id'], s['content_hash'], result_id, action) for s in sources
+            ])
+
+    def _record_results(self, conn, results):
+        if not results:
+            return
+        inserted = conn.executemany('INSERT OR IGNORE INTO source_results VALUES (?,?,?,?,?)', results)
+        if not inserted.rowcount:
+            return
+        sources = {row[:3] for row in results}
+        conn.executemany('DELETE FROM grouping_retries WHERE instance=? AND slice_id=? AND content_hash=?', sources)
+        changed = {row[1:] for row in sources}
+        done = self.completed_sources(conn)
+        for row in conn.execute("SELECT id,sources FROM groups WHERE instance=? AND state<>'completed'", (self.instance,)):
+            refs = {(s['slice_id'], s['content_hash']) for s in json.loads(row['sources'])}
+            if refs & changed and refs <= done:
+                conn.execute("UPDATE groups SET state='completed' WHERE id=?", (row['id'],))
 
     def completed_sources(self,conn):
         return {(r[0],r[1]) for r in conn.execute(
             'SELECT slice_id,content_hash FROM source_results WHERE instance=?',(self.instance,))}
 
-    def recover_outputs(self):
-        # Recover a crash or discover() racing between the durable write and queue update.
-        for row in self.knowledge.all():
-            self.record_sources(row['sources'],row['memory_id'],'written')
-        if self.knowledge.path.exists():
-            with self.knowledge.db() as conn:
-                rows=conn.execute('SELECT memory_id,sources_json FROM slice_memory_sources WHERE instance=?',
-                                  (self.instance,)).fetchall()
-            for row in rows:
-                if row['memory_id'] in self.service.store._events:
-                    self.record_sources(json.loads(row['sources_json']),row['memory_id'],'written')
+    def recover_outputs(self, *, startup=False):
+        if startup:
+            links = EventSliceLinks(self.root)
+            if links.store.path.exists():
+                with links.db():
+                    pass  # Migrate lookup indexes before serving status.
+            with self.db():
+                pass
+            if self.knowledge.path.exists():
+                with self.knowledge.db():
+                    pass  # Seed the durable queue for installations with existing outputs.
+        from .maintenance_materials import _read_db
+        outputs = _read_db(self.knowledge.path, """SELECT * FROM extraction_output_queue
+            WHERE instance=? ORDER BY id""", (self.instance,))
+        # Event source metadata may commit before the Event; leave those entries queued.
+        ready = [row for row in outputs if not row['requires_event'] or row['memory_id'] in self.service.store._events]
+        if not ready:
+            return
+        with self.db() as conn:
+            pending = []
+            for row in ready:
+                for source in json.loads(row['sources_json']):
+                    key = (self.instance, source['slice_id'], source['content_hash'], row['memory_id'])
+                    if not conn.execute("""SELECT 1 FROM source_results
+                        WHERE instance=? AND slice_id=? AND content_hash=? AND result_id=?""", key).fetchone():
+                        pending.append((*key, 'written'))
+            self._record_results(conn, list(dict.fromkeys(pending)))
+        # A crash between the two commits safely replays the same source version.
+        with self.knowledge.db() as conn:
+            conn.executemany('DELETE FROM extraction_output_queue WHERE id=?', [(row['id'],) for row in ready])
 
     def reconcile(self,current):
         """Remove only consumed/unavailable slices, retaining the rest in their group."""
