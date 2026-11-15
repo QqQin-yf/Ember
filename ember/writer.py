@@ -215,12 +215,12 @@ def build_search_tool_spec() -> list[dict[str, Any]]:
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "要找的内容，自然语言描述",
+                        "description": "要找的内容，可直接使用 briefing 的 summary、core 片段或自然语言描述，不必猜 cue 关键词",
                     },
                     "time_range": {
                         "type": "string",
                         "description": ("可选，发生时间过滤：ISO 起止"
-                                        "（YYYY-MM-DDTHH:MM:SS/…）或相对表达"
+                                        "（YYYY-MM-DDTHH:MM:SS/…，也支持起点..终点）或相对表达"
                                         "（昨天/上周/最近N天/近两周）"),
                     },
                     "k": {

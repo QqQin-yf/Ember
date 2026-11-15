@@ -45,6 +45,8 @@
   },
   "briefing": {
     "recent_hours": 72,
+    "recent_event_hours": 96,
+    "recent_core_hours": 48,
     "token_budget": {
       "total": 30000, "relationship": 15000, "recent": 4500,
       "pins": 3500, "knowledge": 2500, "entities": 2000, "promises": 1500,

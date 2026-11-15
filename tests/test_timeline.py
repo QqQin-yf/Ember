@@ -2,6 +2,7 @@ import copy
 import json
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from ember.health_check import check_memory
@@ -40,11 +41,45 @@ class TimelineTests(unittest.TestCase):
         events[1].significance=8
         events[2].significance=2
         self.cfg['timeline'].update(upper_chars=130,lower_chars=115)
-        self.cfg['briefing']['recent_hours']=24*365*100
         result=self.timeline.render()
         self.assertEqual(self.modes(),{'1':'original','2':'original','3':'compressed'})
         self.assertIn('1'*50,result['text'])
         self.assertIn('relationship 3',result['text'])
+
+    def test_old_events_keep_core_until_budget_is_exceeded_and_restore_when_it_fits(self):
+        events=[self.event(i) for i in (1,2)]
+        full='\n'.join(f'[{event.event_id}] {event.core}' for event in events)
+        self.cfg['timeline']['upper_chars']=len(full)
+        report=self.timeline.render()
+        self.assertEqual(report['text'],full)
+        self.assertEqual(self.modes(),{'1':'original','2':'original'})
+        self.assertIsNone(report['summary_task'])
+        self.cfg['timeline']['upper_chars']=len(full)-1
+        report=self.timeline.render()
+        self.assertEqual(self.modes(),{'1':'compressed','2':'original'})
+        self.assertIn(events[0].summary,report['text'])
+        self.cfg['timeline']['upper_chars']=len(full)
+        self.assertEqual(self.timeline.render()['text'],full)
+        self.assertEqual(self.modes(),{'1':'original','2':'original'})
+
+    def test_recent_events_keep_core_even_under_budget_pressure(self):
+        event=self.event(1)
+        event.event_time=(datetime.now(timezone.utc)-timedelta(hours=1)).isoformat()
+        self.cfg['timeline']['upper_chars']=20
+        report=self.timeline.render()
+        self.assertEqual(report['text'],f'[{event.event_id}] {event.core}')
+        self.assertEqual(self.modes(),{'1':'original'})
+        self.assertIn('relationship_timeline_over_budget',report['health']['codes'])
+
+    def test_explicit_summary_override_applies_even_with_spare_budget(self):
+        from ember.briefing_edits import dispatch
+        event=self.event(1)
+        event.event_time=datetime.now(timezone.utc).isoformat()
+        edit={'revision':0,'operations':[{'action':'summary','ids':[event.event_id]}]}
+        self.assertEqual(dispatch(self.service,'edit_briefing',edit)['status'],'ok')
+        report=self.timeline.render()
+        self.assertEqual(report['text'],f'[{event.event_id}] {event.summary}')
+        self.assertEqual(self.modes(),{'1':'compressed'})
 
     def test_app_summary_uses_all_sources_and_is_invalidated_on_revision(self):
         from ember.briefing_edits import dispatch
@@ -68,7 +103,7 @@ class TimelineTests(unittest.TestCase):
             self.assertEqual(conflict['code'],'briefing_revision_changed')
             latest=dispatch(self.service,'read_briefing_summary_task',{'event_ids':['1']})
             self.assertEqual(latest['groups'][0]['text'],'history')
-            self.assertEqual(self.timeline.render()['text'],'history')
+            self.assertEqual(self.timeline.render()['text'],'[1, 2, 3] history')
             self.service.store.get_event('2').core='changed'
             revised=self.timeline.render()
             self.assertNotIn('history',revised['text'])
@@ -114,7 +149,7 @@ class TimelineTests(unittest.TestCase):
         self.cfg['timeline'].update(upper_chars=40,lower_chars=30)
         self.event(1).significance=10
         result=self.timeline.render()
-        self.assertEqual(result['text'],'1'*50)
+        self.assertEqual(result['text'],'[1] '+'1'*50)
         self.assertIn('relationship_timeline_over_budget',result['health']['codes'])
 
     def test_half_compressed_ratio_is_reported_by_read_only_health_check(self):
@@ -142,7 +177,7 @@ class TimelineTests(unittest.TestCase):
         edit={'revision':0,'operations':[{'action':'group','ids':ids,
                'sources':{e.event_id:version(e) for e in events},'text':'history'}]}
         self.assertEqual(dispatch(self.service,'edit_briefing',edit)['status'],'ok')
-        self.assertEqual(self.timeline.render()['text'],'history')
+        self.assertEqual(self.timeline.render()['text'],'[1, 2] history')
         self.assertNotIn('history',self.timeline.render(lambda e:e.event_id=='1')['text'])
         self.service.pin_store.add('1')
         self.assertNotIn('history',self.timeline.render()['text'])
