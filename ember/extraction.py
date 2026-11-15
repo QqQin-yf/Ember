@@ -91,12 +91,17 @@ class Extraction:
                 with self.knowledge.db():
                     pass  # Seed the durable queue for installations with existing outputs.
         from .maintenance_materials import _read_db
-        outputs = _read_db(self.knowledge.path, """SELECT * FROM extraction_output_queue
-            WHERE instance=? ORDER BY id""", (self.instance,))
+        try:
+            outputs = _read_db(self.knowledge.path, """SELECT * FROM extraction_output_queue
+                WHERE instance=? ORDER BY id""", (self.instance,))
+        except sqlite3.OperationalError as exc:
+            if not startup and str(exc) == 'no such table: extraction_output_queue':
+                return 0  # The startup worker will seed the queue.
+            raise
         # Event source metadata may commit before the Event; leave those entries queued.
         ready = [row for row in outputs if not row['requires_event'] or row['memory_id'] in self.service.store._events]
         if not ready:
-            return
+            return 0
         with self.db() as conn:
             pending = []
             for row in ready:
@@ -109,6 +114,7 @@ class Extraction:
         # A crash between the two commits safely replays the same source version.
         with self.knowledge.db() as conn:
             conn.executemany('DELETE FROM extraction_output_queue WHERE id=?', [(row['id'],) for row in ready])
+        return len(ready)
 
     def reconcile(self,current):
         """Remove only consumed/unavailable slices, retaining the rest in their group."""
@@ -392,17 +398,34 @@ class ExtractionWorker:
         import logging
         from .extraction_consumer import consume
         next_discovery = {}
+        queues = {}
+        logger = logging.getLogger(__name__)
+
+        def recover(name):
+            queue = Extraction(self.registry.service(name))
+            return queue, queue.recover_outputs(startup=True)
         while not self.stop_event.is_set():
             progressed = False
             interval = lifecycle_config()['extraction']['worker_seconds']
             for name in self.registry.names:
                 if self.stop_event.is_set():
                     return
-                queue = Extraction(self.registry.service(name))
+                queue = queues.get(name)
+                if queue is None:
+                    started = time.monotonic()
+                    try:
+                        queue, count = await asyncio.to_thread(recover, name)
+                    except Exception:
+                        logger.exception('extraction startup recovery failed instance=%s', name)
+                        continue
+                    queues[name] = queue
+                    logging.getLogger('uvicorn.error').info(
+                        'extraction startup recovery instance=%s outputs=%d elapsed_ms=%d',
+                        name, count, (time.monotonic() - started) * 1000)
                 try:
                     progressed = await asyncio.to_thread(consume, queue) or progressed
                 except Exception:
-                    logging.getLogger(__name__).exception('extraction background worker failed')
+                    logger.exception('extraction background worker failed')
                 if time.monotonic() >= next_discovery.get(name, 0):
                     try:
                         await asyncio.to_thread(queue.discover)

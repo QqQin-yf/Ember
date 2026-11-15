@@ -40,6 +40,32 @@ class CallerNeutralHTTPTests(unittest.TestCase):
         return self.client.post('/ember/hooks/turn_start', json={
             'session_id': 'cc-example', 'message': 'remember beacon', **fields})
 
+    def test_health_serves_while_startup_recovery_is_in_progress(self):
+        import sidecar
+        from ember.extraction import Extraction
+
+        started, release, finished = threading.Event(), threading.Event(), threading.Event()
+        original = Extraction.recover_outputs
+
+        def blocked(queue, *, startup=False):
+            if startup:
+                started.set()
+                if not release.wait(5):
+                    finished.set()
+                    raise AssertionError('health waited for startup recovery')
+            return original(queue, startup=startup)
+
+        with patch.object(Extraction, 'recover_outputs', blocked):
+            with TestClient(sidecar.app) as client:
+                try:
+                    self.assertTrue(started.wait(2))
+                    response = client.get('/health')
+                    self.assertEqual(response.status_code, 200)
+                    self.assertTrue(response.json()['ok'])
+                    self.assertFalse(finished.is_set())
+                finally:
+                    release.set()
+
     def test_minimal_recall_needs_no_message_ids_or_deliz_lifecycle(self):
         response = self.start()
         self.assertEqual(response.status_code, 200, response.text)
@@ -101,7 +127,7 @@ class CallerNeutralHTTPTests(unittest.TestCase):
         now = datetime.now(timezone.utc).isoformat()
         self.service.store.write_event(Event('concurrent', 'v1', 'source', 'source', now, now,
             summary='summary', core='concurrent new memory', significance=8))
-        started, release = threading.Event(), threading.Event()
+        started, release, finished = threading.Event(), threading.Event(), threading.Event()
         def sync(*args):
             started.set()
             if not release.wait(5):
