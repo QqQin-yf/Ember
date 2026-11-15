@@ -55,11 +55,11 @@ def plan(service,events,edits,budget,near_hours,onstage=lambda e:False,now=None,
             old=datetime.fromisoformat(event.event_time.replace('Z','+00:00'))<=cutoff
         except (AttributeError,TypeError,ValueError):
             old=False
-        short=(old or action=='summary') and event.summary.strip() and not protected(service,event)
+        short=action=='summary' and event.summary.strip() and not protected(service,event)
         body=(service._briefing_source_block(event) if service.pin_store.is_pinned(mid)
               else event.summary if short else event.core)
         rows.append((mid,body,'compressed' if short else 'original',[mid]))
-        if not short and not protected(service,event) and 0<len(event.summary.strip())<len(body):
+        if old and not short and not protected(service,event) and 0<len(event.summary.strip())<len(body):
             compressible.append(mid)
         if old and event.significance<8 and not protected(service,event):
             candidates.append(mid)
