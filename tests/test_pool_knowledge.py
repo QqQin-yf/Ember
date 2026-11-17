@@ -55,19 +55,14 @@ class PoolKnowledgeTests(unittest.TestCase):
         Lifecycle(self.root).propose('pattern',self.store.sources([self.a['slice_id'],self.b['slice_id']]),
             '两段原文体现相近习惯',{'direction':'Lunch choice habit'})
 
-    def test_proposals_revisit_retired_gemini_sources_but_respect_app_receipts(self):
+    def test_candidates_respect_surviving_write_and_skip_receipts(self):
         from ember.extraction import Extraction
-        from ember.memory_lifecycle import Lifecycle
         q = Extraction(self.service)
-        life = Lifecycle(self.root)
         for source in (self.a,self.b,self.current):
             self.slices.save_embedding(source,self.config.space,[1.0,0.0])
-            q.record_sources([source],'old-gemini','written')
         q.record_sources([self.b],'app-event','written')
         q.record_sources([self.current])
-        life.mark('old-gemini','no_recall','retired_legacy_gemini_event',['verified'])
-        self.assertEqual(q.candidates(self.config),[])
-        self.assertEqual([row['slice_id'] for row in q.candidates(self.config,revisit_legacy=True)],
+        self.assertEqual([row['slice_id'] for row in q.candidates(self.config)],
                          [self.a['slice_id']])
 
     def test_source_review_fixture_does_not_create_memories(self):

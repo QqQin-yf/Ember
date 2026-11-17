@@ -82,7 +82,7 @@ def propose_day(service):
     # Treat the first turns of the following day as context only. Their source
     # versions participate in the receipt so late arrivals can reopen analysis.
     q.recover_outputs()
-    for row in q.candidates(config,revisit_legacy=True):
+    for row in q.candidates(config):
         stamp = times.get(row['slice_id'])
         if not stamp:
             continue
@@ -214,14 +214,10 @@ def _invalidate(q, db):
     from .event_slices import EventSliceLinks, sync_from_files
     sync_from_files(q.root,q.instance)
     store = TurnSliceStore(q.root)
-    from .memory_lifecycle import Lifecycle
-    with Lifecycle(q.root,q.instance).db() as life:
-        retired = {row[0] for row in life.execute(
-            "SELECT id FROM eligibility WHERE reason='retired_legacy_gemini_event'")}
     ranges = {}
     for link in EventSliceLinks(q.root).all(q.instance):
         event = q.service.store._events.get(link['event_id'])
-        if not event or event.event_id in retired or 'gemini-proposal' in event.provenance_refs:
+        if not event or 'gemini-proposal' in event.provenance_refs:
             continue
         item = store.get(link['slice_id'])
         if item:
