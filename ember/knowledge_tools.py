@@ -146,8 +146,8 @@ def dispatch(service,name,args,context=None):
             Extraction(service).record_sources(sources,result['memory_id'],'written')
             return result
         if name=='review_memory_knowledge':
-            from .knowledge_review import review_knowledge
-            return review_knowledge(service,args,context)
+            from .knowledge_review import review_knowledge, review_next
+            return review_knowledge(service, args, context) if 'group_id' in args else review_next(service, args, context)
         if name=='list_memory_knowledge':
             return {'status':'ok','briefing':store.briefing(),'identity_profiles':store.identity_profiles(),'items':[
                 {key:row[key] for key in ('memory_id','kind','content','cues','pinned','sources','confidence')}
@@ -174,8 +174,11 @@ def dispatch(service,name,args,context=None):
             recall=SliceRecall(service.store.root,service.source_instance)
             from .privacy import context_source
             source = context_source(service, context) or {}
+            window = (context or {}).get('request_context', {})
             result=recall.match(args.get('query'), session_id=source.get('session_id'),
-                                anchor_message_id=source.get('user_message_id'), purpose='search')
+                                anchor_message_id=source.get('user_message_id'), purpose='search',
+                                context_start_id=window.get('context_start_id'),
+                                context_message_ids=window.get('context_message_ids'))
             trace=recall.trace(result['trace_id'],True)
             k=args.get('k',5)
             if type(k) is not int or not 1<=k<=20:

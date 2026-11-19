@@ -44,7 +44,8 @@ class SliceRecall:
         finally:
             db.close()
 
-    def match(self, text, session_id=None, turn=None, anchor_message_id=None, context_start_id=None, purpose='preview',context_message_ids=None):
+    def match(self, text, session_id=None, turn=None, anchor_message_id=None, context_start_id=None,
+              purpose='preview', context_message_ids=None, search_slice_ids=None):
         if not isinstance(text, str) or not text.strip():
             raise ValueError('A nonempty input is required')
         trace_id = uuid.uuid4().hex
@@ -70,6 +71,12 @@ class SliceRecall:
         query_source = dict(instance=self.instance, session_id=session_id, user_message_id=anchor_message_id)
         local = privacy.active(self.instance, session_id) or privacy.blocked(dict(query_source, query=True))
         try:
+            if purpose == 'search':
+                ranked = self.search_keyword_rank(text, metadata, context_message_ids, search_slice_ids, privacy)
+                if ranked or local:
+                    metadata.update(status='local_keyword', ranked_count=len(ranked),
+                                    candidate_count=len(ranked), candidate_pool=ranked)
+                    return self._record_match(metadata, None, ranked)
             if local:
                 if purpose != 'automatic':
                     ranked = self.keyword_rank(text)
@@ -90,6 +97,8 @@ class SliceRecall:
                         ON s.slice_id=e.slice_id AND s.content_hash=e.content_hash
                         WHERE s.instance=? AND e.space=? AND e.state='ready'
                         ORDER BY s.slice_id''', (self.instance, config.space)).fetchall()
+            if search_slice_ids is not None:
+                rows = [row for row in rows if row['slice_id'] in search_slice_ids]
             from .knowledge import KnowledgeStore, knowledge_space
             knowledge=KnowledgeStore(self.root,self.instance)
             hidden=knowledge.briefing_hidden()
@@ -198,19 +207,55 @@ class SliceRecall:
                 metadata['candidate_count'] = len(metadata['candidate_pool'])
         except SliceEmbeddingError as exc:
             if str(exc) == 'private_query':
-                if purpose != 'automatic' and not local:
+                if purpose not in ('automatic', 'search') and not local:
                     ranked = self.keyword_rank(text)
                     metadata.update(ranked_count=len(ranked), candidate_count=len(ranked), candidate_pool=ranked)
                 metadata.update(status='local_keyword')
             else:
                 metadata.update(status='unavailable', error_code=str(exc))
+        return self._record_match(metadata, query_vector, ranked)
+
+    def _record_match(self, metadata, query_vector, ranked):
         with self.db() as db:
             db.execute('INSERT INTO queries VALUES (?,?,?,?,?,?)',
-                (trace_id, self.instance, json.dumps(metadata, ensure_ascii=False),
+                (metadata['trace_id'], self.instance, json.dumps(metadata, ensure_ascii=False),
                  json.dumps(query_vector, allow_nan=False) if query_vector is not None else None,
                  json.dumps(ranked, allow_nan=False), datetime.now(timezone.utc).isoformat()))
         # Hook responses stay compact; full candidate identities are available in the trace.
         return {key: value for key, value in metadata.items() if key != 'candidate_pool'}
+
+    def search_keyword_rank(self, text, metadata, context_message_ids, slice_ids, policy):
+        from .memory_lifecycle import Lifecycle
+        from .privacy import seconds_until_eligible
+        from .search_matching import source_phrase_pattern, source_sentences, source_text
+
+        pattern = source_phrase_pattern(text)
+        store = TurnSliceStore(self.root)
+        if pattern is None or not store.path.exists():
+            return []
+        visible = None if context_message_ids is None else {int(value) for value in context_message_ids}
+        start = int(metadata['context_start_id']) if metadata['context_start_id'] else None
+        anchor = int(metadata['anchor_message_id']) if metadata['anchor_message_id'] else None
+        eligible = Lifecycle(self.root, self.instance).eligibility_checker()
+        ranked = []
+        for source in store.for_instance(self.instance, policy):
+            sid = source['slice_id']
+            if ((slice_ids is not None and sid not in slice_ids)
+                    or not eligible(sid) or seconds_until_eligible(source)):
+                continue
+            messages = source['messages']
+            if source['session_id'] == metadata['session_id']:
+                messages = [m for m in messages if (
+                    (anchor is None or int(m['message_id']) < anchor)
+                    and (int(m['message_id']) not in visible if visible is not None
+                         else start is None or int(m['message_id']) < start))]
+            if any(pattern.search(source_text(line)) for message in messages
+                   for line in source_sentences(message['content'])):
+                item = {key: source[key] for key in (
+                    'slice_id', 'instance', 'session_id', 'user_message_id', 'assistant_message_id', 'content_hash')}
+                ranked.append(dict(item, rank=len(ranked)+1, score=1.0,
+                                   hit_entry='local_keyword', in_candidate_pool=True))
+        return ranked
 
     def keyword_rank(self, text):
         from .memory_lifecycle import Lifecycle

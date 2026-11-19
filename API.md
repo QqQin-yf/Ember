@@ -110,28 +110,25 @@ GET /ember/generations/{recall_id} 查询生成状态；GET /ember/generations/{
 
 ## 5. 普通 MCP 工具
 
-POST /mcp/ 使用 MCP Streamable HTTP，tools/list 返回 22 个工具。所有普通生成调用沿用 X-Ember-Recall-Id / X-Ember-Tool-Call-Id 绑定，写入不借用其他窗口的活动槽。
+POST /mcp/ 和 POST /mcp/cc/ 使用 MCP Streamable HTTP。普通对话的 tools/list 返回 17 个工具。
+维护调用的 tools/list 带该次 `X-Ember-Recall-Id`，只展示该维护模式允许的工具。已绑定的 tools/call 还须带 `X-Ember-Tool-Call-Id`。
 
-| 工具 | 用途 |
+| 工具 | 功能 |
 |---|---|
-| write_event / write_promise / revise_memory_event | 正式写 Event、约定及冷静期订正 |
-| read_memory_source / search_memory | 完整原文下钻、主动检索 |
-| pin_memory / unpin_memory / list_memory_pins / merge_memory_events | pin 分类管理及 10 分无 due 同义约定合并 |
-| read_memory_slices / search_memory_slices | 原文切片下钻及检索 |
-| write_memory_knowledge / review_memory_knowledge | 正式提炼认知/规律、审阅相似知识 |
-| set_knowledge_pin / list_memory_knowledge | 知识 pin 与清单 |
-| get_memory_extraction_batch / finish_memory_extraction_group | 提取材料批次及不写确认 |
-| list_pending_promises / process_promise | 曝光约定处理及 pinned promise 主动 log |
-| revise_entity_summary / read_entity_events | Entity 摘要订正及成员下钻 |
-| read_relationship_point | 查询历史要点来源 Event 和时间 |
+| write_event / write_promise / revise_memory_event | 写入 Event、约定及订正 Event |
+| search_memory | 传 `scope: "event"` 检索 Event、认知或规律，传 `scope: "source"` 检索原文切片 |
+| read_memory_source | 按 `event_id`、`knowledge_id` 或 `slice_ids` 读取来源，三者选一 |
+| set_memory_pin / list_memory_pins / merge_memory_events | 设置 pin、查看清单和额度、合并同义的 10 分无 due 约定 |
+| list_pending_promises / process_promise | 查看和处理约定 |
+| write_memory_knowledge / list_memory_knowledge / set_identity_profile | 写入和查看认知与规律、更新认知卡 |
+| revise_entity_summary / read_entity_events / read_relationship_point | 修改实体概览，查看实体经历和关系时间线要点 |
+| set_private | 开启、关闭或查询私密模式 |
 
-`search_memory.query` 可直接使用 briefing 中的 summary、core 片段或自然语言描述。每次搜索同时匹配本地 summary、core、有效 cue 和已有 core 语义向量；忽略标点、空格及大小写差异的完整文本命中优先，候选合并去重后应用时间筛选与 k 上限。向量服务不可用时保留本地文本匹配，不要求猜 cue。
+原文切片搜索先按词或完整连续短语查文本，可忽略大小写及词之间的标点差异。当前搜索范围内无文字命中时才用切片向量。私密查询只走本地文字匹配。
 
-`time_range` 支持 `起点/终点`、`起点..终点`、`至`、`~` 分隔的 ISO 范围及相对日期。筛选按 `event_time`，缺失或无效才回退到 `ingest_time`；结果同时返回这两个字段。带时分秒的终点精确生效，只有日期的终点包含当天全天。建议明确提供时区，例如 `2026-11-11T00:00:00+08:00/2026-11-12T06:00:00+08:00`。
+检索排除当前窗口已呈现的条目和已在窗口内的来源。结果仅含命中数及各条目的 ID、日期和原话片段。无法核验原话或日期时相应字段为 null。可用 `time_range` 限定日期，支持 ISO 起止范围和相对日期。Event 优先使用 event_time，缺失时使用 ingest_time。用 `read_memory_source` 展开选中的出处。
 
-关系时间线正文每条显示 `[event_id]`；合并总结显示全部来源 Event ID，可直接用 `read_memory_source(event_id)` 下钻。ID 文字计入关系线预算。
-
-原文回执不写入持久工具账；进程重启后读取回执可能返回 result_not_retained。
+`set_memory_pin` 接收 `kind`（`event` 或 `knowledge`）、`id` 和布尔值 `pinned`。Event 包括约定，Knowledge 包括认知和规律。
 
 ### 5.1 Event 写入
 
@@ -159,7 +156,7 @@ list_pending_promises 返回真正进过上下文而尚未写 log 的约定及�
 
 ### 5.3 认知、规律与提取
 
-普通 MCP 开放 write_memory_knowledge / review_memory_knowledge / set_knowledge_pin / list_memory_knowledge；置信度、切片来源与低置信度证据校验保留。review_memory_knowledge.group_id 使用已交付提取组的 group_id，组内附上的相似知识须逐条维持、改写或合并。
+在原文维护轮次空调用 `review_memory_knowledge({})` 领取一组，提交 `items` 审阅当前组。成功返回回执和下一组，清空后返回 `done: true`。失败仅返回错误和重新领取的提示。认知条目按 ID 指定，待审组由 Ember 在维护轮次内跟踪。
 
 get_memory_extraction_batch() 不调用归组模型，只读取后台排好的最早材料：description、slices、similar_knowledge、group_id、part_id。批次材料数组按 JSON 字符数受 extraction.batch_chars 约束；整组放不下留到下一批，仅单组独自超限才切为 material_fragment，按 offset 连续拼接，total_chars 是完整材料长度。remaining_groups / remaining_chars 表示未包含在本批的剩余组数和字数；grouping_errors 表示归组错误数。
 
@@ -181,7 +178,7 @@ revise_entity_summary(entity_id,summary) 直接修订卡片并提交变化检查
 
 ### 5.5 Pin
 
-list_memory_pins 按 relationship、ordinary、promise、knowledge 四类列出 pin。promise 类专指 10 分无 due 的约定，不限制条数，按总字数提醒；其余三类限制条数。pin_memory / set_knowledge_pin 满额返回 rejected / pin_class_full、该类清单与先 unpin 的提示。配置见 lifecycle.json 的 pin。
+list_memory_pins 按 relationship、ordinary、promise、knowledge 四类列出 pin。promise 类专指 10 分无 due 的约定，不限制条数，按总字数提醒；其余三类限制条数。set_memory_pin 满额返回 rejected / pin_class_full、该类清单与先 unpin 的提示。配置见 lifecycle.json 的 pin。
 
 pin 原文先取完整来源，再围绕 focus 消息居中取 event_chars，省略两端分别标前面还有/后面还有。focus 本身不展示。认知/规律有单条字数保护；原件不改。read_memory_source 下钻返回完整原文。
 

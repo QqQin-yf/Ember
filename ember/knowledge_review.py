@@ -1,9 +1,12 @@
 """Knowledge review with source evidence; independent of Sleep context."""
 import json
+import sqlite3
 from pathlib import Path
 from .generations import fingerprint
 from .knowledge import KnowledgeStore
 from .memory_lifecycle import Lifecycle
+
+REVIEW_RETRY_HINT = "Call review_memory_knowledge with {} to retrieve the remaining material and review it again."
 
 
 def group(service, gid, context=None):
@@ -46,15 +49,18 @@ def set_confidence(store, mid, args):
     return confidence
 
 
-def review_knowledge(service,args,context):
-    store=KnowledgeStore(service.store.root,service.source_instance)
-    item=group(service,args['group_id'],context)
+def review_knowledge(service, args, context, material=None):
+    store = KnowledgeStore(service.store.root, service.source_instance)
+    item = group(service, args['group_id'], context) if material is None else material
     material=item.get('material',{})
     allowed=set(material.get('memory_ids',[]))
     updates=args['items']
     if not updates or len({r.get('memory_id') for r in updates})!=len(updates):
         raise ValueError('distinct_review_items_required')
     rows={r['memory_id']:r for r in store.all()}
+    if any(mid not in rows or (rows[mid]['content_hash'], rows[mid]['confidence']) != version
+           for mid, version in item.get('versions', {}).items()):
+        raise ValueError('review_material_changed')
     # Validate the whole review before any accepted write.
     for update in updates:
         mid=update['memory_id']
@@ -84,41 +90,133 @@ def review_knowledge(service,args,context):
         raise ValueError('conflicting_merge_targets')
     if item['kind']=='knowledge_review' and targets.union(merged)!=allowed:
         raise ValueError('all_review_items_must_be_accounted_for')
-    results=[]
-    life=Lifecycle(store.root,store.instance)
-    with store.db() as db:
-        for update in updates:
-            mid=update['memory_id'];row=rows[mid]
-            selected=set(update.get('source_slice_ids',[]))
-            if update['confidence']<=5:
-                for original in store.read_sources(item['sources']):
-                    if any(update['confidence_evidence'] in m['content'] for m in original['messages']):
-                        selected.add(original['slice_id'])
-            sources={s['slice_id']:s for s in row['sources']+[s for s in item['sources'] if s['slice_id'] in selected]}
-            for old in update.get('merge_ids',[]):
-                sources.update({s['slice_id']:s for s in rows[old]['sources']})
-            content=update.get('content',row['content']) if update['action']!='keep' else row['content']
-            cues=update.get('recall_cues',row['cues']) if update['action']!='keep' else row['cues']
-            digest=fingerprint([row['kind'],content,cues,list(sources.values())])
-            db.execute('UPDATE knowledge SET content=?,cues_json=?,sources_json=?,content_hash=?,vector_json=NULL,vector_hash=NULL,confidence=?,pinned=CASE WHEN ?<=5 THEN 0 ELSE pinned END WHERE memory_id=?',
-                (content,json.dumps(cues),json.dumps(list(sources.values())),digest,update['confidence'],update['confidence'],mid))
-            results.append({'memory_id':mid,'action':update['action'],'confidence':update['confidence']})
-    for update in updates:
-        mid=update['memory_id']
-        set_confidence(store,mid,update)
-        for old in update.get('merge_ids',[]):
-            with life.db() as db:
-                db.execute('INSERT OR REPLACE INTO aliases VALUES (?,?)',(old,mid))
-            life.mark(old,'superseded','app_knowledge_merge',[mid])
-            store.pin(old,False)
+    return _commit_review(service, store, item, rows, updates)
+
+
+def _commit_review(service, store, item, rows, updates):
     from .extraction import Extraction
-    extraction=Extraction(service)
-    for update in updates:
-        if update['action'] in ('rewrite','merge') and update.get('source_slice_ids'):
-            selected=set(update['source_slice_ids'])
-            extraction.record_sources([s for s in item['sources'] if s['slice_id'] in selected],
-                                      update['memory_id'],update['action'])
+    extraction = Extraction(service)
+    life = Lifecycle(store.root, store.instance)
+    originals = store.read_sources(item['sources'])
+    with life.db(), extraction.db():
+        pass
+    results, settled = [], []
+    with store.db() as db:
+        # These stores use the default rollback journal, enabling atomic attached writes.
+        db.execute('ATTACH DATABASE ? AS lifecycle', (str(store.root / 'memory_lifecycle.sqlite3'),))
+        db.execute('ATTACH DATABASE ? AS extraction', (str(store.root / 'extraction.sqlite3'),))
+        db.execute('BEGIN IMMEDIATE')
+        if 'material_hash' in item:
+            current = db.execute('SELECT state,material_hash FROM extraction.groups WHERE instance=? AND id=?',
+                                 (store.instance, item['group_id'])).fetchone()
+            if current is None or current['state'] != 'pending' or current['material_hash'] != item['material_hash']:
+                raise ValueError('review_material_changed')
+            if db.execute('SELECT 1 FROM extraction.reviewed_groups WHERE instance=? AND group_id=? AND material_hash=?',
+                          (store.instance, item['group_id'], item['material_hash'])).fetchone():
+                raise ValueError('review_material_changed')
+        for mid in item['material']['memory_ids']:
+            row = db.execute('SELECT content_hash,confidence FROM knowledge WHERE memory_id=? AND instance=?',
+                             (mid, store.instance)).fetchone()
+            if not row or (row['content_hash'], row['confidence']) != (rows[mid]['content_hash'], rows[mid]['confidence']):
+                raise ValueError('review_material_changed')
+        for update in updates:
+            mid, action, confidence = (update[key] for key in ('memory_id', 'action', 'confidence'))
+            row = rows[mid]
+            selected = set(update.get('source_slice_ids', []))
+            if confidence <= 5:
+                selected.update(original['slice_id'] for original in originals if any(
+                    update['confidence_evidence'] in message['content'] for message in original['messages']))
+            sources = {s['slice_id']: s for s in row['sources'] + [s for s in item['sources'] if s['slice_id'] in selected]}
+            for old in update.get('merge_ids', []):
+                sources.update({s['slice_id']: s for s in rows[old]['sources']})
+            content = row['content'] if action == 'keep' else update['content']
+            cues = row['cues'] if action == 'keep' else update['recall_cues']
+            digest = fingerprint([row['kind'], content, cues, list(sources.values())])
+            db.execute('UPDATE knowledge SET content=?,cues_json=?,sources_json=?,content_hash=?,vector_json=NULL,vector_hash=NULL,confidence=?,pinned=CASE WHEN ?<=5 THEN 0 ELSE pinned END WHERE memory_id=?',
+                       (content,json.dumps(cues),json.dumps(list(sources.values())),digest,confidence,confidence,mid))
+            db.execute('INSERT OR REPLACE INTO lifecycle.eligibility VALUES (?,?,?,?)',
+                       (mid, 'no_recall' if confidence <= 5 else 'active', update.get('confidence_basis') or 'app_review',
+                        json.dumps([update.get('confidence_evidence') or f'App AI confidence {confidence}'], ensure_ascii=False)))
+            for old in update.get('merge_ids', []):
+                db.execute('INSERT OR REPLACE INTO lifecycle.aliases VALUES (?,?)', (old, mid))
+                db.execute('INSERT OR REPLACE INTO lifecycle.eligibility VALUES (?,?,?,?)',
+                           (old, 'superseded', 'app_knowledge_merge', json.dumps([mid])))
+                db.execute('UPDATE knowledge SET pinned=0 WHERE memory_id=? AND instance=?', (old, store.instance))
+            if action in ('rewrite', 'merge'):
+                used = set(update.get('source_slice_ids', []))
+                settled.extend((extraction.instance, s['slice_id'], s['content_hash'], mid, action)
+                               for s in item['sources'] if s['slice_id'] in used)
+            results.append({'memory_id':mid,'action':action,'confidence':confidence})
+        extraction._record_results(db, settled)
+        if 'material_hash' in item:
+            db.execute('INSERT INTO extraction.reviewed_groups VALUES (?,?,?)',
+                       (store.instance, item['group_id'], item['material_hash']))
     return {'status':'ok','items':results,'embedding_status':'pending'}
+
+
+def _next_material(service, selected):
+    from .extraction import Extraction
+    from .lifecycle_config import lifecycle_config
+    from .slice_embedding import SliceEmbeddingConfig
+    extraction = Extraction(service)
+    config = SliceEmbeddingConfig.load()
+    scope = {'source_session_id': selected['session_id'], 'assistant_message_ids': selected['assistant_message_ids']}
+    for row in extraction.pending_groups(config, scope):
+        sources = row['remaining_sources']
+        digest = fingerprint(sources)
+        with extraction.db() as db:
+            seen = db.execute('SELECT 1 FROM reviewed_groups WHERE instance=? AND group_id=? AND material_hash=?',
+                              (extraction.instance, row['id'], digest)).fetchone()
+        if seen:
+            continue
+        extraction.materialize(row, config, lifecycle_config()['extraction']['batch_chars'] - 2)
+        with extraction.db() as db:
+            payload_row = db.execute('SELECT payload FROM groups WHERE id=? AND material_hash=?',
+                                     (row['id'], digest)).fetchone()
+        if not payload_row:
+            continue
+        data = json.loads(payload_row['payload'])
+        similar = extraction.similar(sources, config)
+        rows = {item['memory_id']: item for item in extraction.knowledge.all()}
+        similar = [item for item in similar if item['memory_id'] in rows]
+        if similar:
+            ids = [item['memory_id'] for item in similar]
+            versions = {mid: (rows[mid]['content_hash'], rows[mid]['confidence']) for mid in ids}
+            return {'group_id': row['id'], 'material_hash': digest, 'kind': 'knowledge_review',
+                    'sources': sources, 'material': {'memory_ids': ids}, 'versions': versions,
+                    'display': {'description': data['description'], 'slices': data['slices'],
+                                'similar_knowledge': similar}}
+    return None
+
+
+def review_next(service, args, context):
+    scope = (context or {}).get('extraction_scope')
+    if not scope or scope.get('mode', 'raw') != 'raw':
+        return {'status': 'failed', 'code': 'review_maintenance_required',
+                'hint': 'Open the raw memory maintenance session first.'}
+    current = context.get('knowledge_review_group')
+    if 'items' not in args:
+        context.pop('knowledge_review_requires_pickup', None)
+        if not current:
+            current = _next_material(service, scope)
+            context['knowledge_review_group'] = current
+        return {'status': 'ok', 'done': current is None, **({'material': current['display']} if current else {})}
+    if not current or context.get('knowledge_review_requires_pickup'):
+        return {'status': 'failed', 'code': 'review_material_required', 'hint': REVIEW_RETRY_HINT}
+    try:
+        receipt = review_knowledge(service, args, context, current)
+    except (ValueError, KeyError, TypeError, sqlite3.Error) as exc:
+        if str(exc) in ('review_material_changed', 'source_slice_changed_or_missing'):
+            context.pop('knowledge_review_group', None)
+        context['knowledge_review_requires_pickup'] = True
+        return {'status': 'failed', 'code': 'invalid_knowledge_review', 'error': 'review_storage_error' if isinstance(exc, sqlite3.Error) else str(exc),
+                'hint': REVIEW_RETRY_HINT}
+    context.pop('knowledge_review_group', None)
+    try:
+        return {**receipt, **review_next(service, {}, context)}
+    except Exception:
+        # The previous review is committed even if fetching the next one fails.
+        return {**receipt, 'done': False, 'hint': REVIEW_RETRY_HINT}
 
 
 def patch_members(service,source,target,event_id=None):

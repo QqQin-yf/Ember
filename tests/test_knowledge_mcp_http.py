@@ -39,8 +39,18 @@ class KnowledgeMCPTests(unittest.TestCase):
                 listed=client.post('/mcp/',headers=headers,json={'jsonrpc':'2.0','id':1,'method':'tools/list','params':{}}).json()
                 names={t['name'] for t in listed['result']['tools']}
                 self.assertIn('write_memory_knowledge',names)
-                self.assertIn('get_memory_extraction_batch',names)
-                self.assertIn('read_memory_slices',names)
+                self.assertNotIn('get_memory_extraction_batch',names)
+                self.assertNotIn('read_memory_slices',names)
+                self.assertIn('read_memory_source',names)
+                service._generation_contexts['extraction-list'] = {'extraction_scope': {}}
+                maintained = client.post('/mcp/', headers={**headers, 'X-Ember-Recall-Id': 'extraction-list'},
+                                         json={'jsonrpc':'2.0','id':8,'method':'tools/list','params':{}}).json()
+                maintenance_names = {t['name'] for t in maintained['result']['tools']}
+                self.assertTrue({'get_memory_extraction_batch', 'finish_memory_extraction_group',
+                                 'review_memory_knowledge'} <= maintenance_names)
+                cc = client.post('/mcp/cc/', headers=headers,
+                                 json={'jsonrpc':'2.0','id':9,'method':'tools/list','params':{}}).json()
+                self.assertEqual({t['name'] for t in cc['result']['tools']}, names)
                 for path,method in [('link/batches','GET'),('link/progress','GET'),('link/submit','POST'),('structure/run','POST')]:
                     retired=client.request(method,'/ember/sleep/'+path,json={} if method=='POST' else None)
                     self.assertEqual(retired.status_code,410)
@@ -55,7 +65,7 @@ class KnowledgeMCPTests(unittest.TestCase):
                     self.assertEqual(response.status_code,200,response.text)
                     outer=response.json()['result']
                     return json.loads(outer['content'][0]['text']),outer.get('isError',False)
-                read,error=call('read_memory_slices',{'slice_ids':[source['slice_id']]},'read')
+                read,error=call('read_memory_source',{'slice_ids':[source['slice_id']]},'read')
                 self.assertFalse(error)
                 self.assertIn('午饭',read['slices'][0]['messages'][0]['content'])
                 args={'confidence':8,'kind':'pattern','content':'倾向于固定午饭选择以减少决策负担','recall_cues':['黄焖鸡'],
@@ -76,10 +86,17 @@ class KnowledgeMCPTests(unittest.TestCase):
                 self.assertFalse(error)
                 self.assertEqual(listed['items'][0]['memory_id'],mid)
                 self.assertNotIn('vector',listed['items'][0])
+                with patch('ember.service.embed_text', return_value=None):
+                    search_args = {'query': args['content'], 'scope': 'event'}
+                    found, error = call('search_memory', search_args, 'scoped-search')
+                    self.assertFalse(error, found)
+                    self.assertEqual(found['items'][0]['knowledge_id'], mid)
+                    self.assertEqual(call('search_memory', search_args, 'scoped-search'), (found, error))
+                self.assertIsNone(service.generations.call('knowledge-http', 'scoped-search')['result_json'])
                 client.post('/ember/briefing/refresh',json={'session_id':'new'})
                 briefing=client.get('/ember/briefing').json()
                 self.assertIn(mid,briefing['knowledge']['memory_ids'])
-                changed,error=call('set_knowledge_pin',{'memory_id':mid,'pinned':False},'unpin')
+                changed,error=call('set_memory_pin',{'kind':'knowledge','id':mid,'pinned':False},'unpin')
                 self.assertEqual(changed['status'],'ok')
                 self.assertFalse(changed['pinned'])
                 self.assertIn(mid,client.get('/ember/briefing').json()['knowledge']['memory_ids'])

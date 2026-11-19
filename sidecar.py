@@ -55,12 +55,6 @@ from ember.tool_validation import validate_tool_input
 from ember.slice_pipeline import SlicePipeline, IngestionJobs, complete_turn, complete_run
 from ember.slice_recall import SliceRecall
 from ember.knowledge import KnowledgeEmbeddingWorker
-from ember.knowledge_tools import tool_specs as knowledge_tool_specs
-from ember.writer import (PIN_TOOL_NAME, UNPIN_TOOL_NAME,
-                          READ_SOURCE_TOOL_NAME, REVISE_TOOL_NAME,
-                          SEARCH_TOOL_NAME, TOOL_NAME,
-                          build_pin_tool_specs, build_revise_tool_spec,
-                          build_search_tool_spec, build_tools_spec)
 
 import mcp.types as types
 from mcp.server.lowlevel import Server
@@ -130,31 +124,25 @@ mcp_server = Server("memory")
 
 @mcp_server.list_tools()
 async def _list_tools() -> list[types.Tool]:
-    # 工具清单全实例同源（纯函数构建，不触任何实例的数据）；
-    # 组成必须与 EmberService.sidecar_tool_specs 保持一致
-    from ember.pin_policy import tool_specs as pin_specs
-    from ember.timeline import tool_specs as timeline_specs
-    from ember.organization_tools import tool_specs as organization_specs
-    from ember.promises import tool_specs as promise_specs
-    from ember.privacy import tool_specs as private_specs
-    from ember.extraction import tool_specs as extraction_specs
-    specs = (build_tools_spec() + [build_revise_tool_spec()[0]]
-             + build_search_tool_spec() + build_pin_tool_specs() + knowledge_tool_specs() + promise_specs() + organization_specs() + timeline_specs() + pin_specs() + extraction_specs() + private_specs())
-    out: list[types.Tool] = []
-    for spec in specs:
-        fn = spec["function"]
-        out.append(types.Tool(name=fn["name"], description=fn["description"],
-                              inputSchema=fn["parameters"]))
-    return out
+    from ember.tool_catalog import visible_specs
+    service = CURRENT_SERVICE.get()
+    context = CURRENT_CALL_CONTEXT.get() or {}
+    return [types.Tool(name=fn["name"], description=fn["description"],
+                       inputSchema=fn["parameters"])
+            for fn in visible_specs(service, context)]
 
 
 @mcp_server.call_tool(validate_input=False)
 async def _call_tool(name: str, arguments: dict) -> types.CallToolResult:
     # Keep schema enforcement here so SDK errors do not hide the field path/hint.
-    tool = next((tool for tool in await _list_tools() if tool.name == name), None)
-    if tool is not None:
-        error = validate_tool_input(arguments, tool.inputSchema)
+    from ember.tool_catalog import call_schema
+    schema = call_schema(name, arguments)
+    if schema is not None:
+        error = validate_tool_input(arguments, schema)
         if error is not None:
+            if name == 'review_memory_knowledge' and isinstance(arguments, dict) and 'group_id' not in arguments:
+                from ember.knowledge_review import REVIEW_RETRY_HINT
+                error['hint'] = REVIEW_RETRY_HINT
             return types.CallToolResult(isError=True, content=[types.TextContent(
                 type="text", text=json.dumps(error, ensure_ascii=False))])
     svc = CURRENT_SERVICE.get()
@@ -375,6 +363,7 @@ async def _hook_turn_start(request: Request, *, historical=False) -> JSONRespons
         context_message_ids=body.get("context_message_ids"),
         revoked_message_ids=body.get("revoked_message_ids"),
         visible_event_ids=body.get("visible_event_ids"),
+        visible_knowledge_ids=body.get("visible_knowledge_ids"),
         historical=historical))
 
 
@@ -392,7 +381,9 @@ async def _cc_hook(request: Request) -> JSONResponse:
         return JSONResponse({"code": "invalid_arguments"}, status_code=400)
     args = [body.get("cc_session"), body.get("recall_id")]
     if request.path_params["action"] == "start":
-        result = await asyncio.to_thread(svc.cc_turn_start, *args, body.get("anchor"), body.get("private_anchor"))
+        result = await asyncio.to_thread(svc.cc_turn_start, *args, body.get("anchor"),
+                                         body.get("private_anchor"), body.get("context_message_ids"),
+                                         body.get("visible_event_ids"), body.get("visible_knowledge_ids"))
     elif request.path_params["action"] == "end":
         result = await asyncio.to_thread(svc.cc_turn_end, *args)
     else:

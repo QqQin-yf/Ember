@@ -39,6 +39,9 @@ class Extraction:
                 CREATE TABLE IF NOT EXISTS parts(
                 id TEXT PRIMARY KEY,group_id TEXT,ordinal INTEGER,payload TEXT,
                 conclusion TEXT,result_ids TEXT,delivered INTEGER DEFAULT 0);
+                CREATE TABLE IF NOT EXISTS reviewed_groups(
+                    instance TEXT NOT NULL, group_id TEXT NOT NULL, material_hash TEXT NOT NULL,
+                    PRIMARY KEY(instance,group_id,material_hash));
                 CREATE TABLE IF NOT EXISTS grouping_retries(
                 instance TEXT,slice_id TEXT,content_hash TEXT,space TEXT,
                 failures INTEGER,error TEXT,retry_at REAL,report_after INTEGER,
@@ -278,17 +281,21 @@ class Extraction:
                              (part['part_id'],gid,i,encoded(part)))
             conn.execute('UPDATE groups SET payload=?,material_hash=? WHERE id=?',(encoded(payload),digest,gid))
 
-    def batch(self,scope=None):
-        config=SliceEmbeddingConfig.load();limit=lifecycle_config()['extraction']['batch_chars']
-        self.recover_outputs()
-        current={s['slice_id']:s for s in self.candidates(config)}
-        valid=self.reconcile(current)
+    def pending_groups(self, config, scope=None):
+        current = {source['slice_id']: source for source in self.candidates(config)}
+        valid = self.reconcile(current)
         if scope:
             from .extraction_pages import sources
             allowed={row['slice_id'] for row in sources(self.service,scope['source_session_id'],
                 {str(value) for value in scope['assistant_message_ids']})}
             valid=[dict(row,remaining_sources=[s for s in row['remaining_sources'] if s['slice_id'] in allowed]) for row in valid]
             valid=[row for row in valid if row['remaining_sources']]
+        return valid
+
+    def batch(self,scope=None):
+        config=SliceEmbeddingConfig.load();limit=lifecycle_config()['extraction']['batch_chars']
+        self.recover_outputs()
+        valid = self.pending_groups(config, scope)
         for row in valid:
             self.materialize(row,config,limit-2)
         units=[]

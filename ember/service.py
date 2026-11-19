@@ -695,12 +695,22 @@ class EmberService:
                         "hook timing operation=%s lock_wait_ms=%.0f execution_ms=%.0f",
                         operation, waited * 1000, elapsed * 1000)
 
-    def cc_turn_start(self, cc_session, recall_id, anchor, private_anchor=None):
+    def cc_turn_start(self, cc_session, recall_id, anchor, private_anchor=None,
+                      context_message_ids=None, visible_event_ids=None, visible_knowledge_ids=None):
         if (not identity(cc_session) or not identity(recall_id)
                 or (anchor is not None and not identity(anchor))):
             return self._generation_error("invalid_identity", "Invalid CC turn identity or anchor")
         with self._hook_lock("cc/start"):
-            request_hash = fingerprint([cc_session, anchor])
+            valid_list = lambda values, check: values is None or (
+                isinstance(values, list) and len(values) <= 50000 and all(map(check, values)))
+            if (not valid_list(context_message_ids, lambda value: type(value) is int and value > 0)
+                    or not all(valid_list(values, lambda value: identity(value) is not None)
+                               for values in (visible_event_ids, visible_knowledge_ids))):
+                return self._generation_error('invalid_identity', 'Invalid CC search context.')
+            window = {'context_message_ids': context_message_ids, 'visible_event_ids': visible_event_ids,
+                      'visible_knowledge_ids': visible_knowledge_ids}
+            request_hash = fingerprint([cc_session, anchor, window] if any(
+                value is not None for value in window.values()) else [cc_session, anchor])
             old = self.generations.generation(recall_id)
             if old is not None:
                 if old["domain"] == "cc" and old["request_hash"] == request_hash and recall_id == self._cc_recall_id:
@@ -714,6 +724,7 @@ class EmberService:
             self._generation_contexts[recall_id] = {
                 "session": session, "turn": None, "cc_session": cc_session,
                 "anchor": anchor, "private_anchor": message_seq(private_anchor),
+                "request_context": window,
             }
             return {"ok": True}
 
@@ -810,7 +821,8 @@ class EmberService:
                         context_message_ids: list[int] | None = None,
                         revoked_message_ids: list[int] | None = None,
                         historical: bool = False,
-                        visible_event_ids: list[str] | None = None) -> dict[str, Any]:
+                        visible_event_ids: list[str] | None = None,
+                        visible_knowledge_ids: list[str] | None = None) -> dict[str, Any]:
         """Persist the identity before work; commit response and effects together."""
         if type(historical) is not bool or (historical and (session_id != "main" or not recall_id)):
             return self._generation_error("invalid_arguments", "Historical registration requires main and recall_id")
@@ -820,6 +832,10 @@ class EmberService:
                 not isinstance(visible_event_ids, list) or len(visible_event_ids) > 10000
                 or any(not isinstance(eid, str) or not eid.strip() or len(eid)>256 for eid in visible_event_ids)):
             return self._generation_error("invalid_arguments", "Invalid visible Event IDs")
+        if visible_knowledge_ids is not None and (not isinstance(visible_knowledge_ids, list)
+                or len(visible_knowledge_ids) > 10000
+                or any(identity(mid) is None for mid in visible_knowledge_ids)):
+            return self._generation_error("invalid_arguments", "Invalid visible knowledge IDs")
         if revoked_message_ids is not None and (
                 not isinstance(revoked_message_ids, list)
                 or any(type(i) is not int or i < 1 for i in revoked_message_ids)
@@ -871,6 +887,8 @@ class EmberService:
             request_context["context_message_ids"] = sorted(set(context_message_ids))
         if visible_event_ids is not None:
             request_context["visible_event_ids"] = sorted(set(visible_event_ids))
+        if visible_knowledge_ids is not None:
+            request_context["visible_knowledge_ids"] = sorted(set(visible_knowledge_ids))
         semantic_context = {k: v for k, v in request_context.items()
                             if k not in ("occurred_at", "activity_revision", "window_revision") or v is not None}
         app_request_hash = fingerprint(dict(semantic_context, message=message))
@@ -965,7 +983,11 @@ class EmberService:
                     self.turn_ledger.user_msg.pop(key, None)
             session.messages.append({"role": "user", "content": message, "turn": turn,
                 "_source_session_id": sid, "_source_message_id": seq})
-            self._generation_contexts[rid] = {"session": session, "turn": turn,"request_context":request_context}
+            self._generation_contexts[rid] = {
+                "session": session, "turn": turn, "request_context": request_context,
+                "presented_event_ids": [p['event_id'] for p in out['presentations'] if p.get('event_id')],
+                "presented_knowledge_ids": [p['memory_id'] for p in out['presentations'] if p.get('memory_id')],
+            }
             self._last_context=self._generation_contexts[rid]
             self._live_turn = {"session": session, "turn": turn, "user_text": message, "recall_id": rid}
             return out
@@ -1097,6 +1119,13 @@ class EmberService:
     def sidecar_run_status(self, run_id: str) -> dict:
         return self.runs.query(run_id)
 
+    def extraction_tool_mode(self, recall_id):
+        if not recall_id:
+            return None
+        context = self._generation_contexts.get(recall_id)
+        scope = context.get('extraction_scope') if context else None
+        return scope.get('mode', 'raw') if scope is not None else None
+
     def sidecar_call_tool(self, name: str, arguments: dict,
                           recall_id: str | None = None,
                           tool_call_id: str | None = None,
@@ -1174,7 +1203,9 @@ class EmberService:
                     context=ctx, recall_id=rid, tool_call_id=cid)
                 # A read transcript stays volatile, never in the durable receipt.
                 from .knowledge_tools import VOLATILE_TOOLS
-                volatile = name == READ_SOURCE_TOOL_NAME or name in VOLATILE_TOOLS
+                volatile = (name == READ_SOURCE_TOOL_NAME or name in VOLATILE_TOOLS
+                            or (name == SEARCH_TOOL_NAME and 'scope' in arguments)
+                            or (name == 'review_memory_knowledge' and not arguments.get('group_id')))
                 self.generations.complete_call(rid, cid, result, volatile=volatile)
                 if volatile:
                     self._volatile_tool_results[(rid, cid)] = copy.deepcopy(result)
@@ -1252,6 +1283,9 @@ class EmberService:
                               context: dict | None = None,
                               recall_id: str | None = None,
                               tool_call_id: str | None = None) -> dict:
+        if name == 'set_memory_pin':
+            from .tool_catalog import set_memory_pin
+            return set_memory_pin(self, arguments)
         if name == 'set_private':
             from .privacy import dispatch
             active = context or self._live_turn or {}
@@ -1316,7 +1350,8 @@ class EmberService:
         if name == REVISE_TOOL_NAME:
             return self.sidecar_revise_memory_event(arguments,context)
         if name == READ_SOURCE_TOOL_NAME:
-            return self.sidecar_read_memory_source(arguments.get("event_id") or "")
+            from .tool_catalog import read_memory_source
+            return read_memory_source(self, arguments)
         if name == SEARCH_TOOL_NAME:
             return self.sidecar_search_memory(arguments, context)
         if name == PIN_TOOL_NAME:
@@ -1777,6 +1812,12 @@ class EmberService:
             return {"status": "failed",
                     "error": ("time_range 解析失败：用「昨天/上周/最近3天」"
                               "等相对表达或 ISO 起止（a..b）")}
+        scope = args.get('scope')
+        if scope == 'source':
+            from .search_locator import search_sources
+            return search_sources(self, query, k, tr, context)
+        if scope not in (None, 'event'):
+            return self._generation_error('invalid_search_scope', 'Choose event or source.')
         notes: list[str] = []
         if k_note:
             notes.append(k_note)
@@ -1861,6 +1902,9 @@ class EmberService:
 
             pool = [(eid, s) for eid, s in pool if _in(eid)]
 
+        if scope == 'event':
+            from .search_locator import locate_memories
+            return locate_memories(self, query, pool, events, lexical, k, tr, context)
         total = len(pool)
         top = pool[:k]
         if total > k:

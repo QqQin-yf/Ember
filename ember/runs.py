@@ -288,7 +288,7 @@ class RunStore:
                     return failure("run_finished", "Run is terminal or finishing; new tools are forbidden")
                 if run_id not in self.live:
                     return failure("run_context_lost", "Restarted runs cannot reopen execution; reconcile/finish instead")
-                if name not in READ_TOOLS:
+                if name not in READ_TOOLS or {'knowledge_id', 'slice_ids'}.intersection(arguments):
                     return failure("run_tool_not_allowed", "Only read_memory_source is available; search_memory has side effects and writes are not supported")
                 db.execute("INSERT INTO run_calls VALUES (?,?,?,?,'in_progress',NULL,NULL)",(run_id,call_id,name,digest))
             try:
