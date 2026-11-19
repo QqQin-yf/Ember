@@ -117,7 +117,7 @@ POST /mcp/ 和 POST /mcp/cc/ 使用 MCP Streamable HTTP。普通对话的 tools/
 |---|---|
 | write_event / write_promise / revise_memory_event | 写入 Event、约定及订正 Event |
 | search_memory | 传 `scope: "event"` 检索 Event、认知或规律，传 `scope: "source"` 检索原文切片 |
-| read_memory_source | 按 `event_id`、`knowledge_id` 或 `slice_ids` 读取来源，三者选一 |
+| read_memory_source | 按 `event_id`、`knowledge_id`、`slice_id` 或 `slice_ids` 读取来源，只填一项 |
 | set_memory_pin / list_memory_pins / merge_memory_events | 设置 pin、查看清单和额度、合并同义的 10 分无 due 约定 |
 | list_pending_promises / process_promise | 查看和处理约定 |
 | write_memory_knowledge / list_memory_knowledge / set_identity_profile | 写入和查看认知与规律、更新认知卡 |

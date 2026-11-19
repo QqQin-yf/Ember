@@ -41,7 +41,14 @@ class KnowledgeMCPTests(unittest.TestCase):
                 self.assertIn('write_memory_knowledge',names)
                 self.assertNotIn('get_memory_extraction_batch',names)
                 self.assertNotIn('read_memory_slices',names)
-                self.assertIn('read_memory_source',names)
+                read_schema=next(tool['inputSchema'] for tool in listed['result']['tools'] if tool['name']=='read_memory_source')
+                self.assertIn('slice_id',read_schema['properties'])
+                search = next(tool for tool in listed['result']['tools'] if tool['name'] == 'search_memory')
+                self.assertIn('曾经说过的话，用 scope=source', search['description'])
+                self.assertIn('约定、认知或规律，用 scope=event', search['description'])
+                properties = search['inputSchema']['properties']
+                self.assertIn('原词、短语或句子', properties['query']['description'])
+                self.assertIn('单日 2026-11-19', properties['time_range']['description'])
                 service._generation_contexts['extraction-list'] = {'extraction_scope': {}}
                 maintained = client.post('/mcp/', headers={**headers, 'X-Ember-Recall-Id': 'extraction-list'},
                                          json={'jsonrpc':'2.0','id':8,'method':'tools/list','params':{}}).json()
@@ -51,6 +58,7 @@ class KnowledgeMCPTests(unittest.TestCase):
                 cc = client.post('/mcp/cc/', headers=headers,
                                  json={'jsonrpc':'2.0','id':9,'method':'tools/list','params':{}}).json()
                 self.assertEqual({t['name'] for t in cc['result']['tools']}, names)
+                self.assertEqual(next(t for t in cc['result']['tools'] if t['name'] == 'search_memory'), search)
                 for path,method in [('link/batches','GET'),('link/progress','GET'),('link/submit','POST'),('structure/run','POST')]:
                     retired=client.request(method,'/ember/sleep/'+path,json={} if method=='POST' else None)
                     self.assertEqual(retired.status_code,410)
@@ -65,7 +73,20 @@ class KnowledgeMCPTests(unittest.TestCase):
                     self.assertEqual(response.status_code,200,response.text)
                     outer=response.json()['result']
                     return json.loads(outer['content'][0]['text']),outer.get('isError',False)
-                read,error=call('read_memory_source',{'slice_ids':[source['slice_id']]},'read')
+                from ember.slice_recall import SliceEmbeddingClient
+                query = source['messages'][0]['content']
+                with patch.dict('os.environ', {'EMBER_PRIVATE_DELAY_SECONDS': '0'}), patch.object(SliceEmbeddingClient,'embed') as embed:
+                    found,error=call('search_memory',{'query':query,'scope':'source'},'find-quote')
+                self.assertFalse(error, found)
+                embed.assert_not_called()
+                self.assertEqual(found['items'][0]['slice_id'], source['slice_id'])
+                hit_id=found['items'][0]['slice_id']
+                read,error=call('read_memory_source',{'slice_id':hit_id},'read')
+                self.assertEqual((read,error),call('read_memory_source',{'slice_ids':[hit_id]},'read-bulk'))
+                self.assertEqual(read['slices'][0]['messages'],source['messages'])
+                invalid,mixed_error=call('read_memory_source',{'slice_id':hit_id,'slice_ids':[hit_id]},'read-mixed')
+                self.assertTrue(mixed_error)
+                self.assertEqual(invalid['code'],'invalid_source_target')
                 self.assertFalse(error)
                 self.assertIn('午饭',read['slices'][0]['messages'][0]['content'])
                 args={'confidence':8,'kind':'pattern','content':'倾向于固定午饭选择以减少决策负担','recall_cues':['黄焖鸡'],

@@ -264,8 +264,12 @@ def scoped_arguments(service, context, name, arguments):
                 'assistant_message_ids': selected['assistant_message_ids']}
     if name in ('write_event', 'write_promise', 'write_memory_knowledge') and not args.get('source_slice_ids'):
         raise ValueError('extraction_requires_source_slices')
-    if name == 'read_memory_source' and args.get('slice_ids') and not set(args['slice_ids']) <= allowed:
-        raise ValueError('extraction_sources_outside_page')
+    if name == 'read_memory_source':
+        requested = set(args.get('slice_ids') or ())
+        if args.get('slice_id'):
+            requested.add(args['slice_id'])
+        if requested - allowed:
+            raise ValueError('extraction_sources_outside_page')
     if args.get('source_slice_ids') and not set(args['source_slice_ids']) <= allowed:
         raise ValueError('extraction_sources_outside_page')
     if name == 'finish_memory_extraction_group':

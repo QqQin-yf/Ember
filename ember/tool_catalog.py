@@ -24,18 +24,34 @@ _LEGACY_NAMES = {'pin_memory', 'unpin_memory', 'set_knowledge_pin',
 def _advertised(legacy):
     specs = deepcopy(legacy)
     search = specs['search_memory']
-    search['description'] = '定位上下文以外的记忆或原文。返回命中数、条目 ID、日期和原话片段。选中后用 read_memory_source 阅读完整出处。'
-    search['parameters']['properties']['scope'] = {
+    search['description'] = (
+        '定位当前上下文以外的记忆或对话原话。找她或你曾经说过的话，用 scope=source，'
+        '即使那段对话还没整理成记忆也能搜。找已记下的经历、约定、认知或规律，用 scope=event。'
+        '知道日期时可同时传 time_range。返回命中数、条目 ID、日期和原话片段，'
+        '原话命中后，把返回的 slice_id 原样传给 read_memory_source，就能读到完整切片。')
+    search_properties = search['parameters']['properties']
+    search_properties['scope'] = {
+        'type': 'string',
         'enum': ['event', 'source'],
-        'description': 'event 搜 Event、认知和规律；source 搜原文切片。'}
+        'description': '必填。source 搜对话原文切片；event 搜已整理的 Event、约定、认知和规律。'}
+    search_properties['query']['description'] = (
+        'source 优先传记得的原词、短语或句子，文字查不到时才向量补搜。'
+        'event 可传经历或想法的自然语言描述，也可用简报中的文字。')
+    search_properties['time_range']['description'] = (
+        '可选，和 query 一起过滤，两种 scope 都可用。可传单日 2026-11-19、'
+        '日期范围 2026-11-17/2026-11-19、带时区的 ISO 起止，或相对日期如最近3天。')
+    search_properties['k']['description'] = '可选，最多返回多少条定位结果。默认 3，上限 5。'
     search['parameters']['required'].append('scope')
     source = specs['read_memory_source']
-    source['description'] = '读选中记忆或切片的出处。event_id、knowledge_id 或 slice_ids 三选一。'
+    source['description'] = (
+        '读完整来源。从原话搜索选中一条时，直接传结果中的 slice_id。'
+        'event_id、knowledge_id、slice_id、slice_ids 只填一项。')
     source['parameters']['required'] = []
     source['parameters']['properties'].update(
         knowledge_id={'type': 'string', 'minLength': 1},
+        slice_id={'type': 'string', 'minLength': 1, 'description': '原话搜索返回的一条切片 ID。'},
         slice_ids={'type': 'array', 'items': {'type': 'string', 'minLength': 1},
-                   'minItems': 1, 'maxItems': 100, 'uniqueItems': True})
+                   'minItems': 1, 'maxItems': 100, 'uniqueItems': True, 'description': '要批量读取的切片 ID。'})
     specs['set_memory_pin'] = {
         'name': 'set_memory_pin',
         'description': '设置或取消记忆在简报中的常驻。event 含约定；knowledge 含认知和规律。Event 仅在用户要求时钉住。',
@@ -90,14 +106,16 @@ def set_memory_pin(service, args):
 
 
 def read_memory_source(service, args):
-    keys = [key for key in ('event_id', 'knowledge_id', 'slice_ids') if args.get(key)]
-    if len(keys) != 1:
-        return service._generation_error('invalid_source_target', 'Choose exactly one of event_id, knowledge_id or slice_ids.')
+    keys = [key for key in ('event_id', 'knowledge_id', 'slice_id', 'slice_ids') if key in args]
+    if len(keys) != 1 or not args[keys[0]]:
+        return service._generation_error(
+            'invalid_source_target', 'Choose exactly one of event_id, knowledge_id, slice_id or slice_ids.')
     key = keys[0]
     if key == 'event_id':
         return service.sidecar_read_memory_source(args[key])
-    if key == 'slice_ids':
-        return knowledge_tools.dispatch(service, 'read_memory_slices', {key: args[key]})
+    if key in ('slice_id', 'slice_ids'):
+        ids = [args['slice_id']] if key == 'slice_id' else args['slice_ids']
+        return knowledge_tools.dispatch(service, 'read_memory_slices', {'slice_ids': ids})
     store = KnowledgeStore(service.store.root, service.source_instance)
     item = next((row for row in store.all() if row['memory_id'] == args[key]), None)
     if item is None:
