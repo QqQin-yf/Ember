@@ -125,6 +125,62 @@ class GenerationTests(unittest.TestCase):
         self.assertEqual(self.svc.sidecar_call_tool("write_event", args, domain="cc")["code"], "cc_turn_missing")
         self.assertEqual(self.svc.generations.generation("app-two")["state"], "running")
 
+    def test_current_cc_write_waits_for_registered_final_reply_and_replays_receipt(self):
+        from ember.cc_deferred_writes import settle
+        user, reply = '开始整理今早的窗口', '这个版本交给你保관'
+        self.svc.cc_turn_start('window', 'live-cc', 'old-leaf', deferred_writes=True)
+        args = write_args(quote_spans=[{'start_quote': user, 'end_quote': '这个版本交给你保管'}])
+        args['event']['focus'] = reply
+        queued = self.svc.sidecar_call_tool('write_event', args, domain='cc')
+        self.assertEqual(queued['status'], 'pending_source')
+        self.assertEqual(self.svc.sidecar_call_tool('write_event', args, domain='cc'), queued)
+        self.assertFalse(self.svc.store.all_events())
+        narrow = write_args(quote_spans=[{'start_quote': '这段完全不存在', 'end_quote': '另一段也没有出现'}])
+        narrow['event']['focus'] = user
+        narrow_receipt = self.svc.sidecar_call_tool('write_event', narrow, domain='cc')['cc_write_receipt']
+        body = {'cc_session': 'window', 'receipt_id': queued['cc_write_receipt'],
+                'historical_recall_id': 'history-cc', 'anchor': 'assistant-native'}
+        self.assertEqual(settle(self.svc, body)['code'], 'cc_history_not_ready')
+        self.svc.cc_turn_end('window', 'live-cc')
+        opened = self.svc.hook_turn_start('main', user, user_message_id=101,
+                                          recall_id='history-cc', historical=True)
+        self.assertTrue(self.svc.hook_turn_end('main', reply, opened['turn'],
+                                              assistant_message_id=102, recall_id='history-cc')['ok'])
+        originals = [[{'message_id': 102, 'role': 'assistant', 'content': reply},
+                      {'message_id': 101, 'role': 'user', 'content': user}]]
+        restarted = EmberService(EmberStore(self.tmp.name), MockLLMClient())
+        with patch('ember.source_client.iter_source_branch', return_value=originals) as fetch:
+            result = settle(restarted, body)
+            self.assertEqual(result['outcome'], 'created', result)
+            self.assertEqual(settle(restarted, body), result)
+            fetch.assert_called_once_with('main', 'assistant-native', instance='default')
+        self.assertEqual(str(restarted.store.get_event(result['event_id']).focus), '102')
+        self.assertEqual(settle(restarted, {**body, 'anchor':'other'})['code'], 'cc_write_receipt_conflict')
+        self.assertEqual(len(restarted.store.all_events()), 1)
+        with patch('ember.source_client.iter_source_branch', return_value=originals):
+            one_anchor = settle(restarted, {**body, 'receipt_id':narrow_receipt})
+        self.assertEqual(one_anchor['outcome'], 'created', one_anchor)
+        evidence = restarted.event_sources.get(one_anchor['event_id'])
+        self.assertEqual(evidence['source_messages'], [{'message_id':'101','role':'user'}])
+        with patch('ember.service.read_messages', return_value=[{'turn': opened['turn'],
+                   'content': user, 'role': 'user'}]) as read:
+            self.assertIn(user, restarted.read_source_event(one_anchor['event_id'])['transcript'])
+        self.assertEqual([row['message_id'] for row in read.call_args.args[1]], ['101'])
+
+    def test_cc_anchor_matching_prefers_exact_and_keeps_single_anchor_narrow(self):
+        from ember.cc_quote_matching import resolve_spans
+        rows = [{'content': text} for text in (
+            '开场白', '从这里开个头', '这句来保管版本', '在这里结束',
+            '这句来保管版本', '在这里结束', '后来无关的话')]
+        selected, focus = resolve_spans([{'start_quote': '从这里开个头', 'end_quote': '在这里结束'}],
+                                       '这句来保官版本', rows)
+        self.assertEqual(selected, rows[1:4])
+        self.assertIs(focus, rows[2])
+        selected, focus = resolve_spans([{'start_quote': '找不到的起点', 'end_quote': '无关的结束句'}],
+                                       '从这里开个头', rows)
+        self.assertEqual(selected, [rows[1]])
+        self.assertIs(focus, rows[1])
+
     def test_hook_timing_separates_lock_wait_and_execution(self):
         with patch("ember.service.time.monotonic", side_effect=[0, 1.25, 1.5]):
             with self.assertLogs("ember.service", level="WARNING") as logs:

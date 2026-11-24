@@ -47,7 +47,7 @@ class EventSourceStore:
                 session_id: str, spans: list[tuple[int, int]],
                 corpus: list[dict], writer_recall_id: str | None = None,
                 writer_tool_call_id: str | None = None,
-                writer_turn: int | None = None) -> None:
+                writer_turn: int | None = None, *, exact_message_bounds: bool = False) -> None:
         if event_id in self._records:
             return
         turns = sorted({turn for lo, hi in spans
@@ -77,7 +77,7 @@ class EventSourceStore:
             messages.append(item)
         pending = [{"turn": m["turn"], "user_message_id": m["user_message_id"],
                     "pending_source_recall_id": writer_recall_id}
-                   for m in messages if writer_recall_id and m["turn"] == writer_turn
+                   for m in messages if not exact_message_bounds and writer_recall_id and m["turn"] == writer_turn
                    and m["user_message_id"] and not m["assistant_message_id"]
                    and not any(r.get("turn") == m["turn"] and r.get("role") == "assistant"
                                for r in corpus)]
@@ -86,6 +86,10 @@ class EventSourceStore:
                "source_turn_spans": [list(span) for span in spans],
                "turn_messages": messages, "identity_verified": identity_verified,
                "pending_sources": pending}
+        if exact_message_bounds:
+            row["exact_message_bounds"] = True
+            row["source_messages"] = [
+                {"message_id": message_seq(m["_source_message_id"]), "role": m["role"]} for m in corpus]
         if writer_recall_id is not None:
             row["writer_recall_id"] = writer_recall_id
             row["writer_tool_call_id"] = writer_tool_call_id
@@ -121,8 +125,8 @@ def event_reference(event, presentation: str, sources: EventSourceStore,
         reason = "source_span_missing"
     elif frozen is None or evidence == "unverified_corpus":
         reason = "source_path_unknown"
-    elif any(not m.get("user_message_id") or not m.get("assistant_message_id")
-             for m in messages):
+    elif not frozen.get('exact_message_bounds') and any(
+            not m.get("user_message_id") or not m.get("assistant_message_id") for m in messages):
         reason = "source_seq_missing"
     else:
         # Exact IDs are not proof of a parent path. Only app can resolve it.
@@ -132,4 +136,6 @@ def event_reference(event, presentation: str, sources: EventSourceStore,
             "presentation": presentation, "source_session_id": sid,
             "source_turn_spans": spans, "turn_messages": messages,
             "source_evidence": evidence, "resolution": "unresolved",
-            "reason": reason, "source_leaf_id": None, "message_ids": None}
+            "reason": reason, "source_leaf_id": None, "message_ids": None,
+            **({"source_messages": frozen['source_messages']}
+               if frozen and frozen.get('source_messages') and evidence == 'frozen_messages' else {})}

@@ -144,6 +144,8 @@ revise_memory_event 仅在原文完整保留于当前上下文、尚未截断的
 
 write_event / write_promise 可选 supersedes 指向被取代的旧日常、项目、约定；旧内容保留，以 superseded_by 与取代关系退出自动召回。新旧任一端为 relationship 都拒绝此参数；关系只写新的接续。未知目标在任何写入前拒绝。
 
+CC 启用延后写入时，引用对话的 `write_event` 或 `write_promise` 返回 `status=pending_source` 和 `cc_write_receipt`。CC Stop 按原 transcript 的工具调用关系把回执绑定到原始轮次，Deliz 在来源登记后触发 Ember 自动写入。重复回执返回同一结果。定位沿当前已登记的来源路径，优先逐字匹配，再允许附近的少量字差。只定位到一条消息时，来源只记录这条消息。
+
 ### 5.2 约定处理
 
 list_pending_promises 返回真正进过上下文而尚未写 log 的约定及其原文 span、时间、进入路径；process_promise 要求 event_id 和非空 log，可选 status=done/dropped、due=带时区 ISO 日期时间或 null。普通未 pin 的未曝光约定不能通过该工具修改；pinned promise 可主动处理。写 log 后才确认处理完；状态不变也必须写。追加 log 与曝光回执可在重启后核对恢复。

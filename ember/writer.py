@@ -36,7 +36,7 @@ def build_tools_spec(strict=False):
         "source_slice_ids":{"type":"array","minItems":1,"uniqueItems":True,"items":{"type":"string","minLength":1},"description":"从提取材料写入时提供切片 ID；与 quote_spans 二选一。写入成功后这些来源切片在提取队列里自动结掉，无需再报 written。"}}
     props["entity"] = {
         "type": "object", "additionalProperties": False, "required": ["state"],
-        "description": "非关系事件的对象判断。参考简报中的 Entity 目录，确认同一对象就填写已有 ID。",
+        "description": "可选。event.kind 为 relationship 时省略整个 entity 字段。其他事件可参考简报中的 Entity 目录，确认同一对象就填写已有 ID。",
         "properties": {
             "state": {"enum": ["linked", "proposed", "unresolved", "none"],
                       "description": "linked 已认出；proposed 提议新对象；unresolved 有对象但认不出；none 无需关联。"},
@@ -57,8 +57,8 @@ def build_tools_spec(strict=False):
     pe=promise['properties']['event']; pe['properties']['kind']={"const":"promise"}
     pe['properties']['due']={"type":["string","null"],"description":"具体 ISO 日期时间；无明确时间则 null。"}
     # Status and log are maintained by Ember, never supplied on initial write.
-    return [spec(TOOL_NAME,"答应了、说好了、约好了的事，用 write_promise。记录日常、关系或项目经历。先判断发生了哪些独立事件，再分别填重要度。系统生成 ID 和时间。来源二选一。旧条过了冷静期时写新条并用 supersedes 取代；关系只接续不取代。成功后不要重复写。",schema),
-            spec(PROMISE_TOOL_NAME,"日常、关系、项目，用 write_event。记录单方面承诺或双方约定；kind 固定为 promise，状态初始 open，log 由处理工具追加。取代旧记忆可提供 supersedes；旧条保留可查。",promise),
+    return [spec(TOOL_NAME,"答应了、说好了、约好了的事，用 write_promise。记录日常、关系或项目经历。先判断发生了哪些独立事件，再分别填重要度。系统生成 ID 和时间。来源二选一。旧条过了冷静期时写新条并用 supersedes 取代；关系只接续不取代。写 relationship 时省略整个 entity 字段。收到 pending_source 表示已接收，同步本轮原文后自动处理，无需重试。",schema),
+            spec(PROMISE_TOOL_NAME,"日常、关系、项目，用 write_event。记录单方面承诺或双方约定；kind 固定为 promise，状态初始 open，log 由处理工具追加。取代旧记忆可提供 supersedes；旧条保留可查。收到 pending_source 表示已接收，同步本轮原文后自动处理，无需重试。",promise),
             spec(READ_SOURCE_TOOL_NAME,"读取记忆对应的原文，核对具体说法或细节。",{"type":"object","additionalProperties":False,"required":["event_id"],"properties":{"event_id":{"type":"string"}}})]
 
 
@@ -105,6 +105,8 @@ def validate_writer_arguments(args, *, promise=None):
     if error:
         return _invalid_writer(error['field'],error['error'],error['hint'])
     event=args['event']
+    if event['kind'] == 'relationship' and args.get('entity') == {'state': 'none'}:
+        args = {key: value for key, value in args.items() if key != 'entity'}
     if 'entity' in args:
         entity = args['entity']
         state = entity['state']
@@ -114,7 +116,9 @@ def validate_writer_arguments(args, *, promise=None):
             'unresolved': {'state', 'name'},
             'none': {'state'},
         }[state]
-        if (event['kind'] == 'relationship' or set(entity) - allowed
+        if event['kind'] == 'relationship':
+            return _invalid_writer('entity', '关系事件不绑定 Entity。', '保留 event.kind=relationship，删除整个 entity 字段。')
+        if (set(entity) - allowed
                 or (state == 'linked' and 'ids' not in entity)
                 or (state == 'proposed' and not entity.get('name', '').strip())
                 or ('name' in entity and not entity['name'].strip())):

@@ -231,9 +231,14 @@ class EmberService:
         # quote_spans 必填非空（writer.validate 封死省略路径）——粗锚点只
         # 作为旧事件的查询时降级存在，新事件一律带真实时间坐标。
         quote_spans = validated["quote_spans"]
+        exact_focus = None
         if cc_context is None:
             corpus = self._quote_corpus(session) if quote_corpus is None else quote_corpus
             span_pairs = spans_from_quotes(quote_spans, corpus)
+        elif 'resolved_evidence' in cc_context:
+            corpus, exact_focus = cc_context['resolved_evidence']
+            span_pairs = [(number, number) for number in sorted({row['turn'] for row in corpus})]
+            turn = corpus[0]['turn']
         else:
             corpus, span_pairs = self._cc_quote_evidence(cc_context["anchor"], quote_spans)
             turn = span_pairs[0][0]
@@ -241,12 +246,15 @@ class EmberService:
             raise QuoteSourceError(getattr(corpus, "issue", None) or "quote_not_found")
 
         event = self._build_event(session, turn, validated["event"])
-        self._validate_focus(event, corpus, span_pairs)
+        if exact_focus is None:
+            self._validate_focus(event, corpus, span_pairs)
+        else:
+            event.focus = exact_focus["_source_message_id"]
 
         self.event_sources.capture(
             event.event_id, event.version_id, session.session_id, span_pairs, corpus,
             writer_recall_id=writer_recall_id, writer_tool_call_id=writer_tool_call_id,
-            writer_turn=turn)
+            writer_turn=turn, exact_message_bounds=exact_focus is not None)
         from .privacy import Privacy
         policy = Privacy(self.store.root)
         evidence = self.event_sources.get(event.event_id)
@@ -365,11 +373,14 @@ class EmberService:
         turns = sorted({t for lo, hi in ref["source_turn_spans"] for t in range(lo, hi + 1)})
         messages = {m["turn"]: m for m in ref["turn_messages"]}
         identities = []
+        exact_message_bounds = bool((self.event_sources.get(resolved) or {}).get('exact_message_bounds'))
         for turn in turns:
             item = messages.get(turn, {})
             for role, field in (("user", "user_message_id"), ("assistant", "assistant_message_id")):
                 seq = message_seq(item.get(field))
                 if seq is None:
+                    if exact_message_bounds:
+                        continue
                     return {"status": "not_archived", "event_id": resolved,
                             "reason": "source_seq_missing"}
                 identities.append({"turn": turn, "role": role, "message_id": seq,
@@ -696,7 +707,8 @@ class EmberService:
                         operation, waited * 1000, elapsed * 1000)
 
     def cc_turn_start(self, cc_session, recall_id, anchor, private_anchor=None,
-                      context_message_ids=None, visible_event_ids=None, visible_knowledge_ids=None):
+                      context_message_ids=None, visible_event_ids=None, visible_knowledge_ids=None,
+                      deferred_writes=False):
         if (not identity(cc_session) or not identity(recall_id)
                 or (anchor is not None and not identity(anchor))):
             return self._generation_error("invalid_identity", "Invalid CC turn identity or anchor")
@@ -709,6 +721,8 @@ class EmberService:
                 return self._generation_error('invalid_identity', 'Invalid CC search context.')
             window = {'context_message_ids': context_message_ids, 'visible_event_ids': visible_event_ids,
                       'visible_knowledge_ids': visible_knowledge_ids}
+            if deferred_writes:
+                window['deferred_writes'] = True
             request_hash = fingerprint([cc_session, anchor, window] if any(
                 value is not None for value in window.values()) else [cc_session, anchor])
             old = self.generations.generation(recall_id)
@@ -724,7 +738,7 @@ class EmberService:
             self._generation_contexts[recall_id] = {
                 "session": session, "turn": None, "cc_session": cc_session,
                 "anchor": anchor, "private_anchor": message_seq(private_anchor),
-                "request_context": window,
+                "request_context": window, "cc_live_id": recall_id,
             }
             return {"ok": True}
 
@@ -1342,6 +1356,9 @@ class EmberService:
                 except (ValueError,KeyError,TypeError) as exc:
                     return {'status':'failed','code':'invalid_memory_material','error':str(exc)}
             if context is not None:
+                if 'cc_session' in context and context.get('request_context', {}).get('deferred_writes'):
+                    from .cc_deferred_writes import enqueue
+                    return enqueue(self, context, validated)
                 return self._create_memory_in_context(context["session"], context["turn"],
                     arguments, recall_id, tool_call_id,
                     quote_corpus=context.get("quote_corpus"),

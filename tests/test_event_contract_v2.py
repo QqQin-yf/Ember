@@ -32,6 +32,24 @@ class EventContractTests(unittest.TestCase):
         self.assertFalse({'create_memory_event','write_event_from_slices'} & set(names))
         self.assertTrue(build_tools_spec()[0]['function']['description'].startswith('答应了'))
 
+    def test_relationship_write_accepts_redundant_none_entity(self):
+        args = write_args()
+        args['event']['kind'] = 'relationship'
+        args['entity'] = {'state': 'none'}
+        normalized, error = validate_writer_arguments(args)
+        self.assertIsNone(error)
+        self.assertNotIn('entity', normalized)
+        self.assertEqual(args['entity'], {'state': 'none'})
+        linked = {**args, 'entity': {'state': 'linked', 'ids': ['some-entity']}}
+        _, error = validate_writer_arguments(linked)
+        self.assertEqual(error.field, 'entity')
+        self.assertIn('删除整个 entity 字段', error.hint)
+        result = self.call('write_event', args)
+        self.assertEqual(result['status'], 'created', result)
+        event = self.service.store.get_event(result['event_id'])
+        self.assertEqual(event.kind, 'relationship')
+        self.assertFalse(event.entity_refs)
+
     def test_promise_initial_state_and_integer_roundtrip(self):
         args=write_args()
         args['event'].update(kind='promise',due='2026-12-01T09:00:00+08:00')

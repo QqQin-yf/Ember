@@ -379,11 +379,15 @@ async def _cc_hook(request: Request) -> JSONResponse:
         body = None
     if not isinstance(body, dict):
         return JSONResponse({"code": "invalid_arguments"}, status_code=400)
+    if request.path_params["action"] == "settle":
+        from ember.cc_deferred_writes import settle
+        return _generation_response(await asyncio.to_thread(settle, svc, body))
     args = [body.get("cc_session"), body.get("recall_id")]
     if request.path_params["action"] == "start":
         result = await asyncio.to_thread(svc.cc_turn_start, *args, body.get("anchor"),
                                          body.get("private_anchor"), body.get("context_message_ids"),
-                                         body.get("visible_event_ids"), body.get("visible_knowledge_ids"))
+                                         body.get("visible_event_ids"), body.get("visible_knowledge_ids"),
+                                         body.get("deferred_writes") is True)
     elif request.path_params["action"] == "end":
         result = await asyncio.to_thread(svc.cc_turn_end, *args)
     else:
