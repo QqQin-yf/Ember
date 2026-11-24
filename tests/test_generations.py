@@ -36,6 +36,21 @@ class GenerationTests(unittest.TestCase):
         return self.svc.sidecar_call_tool(name, write_args() if args is None else args,
                                           recall_id=rid, tool_call_id=cid)
 
+    def test_on_demand_tool_context_keeps_message_bodies_out_and_skips_recall(self):
+        with patch.object(self.svc,'run_recall_pipeline',side_effect=AssertionError('unexpected recall')):
+            result=self.svc.hook_turn_start('s1','DO NOT COPY',user_message_id=71,recall_id='tools',
+                context_only=True,context_message_ids=[64,71],visible_event_ids=['briefing-event'])
+            self.assertEqual(result['recall_refs']['recall_id'],'tools')
+            self.assertFalse(result['injected'])
+            snapshot=self.svc.generations.snapshot('tools')
+            metadata=json.loads(snapshot['metadata_json'])
+            self.assertEqual(metadata['request_context']['visible_event_ids'],['briefing-event'])
+            self.assertNotIn('DO NOT COPY',snapshot['metadata_json'])
+            self.assertEqual(self.svc.sessions['s1'].messages,[])
+            ended=self.svc.hook_turn_end('s1','',assistant_message_id=72,recall_id='tools')
+            self.assertTrue(ended['ok'])
+            self.assertEqual(self.svc.sessions['s1'].messages,[])
+
     def test_duplicate_start_does_not_recall_allocate_or_reopen_old_context(self):
         first = self.start()
         second = self.start()

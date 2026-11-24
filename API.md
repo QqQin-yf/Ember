@@ -50,6 +50,7 @@ write_event / write_promise 需要绑定进行中的生成。
 | user_message_id | int/string | 绑定生成模式必填 | 真实全局消息 seq，不接受消息 UUID |
 | context_start_id | int/string | — | 当前窗口起点 seq：来源全在窗口内的记忆不再召回 |
 | context_message_ids | array[int/string] | — | 当前分支实际保留的精确消息 ID，可表达分离区间 |
+| context_only | bool | false | 主动记忆工具按需登记窗口时传 true，需提供 recall_id。只保存消息和简报条目的身份，跳过自动召回，可省略 message。对应的 turn_end 只需提供回复身份和生成终态。 |
 | visible_event_ids | array[string] | — | 本轮实际带入的 briefing 返回的同名字段。已呈现的 Event 跳过每轮召回，空数组表示已知没有此类 Event，省略则兼容旧调用方。重试原样携带。 |
 | recall_id | string | — | 稳定普通生成身份；启用时 session_id 也必填，重试原样携带 |
 | occurred_at | string | — | 原始发生时间，需带时区；绑定生成模式固定保存 |
@@ -245,19 +246,19 @@ X-Heart-Instance: <Ember 实例名>
 
 ### 7.2 增量流
 
-Ember 在 Event 落库后后台拉取，以及 POST /ember/briefing/refresh 时同步兜底。turn_end 提交生成完成及来源身份。GET /ember/slices/jobs/{job_id} 查询已登记的切片任务。
+Ember 在后台从提供方读取截断后的归档增量，Event 落库后也可请求同一后台任务。GET /ember/source/sync-status 查询当前实例持久游标和失败诊断，包括处理阶段、错误码、HTTP 状态、尝试次数和下一次重试的 Unix 秒数。成功页先确认游标，失败页从该游标退避重试。turn_end 提交生成完成及来源身份。GET /ember/slices/jobs/{job_id} 查询已登记的切片任务。
 
-原文提供方需要实现 GET /api/source/increment?cursor=<JSON 编码的不透明游标>&limit=<页大小>，鉴权与 X-Heart-Instance 同 /api/source/path。初始 cursor=null；返回 {cursor, has_more:boolean, turns:[{session_id, messages:[{message_id,role,content}], user_is_system?:boolean}]}。只列出已完成且由提供方验证历史分支路径的完整人机消息对，或 assistant 单条；系统用户消息由提供方显式标记。游标属于该实例的增量流，不能用当前叶节点或最大消息 ID 猜测历史分支。has_more=true 时游标必须前进；空页同样返回 cursor 与 has_more。
+原文提供方需要实现 GET /api/source/increment?archived=1&cursor=<JSON 编码的不透明游标>&limit=<页大小>，鉴权与 X-Heart-Instance 同 /api/source/path。初始 cursor=null；归档游标包含 v=2、stream、instance 和 position。返回 {cursor, has_more:boolean, turns:[{session_id, messages:[{message_id,role,content}], user_is_system?:boolean}]}。只列出已完成且由提供方验证历史分支路径的完整人机消息对，或 assistant 单条；系统用户消息由提供方显式标记。游标属于该实例的增量流，不能用当前叶节点或最大消息 ID 猜测历史分支。has_more=true 时游标必须前进；空页同样返回 cursor 与 has_more。
 
-两个触发点共用一个持久游标和排他执行锁，切片以消息身份去重；绑定、筛选和向量写入成功才推进游标，失败保留游标供重试。briefing 返回 source_sync 状态；来源或模型不可达时保留准确的已有记忆，报告 unavailable。刷新接口现会等待原文拉取与嵌入，应设置适当请求超时。
+后台任务和显式原文材料提取共用一个持久游标和排他执行锁，切片以消息身份去重。每页绑定、筛选和向量写入成功后推进游标。归档失败只延后增量同步，简报刷新独立使用已经入库的记忆。
 
 有上级的切片仅在切片自身与上级 core 分别过门槛后带出符合 kind 规则的上级 Event；不直接呈现原文。无上级且有信息量的切片才直接呈现。阈值、典型废话、页大小等见 config/lifecycle.json，可用 EMBER_LIFECYCLE_CONFIG 指定替代文件；所有嵌入仍由 config/models.json 的 embed 用途和统一网关提供。
 
 ## 8. briefing
 
-POST /ember/briefing/refresh 收 session_id、keep_from_message_id，可附精确 context_message_ids；新会话、截断和断线重进需要新简报时调用。先兜底同步原文增量、等待关系压缩/抽点，再按顺序保存完整快照：关系时间线；其他 pin 原文；近期非关系、非 promise Event（入库 48 小时内全部用 core；超过 48 小时至 96 小时，8–10 分用 core、1–7 分用 summary）；pin 的认知/规律；到期 open 约定及待处理数量。未 pin 的 10 分也受 96 小时近期窗口限制，超过窗口不永久常驻。promise 的浮现规则优先，不通过近期层提前带入未到期或无 due 约定。
+POST /ember/briefing/refresh 收 session_id、keep_from_message_id，可附精确 context_message_ids；新会话、截断和断线重进需要新简报时调用。等待关系压缩/抽点，再按顺序保存完整快照：关系时间线；其他 pin 原文；近期非关系、非 promise Event（入库 48 小时内全部用 core；超过 48 小时至 96 小时，8–10 分用 core、1–7 分用 summary）；pin 的认知/规律；到期 open 约定及待处理数量。未 pin 的 10 分也受 96 小时近期窗口限制，超过窗口不永久常驻。promise 的浮现规则优先，不通过近期层提前带入未到期或无 due 约定。
 
-`session_id` 为必填非空字符串，允许 `cc-` 前缀；`keep_from_message_id` 和 `context_message_ids` 都可省略，只传 `{"session_id":"cc-example"}` 即可刷新。窗口参数使用已配置来源的消息编号，不依赖 Deliz 特有的 leaf、活动版本或截断回调。未提供窗口参数时不排除当前窗口来源。原文增量仍由 Ember 从配置的来源拉取；来源未配置或不可达时，`source_sync` 报告 `unavailable`，继续使用已有准确记忆拼装。
+`session_id` 为必填非空字符串，允许 `cc-` 前缀；`keep_from_message_id` 和 `context_message_ids` 都可省略，只传 `{"session_id":"cc-example"}` 即可刷新。窗口参数使用已配置来源的消息编号，不依赖 Deliz 特有的 leaf、活动版本或截断回调。未提供窗口参数时不排除当前窗口来源。原文增量由 Ember 在后台拉取。简报使用已有记忆拼装，`source_sync.status` 返回 `background`。
 
 **当前耗时**：refresh 是同步完成后返回，可能超过 60 秒。它会等待同实例的刷新锁、原文同步锁和时间线后台工作；同步拉取原文的所有增量页并完成筛选、嵌入，再逐件压缩未完成的关系 Event，必要时分批抽点，最后读取 pin 原文并保存快照。耗时随积压页数、事件数、模型请求及锁等待增加，接口没有整个刷新请求的统一截止时间，也没有固定完成时长保证。
 

@@ -13,7 +13,8 @@ from ember.service import EmberService
 from ember.store import EmberStore
 from ember.slice_embedding import SliceEmbeddingConfig, SliceEmbeddingError
 from ember.slice_policy import passing_parents, prepare_slices
-from ember.source_sync import db, request_sync, sync_increment
+from ember.source_sync import db, request_sync, source_sync_status, sync_increment
+from ember.source_client import SourceUnavailable
 from ember.turn_slices import TurnSliceStore
 
 
@@ -55,8 +56,32 @@ class IncrementalSliceTests(unittest.TestCase):
             self.assertEqual(sync_increment(self.service)['status'],'unavailable')
         with db(self.tmp.name) as conn:
             self.assertIsNone(conn.execute('SELECT cursor FROM sync').fetchone()[0])
-        with patch('ember.source_client.fetch_source_increment',side_effect=self.page):
+        retry_at=source_sync_status(self.service)['retry_at']
+        with patch('ember.source_client.fetch_source_increment',side_effect=self.page), \
+             patch('ember.source_sync.time.time',return_value=retry_at):
             self.assertEqual(sync_increment(self.service)['status'],'ok')
+
+    def test_archive_acknowledges_pages_and_backs_off_at_the_failed_cursor(self):
+        cursor1={'v':2,'instance':'default','stream':'archive','position':1}
+        cursor2=dict(cursor1,position=2)
+        first={'cursor':cursor1,'has_more':True,'turns':[self.turn()]}
+        final={'cursor':cursor2,'has_more':False,'turns':[self.turn(seq=3)]}
+        failure=SourceUnavailable('fixture','source_increment_rejected',503)
+        with patch('ember.source_client.fetch_source_increment',side_effect=[first,failure,failure,final]) as fetch:
+            with patch('ember.source_sync.time.time',return_value=1000):
+                self.assertEqual(sync_increment(self.service)['retry_at'],1010)
+                status=source_sync_status(self.service)
+                self.assertEqual(status['cursor'],cursor1)
+                self.assertEqual(status['failure'],{'phase':'fetch','code':'source_increment_rejected',
+                                                    'http_status':503,'attempts':1})
+                self.assertEqual(sync_increment(self.service)['retry_at'],1010)
+                self.assertEqual(fetch.call_count,2)
+            with patch('ember.source_sync.time.time',return_value=1010):
+                self.assertEqual(sync_increment(self.service)['retry_at'],1030)
+            with patch('ember.source_sync.time.time',return_value=1030):
+                self.assertEqual(sync_increment(self.service)['cursor'],cursor2)
+        self.assertEqual([call.args[0] for call in fetch.call_args_list],[None,cursor1,cursor1,cursor1])
+        self.assertIsNone(source_sync_status(self.service)['failure'])
 
     def test_revoke_before_recall_and_increment_cannot_restore_old_turn(self):
         store = TurnSliceStore(self.tmp.name)

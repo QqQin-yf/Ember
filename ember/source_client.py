@@ -26,7 +26,7 @@ def fetch_source_increment(cursor=None, *, instance='default', limit=100):
     """Provider-owned opaque cursor over completed, path-validated source turns."""
     if not SOURCE_URL:
         raise SourceUnavailable('Source not configured','source_unconfigured')
-    query=urllib.parse.urlencode({'cursor':json.dumps(cursor),'limit':limit})
+    query=urllib.parse.urlencode({'cursor':json.dumps(cursor),'limit':limit,'archived':1})
     request=urllib.request.Request(SOURCE_URL.rstrip('/')+'/api/source/increment?'+query)
     request.add_header('X-Heart-Instance',instance)
     if SOURCE_TOKEN:
@@ -39,10 +39,18 @@ def fetch_source_increment(cursor=None, *, instance='default', limit=100):
         exc.close()
         raise SourceUnavailable('Source increment rejected','source_increment_rejected',status) from None
     except (OSError,ValueError) as exc:
-        raise SourceUnavailable('Source increment unavailable','source_unreachable') from None
+        reason=getattr(exc,'reason',exc)
+        code='source_timeout' if isinstance(reason,TimeoutError) else (
+            'source_increment_invalid' if isinstance(exc,ValueError) else 'source_unreachable')
+        raise SourceUnavailable('Source increment unavailable',code) from None
     if (not isinstance(data,dict) or 'cursor' not in data or not isinstance(data.get('turns'),list)
             or type(data.get('has_more')) is not bool or (data['has_more'] and data['cursor']==cursor)):
         raise SourceUnavailable('Invalid source increment','source_increment_invalid')
+    archived = data['cursor']
+    if (not isinstance(archived, dict) or archived.get('v') != 2 or archived.get('instance') != instance
+            or not isinstance(archived.get('stream'), str) or not archived['stream']
+            or type(archived.get('position')) is not int or archived['position'] < 0):
+        raise SourceUnavailable('Archive protocol not supported','archive_format_unsupported')
     revoked = data.get('revoked', [])
     if not isinstance(revoked, list) or any(
             not isinstance(row, dict) or not isinstance(row.get('session_id'), str)

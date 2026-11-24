@@ -344,8 +344,12 @@ async def _hook_turn_start(request: Request, *, historical=False) -> JSONRespons
         body = await request.json()
     except Exception:
         body = {}
+    context_only = body.get("context_only", False)
+    if type(context_only) is not bool:
+        return _generation_response({"status":"failed","code":"invalid_arguments",
+                                     "error":"context_only must be boolean"})
     message = str(body.get("message") or "")
-    if not message.strip():
+    if not context_only and not message.strip():
         if "recall_id" in body:
             return _generation_response({"status": "failed", "code": "invalid_identity",
                                          "error": "A real user message is required"})
@@ -364,7 +368,7 @@ async def _hook_turn_start(request: Request, *, historical=False) -> JSONRespons
         revoked_message_ids=body.get("revoked_message_ids"),
         visible_event_ids=body.get("visible_event_ids"),
         visible_knowledge_ids=body.get("visible_knowledge_ids"),
-        historical=historical))
+        historical=historical, context_only=context_only))
 
 
 async def _cc_hook(request: Request) -> JSONResponse:
@@ -437,6 +441,14 @@ async def _private(request: Request) -> JSONResponse:
     result = await asyncio.to_thread(dispatch, svc, body, body['session_id'], body.get('anchor_message_id'),
                                      branch_anchor=body.get('branch_anchor'))
     return JSONResponse(result, status_code=400 if result.get('status') == 'failed' else 200)
+
+
+async def _source_sync_status(request: Request) -> JSONResponse:
+    svc = _service_or_404(request)
+    if isinstance(svc, JSONResponse):
+        return svc
+    from ember.source_sync import source_sync_status
+    return JSONResponse(await asyncio.to_thread(source_sync_status,svc))
 
 
 async def _slice_ingestion_status(request: Request) -> JSONResponse:
@@ -633,6 +645,7 @@ app = BearerAuthMiddleware(Starlette(
         Route("/ember/generations/{recall_id}", _generation_status, methods=["GET"]),
         Route("/ember/hooks/turn_start", _hook_turn_start, methods=["POST"]),
         Route("/ember/hooks/turn_end", _hook_turn_end, methods=["POST"]),
+        Route("/ember/source/sync-status", _source_sync_status, methods=["GET"]),
         Route("/ember/slices/jobs/{job_id}", _slice_ingestion_status, methods=["GET"]),
         Route("/ember/recall/slices/preview", _slice_recall_preview, methods=["POST"]),
         Route("/ember/recall/slices/{trace_id}", _slice_recall_trace, methods=["GET"]),

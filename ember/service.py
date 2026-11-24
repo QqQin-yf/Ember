@@ -836,8 +836,11 @@ class EmberService:
                         revoked_message_ids: list[int] | None = None,
                         historical: bool = False,
                         visible_event_ids: list[str] | None = None,
-                        visible_knowledge_ids: list[str] | None = None) -> dict[str, Any]:
+                        visible_knowledge_ids: list[str] | None = None,
+                        context_only: bool = False) -> dict[str, Any]:
         """Persist the identity before work; commit response and effects together."""
+        if type(context_only) is not bool or (context_only and (historical or not recall_id)):
+            return self._generation_error("invalid_arguments", "Context-only tools require an App recall_id")
         if type(historical) is not bool or (historical and (session_id != "main" or not recall_id)):
             return self._generation_error("invalid_arguments", "Historical registration requires main and recall_id")
         if context_message_ids is not None and (not isinstance(context_message_ids,list) or len(context_message_ids)>50000 or any(type(i) is not int or i<1 for i in context_message_ids)):
@@ -881,7 +884,7 @@ class EmberService:
                     Pins(self).acknowledge(budget['episode'])
                 return result
         rid, sid, seq = identity(recall_id), identity(session_id), message_seq(user_message_id)
-        if rid is None or sid is None or seq is None or not message.strip():
+        if rid is None or sid is None or seq is None or (not context_only and not message.strip()):
             return self._generation_error("invalid_identity", "recall_id, session_id and a real user_message_id are required")
         if any(v is not None and (isinstance(v, bool) or not isinstance(v, int) or v < 0)
                for v in (activity_revision, window_revision)):
@@ -903,6 +906,9 @@ class EmberService:
             request_context["visible_event_ids"] = sorted(set(visible_event_ids))
         if visible_knowledge_ids is not None:
             request_context["visible_knowledge_ids"] = sorted(set(visible_knowledge_ids))
+        if context_only:
+            request_context["context_only"] = True
+            message = ""
         semantic_context = {k: v for k, v in request_context.items()
                             if k not in ("occurred_at", "activity_revision", "window_revision") or v is not None}
         app_request_hash = fingerprint(dict(semantic_context, message=message))
@@ -952,12 +958,16 @@ class EmberService:
             self.turn_ledger.user_msg[key] = int(seq)
             try:
                 entries: list[dict] = []
-                rec = self.run_recall_pipeline(session, turn, message,
-                    context_start_id=context_start_id, deferred_entries=entries, context_message_ids=context_message_ids,
-                    visible_event_ids=visible_event_ids)
-                stats = {k: rec[k] for k in (
-                    "recalled_count", "entity_recalled", "entity_names", "filtered_by_sleep",
-                    "filtered_by_window", "resolved_brought", "semantic_matched", "semantic_reason")}
+                if context_only:
+                    rec = {"prefix": "", "presentations": [], "recall_refs": {"events": []}}
+                    stats = {}
+                else:
+                    rec = self.run_recall_pipeline(session, turn, message,
+                        context_start_id=context_start_id, deferred_entries=entries, context_message_ids=context_message_ids,
+                        visible_event_ids=visible_event_ids)
+                    stats = {k: rec[k] for k in (
+                        "recalled_count", "entity_recalled", "entity_names", "filtered_by_sleep",
+                        "filtered_by_window", "resolved_brought", "semantic_matched", "semantic_reason")}
                 refs = {"recall_id": rid, "session_id": sid, "anchor_message_id": seq,
                         "events": rec["recall_refs"]["events"]}
                 out = {"injected": bool(rec["prefix"]), "injected_text": rec["prefix"] or None,
@@ -980,7 +990,7 @@ class EmberService:
                             'route':p.get('route') or ('recall' if p.get('via_slice_id') else 'cue'),
                             'span':{'session_id':sid,'message_ids':[seq],'recall_id':rid},'at':_now_iso()}))
                 from .pin_policy import Pins
-                pin_budget=Pins(self).budget()
+                pin_budget={'reminder':None} if context_only else Pins(self).budget()
                 out['system_reminders']=[pin_budget['reminder']] if pin_budget['reminder'] else []
                 if pin_budget['reminder']:
                     effects.append(('pin_reminder',{'episode':pin_budget['episode']}))
@@ -995,8 +1005,9 @@ class EmberService:
             finally:
                 if key not in self.turn_ledger.all_turns:
                     self.turn_ledger.user_msg.pop(key, None)
-            session.messages.append({"role": "user", "content": message, "turn": turn,
-                "_source_session_id": sid, "_source_message_id": seq})
+            if not context_only:
+                session.messages.append({"role": "user", "content": message, "turn": turn,
+                    "_source_session_id": sid, "_source_message_id": seq})
             self._generation_contexts[rid] = {
                 "session": session, "turn": turn, "request_context": request_context,
                 "presented_event_ids": [p['event_id'] for p in out['presentations'] if p.get('event_id')],
@@ -1025,8 +1036,13 @@ class EmberService:
             seq = message_seq(assistant_message_id)
             if status not in ("done", "error", "cancelled"):
                 return self._generation_error("invalid_status", "Expected done, error or cancelled")
-            if status == "done" and (not assistant_reply.strip() or seq is None):
-                return self._generation_error("invalid_identity", "Completed dialogue needs real reply text and seq")
+            snapshot = self.generations.snapshot(rid)
+            metadata = json.loads(snapshot["metadata_json"] or "{}") if snapshot else {}
+            context_only = metadata.get("request_context", {}).get("context_only") is True
+            if context_only:
+                assistant_reply = ""
+            if status == "done" and (seq is None or (not context_only and not assistant_reply.strip())):
+                return self._generation_error("invalid_identity", "Completed dialogue needs a reply identity, and text for a recall turn")
             request_hash = fingerprint({"session_id": session_id, "turn": row["turn"],
                 "assistant_reply": assistant_reply, "assistant_message_id": seq, "status": status})
             if row["end_hash"] is not None:
@@ -1044,7 +1060,7 @@ class EmberService:
             result = {"ok": True, "session_id": session_id, "turn": row["turn"],
                       "recall_id": rid, "status": status}
             self.generations.finish(rid, status, request_hash, result, seq if status == "done" else None)
-            if status == "done" and ctx is not None and row["state"] == "running":
+            if status == "done" and not context_only and ctx is not None and row["state"] == "running":
                 ctx["session"].messages.append({"role": "assistant", "content": assistant_reply,
                     "turn": row["turn"], "_source_session_id": session_id,
                     "_source_message_id": seq, "_source_recall_id": rid})

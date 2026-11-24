@@ -22,8 +22,13 @@ class Provider(BaseHTTPRequestHandler):
                   {'message_id':'2','role':'assistant','content':'original assistant'}]
         from urllib.parse import parse_qs,urlsplit
         if urlsplit(self.path).path=='/api/source/increment':
-            cursor=json.loads(parse_qs(urlsplit(self.path).query)['cursor'][0])
-            self.respond({'cursor':'latest','has_more':False,'turns':[] if cursor else [
+            params=parse_qs(urlsplit(self.path).query)
+            if params.get('archived') != ['1']:
+                self.send_error(400)
+                return
+            cursor=json.loads(params['cursor'][0])
+            archived={'v':2,'stream':'fixture','instance':self.headers['X-Heart-Instance'],'position':1}
+            self.respond({'cursor':archived,'has_more':False,'turns':[] if cursor else [
                 {'session_id':'s','messages':messages,'user_is_system':self.server.system}]})
         else:
             self.respond({'messages':messages})

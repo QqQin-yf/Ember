@@ -20,6 +20,9 @@ def db(root):
     conn.row_factory=sqlite3.Row
     try:
         conn.execute('CREATE TABLE IF NOT EXISTS sync(instance TEXT PRIMARY KEY,cursor TEXT,requested INTEGER DEFAULT 0,completed INTEGER DEFAULT 0,retry_at REAL DEFAULT 0,error TEXT)')
+        conn.execute('''CREATE TABLE IF NOT EXISTS sync_failures(
+            instance TEXT PRIMARY KEY, phase TEXT NOT NULL, code TEXT NOT NULL,
+            http_status INTEGER, attempts INTEGER NOT NULL)''')
         with conn:
             yield conn
     finally:
@@ -32,24 +35,49 @@ def request_sync(service):
                      (service.source_instance,))
 
 
-def sync_increment(service):
-    """Hold one cursor lease across pull, derived writes and cursor advancement.
-
-    Content-addressed slice upserts make a crash before advancement replay-safe.
-    A page is acknowledged after local storage. Deferred vectors are handled by the worker.
-    """
+def source_sync_status(service):
     instance=service.source_instance
     if not source_client.configured():
         return {'status':'unavailable','code':'source_unconfigured'}
-    try:
+    with db(service.store.root) as conn:
+        row=conn.execute('SELECT cursor,retry_at FROM sync WHERE instance=?',(instance,)).fetchone()
+        failure=conn.execute('SELECT phase,code,http_status,attempts FROM sync_failures WHERE instance=?',
+                             (instance,)).fetchone()
+    return {'status':'ok','cursor':json.loads(row['cursor']) if row and row['cursor'] else None,
+            'retry_at':row['retry_at'] if row else 0,'failure':dict(failure) if failure else None}
+
+
+def _retry_page(conn, instance, phase, exc):
+    code = getattr(exc, 'code', None) or (
+        str(exc) if isinstance(exc, SliceEmbeddingError) else 'source_sync_unavailable')
+    old = conn.execute('SELECT attempts FROM sync_failures WHERE instance=?', (instance,)).fetchone()
+    attempts = (old['attempts'] if old else 0) + 1
+    delay = min(300, max(1, lifecycle_config()['slice']['retry_seconds']) * 2 ** min(attempts - 1, 8))
+    retry_at = time.time() + delay
+    conn.execute('INSERT OR REPLACE INTO sync_failures VALUES (?,?,?,?,?)',
+                 (instance, phase, code, getattr(exc, 'http_status', None), attempts))
+    conn.execute('UPDATE sync SET retry_at=?,error=? WHERE instance=?', (retry_at, code, instance))
+    return {'status': 'unavailable', 'code': code, 'retry_at': retry_at}
+
+
+def sync_increment(service):
+    """Commit each source page before proceeding, so a failed page is safe to retry."""
+    instance = service.source_instance
+    if not source_client.configured():
+        return {'status': 'unavailable', 'code': 'source_unconfigured'}
+    while True:
         with db(service.store.root) as conn:
             conn.execute('BEGIN IMMEDIATE')
-            conn.execute('INSERT OR IGNORE INTO sync(instance) VALUES (?)',(instance,))
-            row=conn.execute('SELECT * FROM sync WHERE instance=?',(instance,)).fetchone()
-            cursor=json.loads(row['cursor']) if row['cursor'] else None
-            cfg=SliceEmbeddingConfig.load()
-            while True:
-                page=source_client.fetch_source_increment(cursor,instance=instance,limit=lifecycle_config()['slice']['page_size'])
+            conn.execute('INSERT OR IGNORE INTO sync(instance) VALUES (?)', (instance,))
+            row = conn.execute('SELECT * FROM sync WHERE instance=?', (instance,)).fetchone()
+            if row['retry_at'] > time.time():
+                return {'status': 'unavailable', 'code': row['error'], 'retry_at': row['retry_at']}
+            cursor = json.loads(row['cursor']) if row['cursor'] else None
+            phase = 'fetch'
+            try:
+                page = source_client.fetch_source_increment(cursor, instance=instance,
+                    limit=lifecycle_config()['slice']['page_size'])
+                phase = 'store'
                 store = TurnSliceStore(service.store.root)
                 revoked = defaultdict(list)
                 for item in page.get('revoked', []):
@@ -58,24 +86,24 @@ def sync_increment(service):
                     store.revoke(instance, session_id, ids)
                 for item in page['turns']:
                     try:
-                        store.save(item['session_id'],item['messages'],instance=instance,
-                                   user_is_system=item.get('user_is_system',False))
+                        store.save(item['session_id'], item['messages'], instance=instance,
+                                   user_is_system=item.get('user_is_system', False))
                     except source_client.SourceUnavailable as exc:
                         if exc.code not in ('source_revoked', 'source_private'):
                             raise
-                prepare_slices(service,cfg)
-                cursor=page['cursor']
-                conn.execute('UPDATE sync SET cursor=?,completed=?,retry_at=0,error=NULL WHERE instance=?',
-                             (json.dumps(cursor),row['requested'],instance))
-                if not page['has_more']:
-                    break
-        return {'status':'ok','cursor':cursor}
-    except (source_client.SourceUnavailable,SliceEmbeddingError,ValueError,OSError,sqlite3.Error) as exc:
-        code=getattr(exc,'code','source_sync_unavailable')
-        with db(service.store.root) as conn:
-            conn.execute('UPDATE sync SET retry_at=?,error=? WHERE instance=?',
-                         (time.time()+lifecycle_config()['slice']['retry_seconds'],code,instance))
-        return {'status':'unavailable','code':code}
+                phase = 'prepare'
+                if store.path.exists():
+                    prepare_slices(service, SliceEmbeddingConfig.load())
+            except (source_client.SourceUnavailable, SliceEmbeddingError, ValueError, OSError, sqlite3.Error) as exc:
+                # Share the lock with writer/extraction requests when recording the retry.
+                return _retry_page(conn, instance, phase, exc)
+            cursor = page['cursor']
+            done = not page['has_more']
+            conn.execute('UPDATE sync SET cursor=?,completed=?,retry_at=0,error=NULL WHERE instance=?',
+                         (json.dumps(cursor), row['requested'] if done else row['completed'], instance))
+            conn.execute('DELETE FROM sync_failures WHERE instance=?', (instance,))
+        if done:
+            return {'status': 'ok', 'cursor': cursor}
 
 
 class SourceSyncWorker:
@@ -101,8 +129,8 @@ class SourceSyncWorker:
             due=now>=self.next_poll.get(name,0)
             requested=row and row['requested']>row['completed']
             if (due or requested) and (not row or row['retry_at']<=now) and source_client.configured():
-                sync_increment(service)
-                self.next_poll[name]=time.time()+30
+                result=sync_increment(service)
+                self.next_poll[name]=result.get('retry_at') or time.time()+30
                 self.last_instance=name
                 return True
         return False
